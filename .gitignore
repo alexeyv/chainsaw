@@ -1,3 +1,8 @@
 tools/bin/
 __pycache__/
 _planning/
+.grok/
+.claude/
+.agents/
+skills-lock.json
+
