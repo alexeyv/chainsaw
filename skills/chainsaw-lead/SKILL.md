@@ -83,7 +83,10 @@ measured separately (`$SUP state` shows both).
    rewrite is read after its commit; large files by line range.
 2. When the previous commit has landed, verify it — landed, no attribution trailers,
    tree clean, quality gate last in the log (#35): `$SUP verify <task-id>`
-   does the mechanical part. Then dispatch:
+   does the mechanical part. Dispatch refuses until that previous task is
+   verified. If you judged a verify failure a false positive, `$SUP accept
+   <task-id> --reason "..."` records it in `state` (not silent, not the default
+   path). Then dispatch:
    `$SUP dispatch <task-id> --to implementer-<n>`, which sends the task
    verbatim, prefixed by "these files changed since your reading turn: [...]" when the
    implementer was pre-populated, and followed by the implementer's contract (#11):
@@ -131,14 +134,17 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task 
 
 ## Stopping
 
-"Stop" means end the run for good, in a fixed order (#39). Confirm once — "are you
-sure?" yes/no — then: let the in-flight implementer finish and verify its commit (#40);
-wait for the commentator to comment on that commit (#41); write the continuation prompt
-to the run directory (#42): HEAD, the gate command and exact numbers, done/next
-derived from git not remembered, every open finding in full, judged-and-dropped findings
-with reasons, open questions, traps hit. Then `$SUP stop` and stop. Nothing
-restarts itself.
+"Stop" means end the run for good, in a fixed order (#39). Do not confirm with a
+yes/no question or AskUserQuestion — those can resolve without the human. Tell the
+human to run `$SUP confirm-stop` in their own terminal or pane (never from yours;
+you must never run it). Wait until `$SUP state` shows stop-confirmed. Only then:
+let the in-flight implementer finish and verify its commit (#40); wait for the
+commentator to comment on that commit (#41); write the continuation prompt to the
+run directory (#42): HEAD, the gate command and exact numbers, done/next derived
+from git not remembered, every open finding in full, judged-and-dropped findings
+with reasons, open questions, traps hit. Then `$SUP stop` and stop. `$SUP stop`
+refuses until confirm-stop is recorded. Nothing restarts itself.
 
 When the supervisor tells you your own context passed 250k, it is the same contract:
-confirm with the human, finish the last implementer, deal with the commentator's
-findings on it, write the continuation prompt, finished.
+wait for the human to `$SUP confirm-stop`, then finish the last implementer, deal
+with the commentator's findings on it, write the continuation prompt, finished.

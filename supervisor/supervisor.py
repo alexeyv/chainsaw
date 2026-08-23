@@ -21,14 +21,17 @@ State lives in SQLite next to the run's session logs
     supervisor.py --run-dir DIR fail TASK --reason TEXT
     supervisor.py --run-dir DIR dispatch TASK --to NAME
     supervisor.py --run-dir DIR verify TASK
+    supervisor.py --run-dir DIR accept TASK --reason TEXT
     supervisor.py --run-dir DIR calibrate TASK
     supervisor.py --run-dir DIR disposition FINDING --verdict task|dropped [--task ID] --reason TEXT
     supervisor.py --run-dir DIR config KEY [VALUE]
-    supervisor.py --run-dir DIR state | comments [--all] | context [NAME] | human-wait start|end | stop
+    supervisor.py --run-dir DIR state | comments [--all] | context [NAME] | human-wait start|end
+    supervisor.py --run-dir DIR confirm-stop | stop
 """
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -57,7 +60,7 @@ COMMENTATOR_FLAGS = ["--model", "opus", *LEAN_FLAGS]
 TRAILER_RE = re.compile(r"^(Co-Authored-By|Claude-Session):", re.M | re.I)
 COMMIT_RE = re.compile(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]")
 TASK_STATES = ["drafted", "dispatched", "in_flight", "committed", "verified",
-               "ingested", "failed"]
+               "accepted", "ingested", "failed"]
 
 CONTRACT = (
     "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's "
@@ -258,6 +261,125 @@ def bash_commands(path, offset=0):
     return [(cmd, results.get(cid, False)) for cid, cmd in calls]
 
 
+# Git plumbing that cannot change the tree the gate tested. `commit` is the
+# endpoint, not plumbing; checkout/reset/rm/mv and friends are edits.
+_GIT_PLUMBING = frozenset("""
+    add status diff rev-parse log show ls-files cat-file ls-tree
+    diff-tree rev-list name-rev symbolic-ref hash-object describe
+    version help
+""".split())
+_READONLY_CMDS = frozenset("""
+    echo printf true : ls pwd cat head tail wc test [ date cd
+""".split())
+_GITIGNORED_DIR = frozenset((
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".tox", ".coverage", ".eggs", ".cache",
+))
+_GITIGNORED_SUF = (".pyc", ".pyo", ".pyd", ".egg-info")
+_PART_SPLIT = re.compile(r"(?:\n|&&|\|\||;|\|)+")
+_FIND_WRITE = frozenset((
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0",
+))
+
+
+def _shell_parts(cmd):
+    """Split a compound bash invocation. Heuristic, not a parser."""
+    return [p.strip() for p in _PART_SPLIT.split(cmd.strip()) if p.strip()]
+
+
+def _looks_gitignored(path):
+    p = path.rstrip("/")
+    name = os.path.basename(p)
+    if name in _GITIGNORED_DIR or name.endswith(_GITIGNORED_SUF) or name.endswith("~"):
+        return True
+    return any("/" + d + "/" in "/" + p + "/" for d in _GITIGNORED_DIR)
+
+
+def _is_safe_rm(part):
+    """rm of gitignored/untracked-looking paths only; any other rm is an edit."""
+    tokens = part.split()
+    if not tokens or tokens[0] != "rm":
+        return False
+    paths, seen_dd = [], False
+    for t in tokens[1:]:
+        if not seen_dd and t == "--":
+            seen_dd = True
+            continue
+        if not seen_dd and t.startswith("-"):
+            continue
+        paths.append(t)
+    return bool(paths) and all(_looks_gitignored(p) for p in paths)
+
+
+def _git_subcommand(tokens):
+    """git [-C dir] [-c k=v] <subcommand> ... -> subcommand or None."""
+    i = 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t in ("-C", "--git-dir", "--work-tree", "-c"):
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        return t
+    return None
+
+
+def _harmless_after_gate(part):
+    """True when this shell part cannot change the tree the gate tested."""
+    cleaned = re.sub(r"\d*>\s*/dev/null", "", part)
+    if re.search(r"(^|[\s])\d*>>?", cleaned):
+        return False
+    tokens = part.split()
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return True
+    if tokens[0] == "git":
+        return _git_subcommand(tokens) in _GIT_PLUMBING
+    if tokens[0] == "find":
+        return not any(t in _FIND_WRITE or t.startswith("-fprintf") for t in tokens)
+    if tokens[0] in _READONLY_CMDS:
+        return True
+    return _is_safe_rm(part)
+
+
+def gate_last_problem(cmds, gate):
+    """None if the gate ran, passed, and nothing after it could change its result.
+
+    cmds is bash_commands() output: [(command, ok), ...]. Heuristic over the log
+    (#35): git plumbing (add/status/diff/rev-parse) and rm of gitignored-looking
+    paths may sit between the gate and `git commit`; an edit, a tracked-looking
+    rm, or a failing command may not.
+    """
+    idx = max((i for i, (c, _) in enumerate(cmds) if "git commit" in c), default=-1)
+    if idx < 0:
+        return f"no git commit in the log; gate-last unchecked ({gate!r})"
+    gate_idx = max((i for i, (c, _) in enumerate(cmds[:idx]) if gate in c), default=-1)
+    if gate_idx < 0:
+        return f"the gate ({gate!r}) did not run before the commit"
+    if not cmds[gate_idx][1]:
+        return "the gate before the commit failed (error result in the log)"
+    intervening = list(cmds[gate_idx + 1:idx])
+    before = re.split(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b", cmds[idx][0], maxsplit=1)[0].strip()
+    if before:
+        intervening.append((before, True))
+    for cmd, ok in intervening:
+        if not ok:
+            return f"a command after the gate failed: {cmd.splitlines()[0][:80]!r}"
+        for part in _shell_parts(cmd):
+            if not _harmless_after_gate(part):
+                return f"source-modifying command after the gate: {part[:80]!r}"
+    return None
+
+
+def commentator_agent_name(run_dir):
+    """Herdr agent name unique to this run dir, stable across retries."""
+    slug = hashlib.sha1(os.path.realpath(run_dir).encode()).hexdigest()[:8]
+    return f"commentator-{slug}"
+
+
 def commits_in_log(path, offset=0):
     try:
         with open(path, errors="replace") as f:
@@ -366,7 +488,8 @@ def cmd_prompt(st, name, text, wait=False, timeout=PROMPT_TIMEOUT):
         fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def cmd_start_commentator(st, role_prompt, name="commentator"):
+def cmd_start_commentator(st, role_prompt):
+    name = commentator_agent_name(st.run_dir)
     cmd_launch(st, name, role="commentator", flags=COMMENTATOR_FLAGS, split=True)
     st.set_cfg("commentator", name)
     cmd_prompt(st, name,
@@ -389,19 +512,39 @@ def cmd_task_new(st, predicted_files, predicted_lines, retry_of=None):
     print(tid)
 
 
+def predecessor_unverified(st, task_id):
+    """Message if the previous task is past in_flight but was never verified.
+
+    Failed and still-drafted predecessors do not block (retry / not-yet-started).
+    Verified or accepted (including those later ingested) do not block.
+    """
+    prev = st.one("select * from tasks where id < ? order by id desc limit 1", task_id)
+    if not prev or prev["state"] in ("drafted", "dispatched", "in_flight", "failed"):
+        return None
+    seen = {r["state"] for r in st.q("select state from task_log where task_id=?", prev["id"])}
+    if "verified" in seen or "accepted" in seen:
+        return None
+    return (f"task {prev['id']} is {prev['state']} but never verified; "
+            f"run verify {prev['id']}, or accept {prev['id']} --reason ... "
+            f"if the failure is a false positive")
+
+
 def cmd_dispatch(st, task_id, to):
     task = st.one("select * from tasks where id=?", task_id)
     if not task or task["state"] != "drafted":
         sys.exit(f"supervisor: task {task_id} is not in state drafted")
     if st.one("select 1 from tasks where state in ('dispatched','in_flight')"):
         sys.exit("supervisor: an implementer is already in flight (#33)")
+    blocked = predecessor_unverified(st, task_id)
+    if blocked:
+        sys.exit("supervisor: " + blocked)
     sess = st.one("select * from sessions where name=?", to)
     if not sess:
         sys.exit(f"supervisor: no session {to}; launch it first")
     preamble = ""
     if sess["prepopulated_at"]:
         since = st.one("select commit_sha from tasks where state in ('committed','verified',"
-                       "'ingested') order by id desc limit 1")
+                       "'accepted','ingested') order by id desc limit 1")
         if since and since["commit_sha"]:
             files = subprocess.run(["git", "-C", st.run_dir, "show", "--name-only",
                                     "--format=", since["commit_sha"]],
@@ -458,12 +601,9 @@ def cmd_verify(st, task_id):
     gate = st.cfg("gate")
     if gate and log:
         cmds = bash_commands(log, task["log_offset"] or 0)
-        idx = max((i for i, (c, _) in enumerate(cmds) if "git commit" in c), default=-1)
-        last_cmd, last_ok = cmds[idx - 1] if idx > 0 else ("", False)
-        if gate not in last_cmd:
-            problems.append(f"last command before the commit was not the gate ({gate!r})")
-        elif not last_ok:
-            problems.append("the gate before the commit failed (error result in the log)")
+        problem = gate_last_problem(cmds, gate)
+        if problem:
+            problems.append(problem)
     elif not gate:
         problems.append("gate not configured (supervisor.py config gate CMD): gate-last unchecked")
     if sha and not task["commit_sha"]:
@@ -479,6 +619,35 @@ def cmd_verify(st, task_id):
     for p in problems:
         print(" -", p)
     sys.exit(1)
+
+
+def cmd_accept(st, task_id, reason):
+    """Lead judged a verify failure a false positive; record it so dispatch may proceed.
+
+    Not the default path: requires a reason, and the task must have a commit that was
+    never verified. Visible in `state` as accepted (or as accepted@ in the timeline
+    if the commentator already ingested it).
+    """
+    task = st.one("select * from tasks where id=?", task_id)
+    if not task:
+        sys.exit(f"supervisor: no task {task_id}")
+    if not (reason or "").strip():
+        sys.exit("supervisor: accept requires a non-empty --reason")
+    seen = {r["state"] for r in st.q("select state from task_log where task_id=?", task_id)}
+    if "verified" in seen:
+        sys.exit(f"supervisor: task {task_id} is already verified")
+    if "accepted" in seen:
+        sys.exit(f"supervisor: task {task_id} is already accepted")
+    if task["state"] not in ("committed", "ingested") or not task["commit_sha"]:
+        sys.exit(f"supervisor: task {task_id} is {task['state']}, not a committed unverified task")
+    st.db.execute("update tasks set reason=? where id=?", (reason, task_id))
+    if task["state"] == "committed":
+        st.set_task_state(task_id, "accepted")
+    else:
+        # Commentator already ingested it; record the override without rolling back.
+        st.db.execute("insert into task_log values(?,?,?)", (task_id, "accepted", time.time()))
+    st.event("accepted", f"task {task_id}: {reason}")
+    print(f"task {task_id} accepted without verify: {reason}")
 
 
 def failures_in_lineage(st, task_id):
@@ -609,7 +778,9 @@ def cmd_state(st):
     open_wait = st.one("select 1 from human_waits where ended is null")
     if open_wait:
         print("  (a human wait is open)")
-    for e in st.q("select * from events where kind in ('stop-lead','kick','compact') order by at desc limit 5"):
+    if st.cfg("stop-confirmed") == "1":
+        print("stop-confirmed  (human ran confirm-stop; stop is allowed)")
+    for e in st.q("select * from events where kind in ('stop-lead','kick','compact','stop-confirmed','accepted') order by at desc limit 5"):
         print(f"  {ts(e['at'])} {e['kind']} {e['detail']}")
 
 
@@ -627,7 +798,27 @@ def cmd_human_wait(st, action):
         st.db.execute("update human_waits set ended=? where ended is null", (time.time(),))
 
 
+def cmd_confirm_stop(st):
+    """Human-only confirmation that the run may end. The lead must never call this.
+
+    Refuses when invoked from the lead's Herdr pane so an auto-answered prompt
+    cannot complete the gate. The check makes accidental self-confirmation
+    impossible, not deliberate self-confirmation. `stop` (and the skill's stop
+    sequence) wait on this.
+    """
+    pane = os.environ.get("HERDR_PANE_ID") or ""
+    lead_pane = st.cfg("lead-pane") or ""
+    if lead_pane and pane == lead_pane:
+        sys.exit("supervisor: confirm-stop must be run by the human, not from the lead's pane")
+    st.set_cfg("stop-confirmed", "1")
+    st.event("stop-confirmed", "human confirmed the run may stop")
+    print("supervisor: stop confirmed; the lead may run the stop sequence")
+
+
 def cmd_stop(st):
+    if st.cfg("stop-confirmed") != "1":
+        sys.exit("supervisor: stop is not confirmed. The human must run: "
+                 "supervisor.py --run-dir DIR confirm-stop")
     st.set_cfg("stopped", "1")
     st.event("stop", "run ended by the lead")
     print("supervisor: stopped; the daemon will exit on its next poll")
@@ -637,6 +828,8 @@ def cmd_stop(st):
 
 def daemon(st, lead):
     st.set_cfg("lead", lead)
+    if os.environ.get("HERDR_PANE_ID"):
+        st.set_cfg("lead-pane", os.environ["HERDR_PANE_ID"])
     st.db.execute("insert or ignore into sessions(name,role,started_at,last_growth) values(?,?,?,?)",
                   (lead, "lead", time.time(), time.time()))
     st.set_cfg("stopped", "0")
@@ -674,7 +867,9 @@ def daemon(st, lead):
                         st.db.execute("update sessions set kicked_at=? where name=?", (now, name))
                         cmd_prompt(st, name, NUDGE)
             elif s["role"] == "commentator":
-                pending = st.q("select * from tasks where state='verified' and commit_sha is not null")
+                pending = st.q(
+                    "select * from tasks where state in ('verified','committed','accepted') "
+                    "and commit_sha is not null")
                 if pending and log:
                     try:
                         text = open(log, errors="replace").read()
@@ -701,9 +896,10 @@ def daemon(st, lead):
                     st.event("stop-lead", f"context {ctx}")
                     cmd_prompt(st, name,
                                f"supervisor: your context is {ctx} tokens, past {LEAD_STOP_TOKENS}. "
-                               "Stop the run per the skill's Stopping section: confirm with the "
-                               "human, let the in-flight implementer finish, wait for the "
-                               "commentator on that commit, write the continuation prompt.")
+                               "Stop the run per the skill's Stopping section: the human must "
+                               "run confirm-stop (you must never run it; do not ask a yes/no "
+                               "question), then let the in-flight implementer finish, wait for "
+                               "the commentator on that commit, write the continuation prompt.")
         time.sleep(POLL_SECONDS)
     st.event("daemon-exit", "")
 
@@ -731,6 +927,8 @@ def main():
     p = sub.add_parser("fail"); p.add_argument("task", type=int); p.add_argument("--reason", required=True)
     p = sub.add_parser("dispatch"); p.add_argument("task", type=int); p.add_argument("--to", required=True)
     p = sub.add_parser("verify"); p.add_argument("task", type=int)
+    p = sub.add_parser("accept"); p.add_argument("task", type=int)
+    p.add_argument("--reason", required=True)
     p = sub.add_parser("calibrate"); p.add_argument("task", type=int)
     p = sub.add_parser("disposition"); p.add_argument("finding")
     p.add_argument("--verdict", choices=["task", "dropped"], required=True)
@@ -740,6 +938,7 @@ def main():
     p = sub.add_parser("comments"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("context"); p.add_argument("name", nargs="?")
     p = sub.add_parser("human-wait"); p.add_argument("action", choices=["start", "end"])
+    sub.add_parser("confirm-stop")
     sub.add_parser("stop")
     a = ap.parse_args()
     st = Store(a.run_dir)
@@ -762,6 +961,8 @@ def main():
         cmd_dispatch(st, a.task, a.to)
     elif a.cmd == "verify":
         cmd_verify(st, a.task)
+    elif a.cmd == "accept":
+        cmd_accept(st, a.task, a.reason)
     elif a.cmd == "calibrate":
         cmd_calibrate(st, a.task)
     elif a.cmd == "disposition":
@@ -779,6 +980,8 @@ def main():
         cmd_context(st, a.name)
     elif a.cmd == "human-wait":
         cmd_human_wait(st, a.action)
+    elif a.cmd == "confirm-stop":
+        cmd_confirm_stop(st)
     elif a.cmd == "stop":
         cmd_stop(st)
 
