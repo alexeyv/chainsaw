@@ -1,0 +1,437 @@
+"""Behavioral contract for the supervisor's public CLI.
+
+Nothing in this module imports the supervisor implementation or reads its SQLite
+database. The same suite can therefore target a replacement executable by setting
+CHAINSAW_SUPERVISOR_COMMAND.
+"""
+
+from tests.support import SupervisorContractCase
+
+
+class TaskContractTests(SupervisorContractCase):
+    def test_new_task_is_visible_to_a_later_process(self):
+        task_id = self.new_task(
+            text="Change the worker behavior.",
+            files="worker.py,README.md",
+            lines=24,
+        )
+
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(task_id, 1)
+        self.assertIn("1 drafted", state.stdout)
+
+    def test_task_requires_nonempty_text(self):
+        result = self.cli(
+            "task", "new", "--files", "worker.py", "--predicted-lines", "5",
+            input_text=" \n",
+        )
+
+        self.assert_failure(result, "task text on stdin is empty")
+
+    def test_task_requires_a_file_list_or_file_count(self):
+        result = self.cli(
+            "task", "new", "--predicted-lines", "5", input_text="Do work.",
+        )
+
+        self.assert_failure(result, "needs --files a,b,c or --predicted-files N")
+
+    def test_task_rejects_disagreeing_file_count_and_file_list(self):
+        result = self.cli(
+            "task", "new", "--files", "one.py,two.py", "--predicted-files", "1",
+            "--predicted-lines", "5", input_text="Do work.",
+        )
+
+        self.assert_failure(result, "disagrees with --files")
+
+    def test_retry_must_reference_a_failed_task(self):
+        original = self.new_task()
+
+        result = self.cli(
+            "task", "new", "--files", "retry.py", "--predicted-lines", "5",
+            "--retry-of", str(original), input_text="Retry it.",
+        )
+
+        self.assert_failure(result, "is not a failed task")
+
+    def test_failed_task_can_be_retried(self):
+        original = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(original))
+        self.assert_success(self.cli("fail", str(original), "--reason", "ordinary failure"))
+
+        retry = self.assert_success(self.cli(
+            "task", "new", "--files", "retry.py", "--predicted-lines", "5",
+            "--retry-of", str(original), input_text="Retry it.",
+        ))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(retry.stdout.strip(), "2")
+        self.assertIn("2 drafted", state.stdout)
+        self.assertIn("retry of 1", state.stdout)
+
+    def test_config_round_trips_across_processes(self):
+        self.assert_success(self.cli("config", "gate", "make check"))
+
+        result = self.assert_success(self.cli("config", "gate"))
+
+        self.assertEqual(result.stdout, "make check\n")
+
+
+class PromptAndDispatchContractTests(SupervisorContractCase):
+    def test_prompt_wait_prints_the_agent_reply(self):
+        self.launch()
+        self.update_fake_herdr(reply_on_prompt="fixture reply")
+
+        result = self.assert_success(
+            self.cli("prompt", "worker", "hello agent", "--wait")
+        )
+
+        self.assertEqual(result.stdout, "fixture reply\n")
+
+    def test_dispatch_delivers_task_and_contract_then_enters_flight(self):
+        task = self.new_task(text="Implement normal dispatch behavior.")
+        self.launch()
+
+        result = self.assert_success(self.dispatch(task))
+        state = self.assert_success(self.cli("state"))
+        log = self.session_log("worker").read_text()
+
+        self.assertIn("task 1 in flight on worker", result.stdout)
+        self.assertIn("1 in_flight", state.stdout)
+        self.assertIn("Implement normal dispatch behavior.", log)
+        self.assertIn("Verify the tree is clean; stop if dirty.", log)
+        self.assertIn("git log -1", log)
+
+    def test_dispatch_requires_an_existing_session(self):
+        task = self.new_task()
+
+        result = self.dispatch(task, name="missing")
+
+        self.assert_failure(result, "no session missing; launch it first")
+
+    def test_only_one_implementer_may_be_in_flight(self):
+        first = self.new_task(text="First task.")
+        second = self.new_task(text="Second task.")
+        self.launch("worker-one")
+        self.assert_success(self.cli(
+            "launch", "worker-two", "--fresh", "--reason", "parallel fixture",
+        ))
+        self.assert_success(self.dispatch(first, "worker-one"))
+
+        result = self.dispatch(second, "worker-two")
+
+        self.assert_failure(result, "an implementer is already in flight")
+        self.assertIn("worker-one is in flight on task 1", result.stderr)
+
+    def test_fail_requires_an_in_flight_task(self):
+        task = self.new_task()
+
+        result = self.cli("fail", str(task), "--reason", "not started")
+
+        self.assert_failure(result, "is not in flight")
+
+
+class VerificationContractTests(SupervisorContractCase):
+    def test_valid_commit_with_gate_last_is_verified(self):
+        self.assert_success(self.cli("config", "gate", "quality-gate"))
+        task, sha = self.prepare_committed_task(gate="quality-gate")
+
+        result = self.assert_success(self.cli("verify", str(task)))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn(f"task {task} verified: {sha[:10]}", result.stdout)
+        self.assertIn("1 verified", state.stdout)
+
+    def test_missing_gate_configuration_is_a_note_not_a_failure(self):
+        task, _ = self.prepare_committed_task()
+
+        result = self.assert_success(self.cli("verify", str(task)))
+
+        self.assertIn("gate not configured", result.stdout)
+        self.assertIn("gate-last unchecked", result.stdout)
+
+    def test_verify_rejects_missing_commit_evidence(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "no commit found in the implementer's log")
+
+    def test_verify_rejects_a_dirty_tree(self):
+        task, _ = self.prepare_committed_task()
+        (self.run_dir / "untracked.txt").write_text("dirty\n")
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "tree is dirty")
+
+    def test_verify_rejects_attribution_trailers(self):
+        task, _ = self.prepare_committed_task(trailer=True)
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "commit carries an attribution trailer")
+
+    def test_verify_rejects_a_commit_that_is_not_head(self):
+        task, task_sha = self.prepare_committed_task()
+        self.commit_file("later.txt", "later\n", "feat: later fixture commit")
+        self.assertNotEqual(task_sha, self.head())
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "commit is not HEAD")
+
+    def test_verify_requires_the_configured_gate_before_commit(self):
+        self.assert_success(self.cli("config", "gate", "quality-gate"))
+        task, _ = self.prepare_committed_task()
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "did not run before the commit")
+
+    def test_verify_rejects_a_failed_gate(self):
+        self.assert_success(self.cli("config", "gate", "quality-gate"))
+        task, _ = self.prepare_committed_task(gate="quality-gate", gate_ok=False)
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "gate before the commit failed")
+
+    def test_verify_rejects_source_modification_after_gate(self):
+        self.assert_success(self.cli("config", "gate", "quality-gate"))
+        task, _ = self.prepare_committed_task(
+            gate="quality-gate", after_gate="sed -i.bak s/a/b/ work.txt",
+        )
+
+        result = self.cli("verify", str(task))
+
+        self.assert_failure(result, "source-modifying command after the gate")
+
+    def test_verify_allows_git_plumbing_after_gate(self):
+        self.assert_success(self.cli("config", "gate", "quality-gate"))
+        task, _ = self.prepare_committed_task(
+            gate="quality-gate", after_gate="git status --short",
+        )
+
+        result = self.assert_success(self.cli("verify", str(task)))
+
+        self.assertIn("task 1 verified", result.stdout)
+
+
+class ReuseContractTests(SupervisorContractCase):
+    def verified_first_task(self):
+        task, _ = self.prepare_committed_task()
+        self.assert_success(self.cli("verify", str(task)))
+        return task
+
+    def test_idle_current_session_can_be_reused(self):
+        self.verified_first_task()
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.assert_success(self.dispatch(second, reuse=True))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn("reuse, context base", result.stdout)
+        self.assertIn("2 in_flight", state.stdout)
+        self.assertIn("reuse (context base", state.stdout)
+
+    def test_reuse_flag_is_rejected_for_a_session_with_no_prior_task(self):
+        task = self.new_task()
+        self.launch()
+
+        result = self.dispatch(task, reuse=True)
+
+        self.assert_failure(result, "has never taken a task")
+
+    def test_reusing_a_prior_session_requires_the_explicit_flag(self):
+        self.verified_first_task()
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.dispatch(second)
+
+        self.assert_failure(result, "dispatching to it again is a reuse")
+
+    def test_failed_session_cannot_be_reused(self):
+        first = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(first))
+        self.assert_success(self.cli("fail", str(first), "--reason", "implementation failed"))
+        second = self.new_task(text="Retry elsewhere.", files="retry.txt")
+
+        result = self.dispatch(second, reuse=True)
+
+        self.assert_failure(result, "its last task (1) failed")
+
+    def test_session_over_configured_context_limit_cannot_be_reused(self):
+        self.verified_first_task()
+        self.assert_success(self.cli("config", "reuse-max-context", "-1"))
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.dispatch(second, reuse=True)
+
+        self.assert_failure(result, "is over reuse-max-context -1")
+
+    def test_session_with_a_materially_stale_tree_cannot_be_reused(self):
+        self.verified_first_task()
+        changed = "".join(f"line {number}\n" for number in range(250))
+        self.commit_file("large-change.txt", changed, "feat: large intervening change")
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.dispatch(second, reuse=True)
+
+        self.assert_failure(result, "over reuse-max-stale-lines 200")
+
+    def test_launch_refuses_when_an_idle_session_is_reusable(self):
+        self.verified_first_task()
+
+        result = self.cli("launch", "replacement")
+
+        self.assert_failure(result, "an idle implementer can take the next task")
+        self.assertIn("dispatch <task-id> --to worker --reuse", result.stderr)
+
+    def test_fresh_launch_requires_and_records_a_reason(self):
+        self.verified_first_task()
+
+        missing_reason = self.cli("launch", "replacement", "--fresh")
+        launched = self.cli(
+            "launch", "replacement", "--fresh", "--reason", "needs independent context",
+        )
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(missing_reason, "--fresh requires a non-empty --reason")
+        self.assert_success(launched)
+        self.assertIn("launch-fresh", state.stdout)
+        self.assertIn("needs independent context", state.stdout)
+
+    def test_committed_but_unverified_predecessor_blocks_dispatch(self):
+        task, _ = self.prepare_committed_task()
+        daemon = self.start_daemon()
+        self.wait_for_state("1 committed")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        second = self.new_task(text="Blocked successor.", files="second.txt")
+        self.assert_success(self.cli(
+            "launch", "replacement", "--fresh", "--reason", "predecessor fixture",
+        ))
+
+        result = self.dispatch(second, "replacement")
+
+        self.assert_failure(result, "task 1 is committed but never verified")
+
+        accepted = self.assert_success(self.cli(
+            "accept", str(task), "--reason", "verification was a known false positive",
+        ))
+        dispatched = self.assert_success(self.dispatch(second, "replacement"))
+
+        self.assertIn("task 1 accepted without verify", accepted.stdout)
+        self.assertIn("task 2 in flight on replacement", dispatched.stdout)
+
+
+class ReportingAndDaemonContractTests(SupervisorContractCase):
+    def test_context_reports_latest_non_sidechain_usage(self):
+        self.launch()
+        self.append_usage("worker", input_tokens=10, cache_read=20, cache_creation=3)
+        self.append_usage("worker", input_tokens=999, sidechain=True)
+
+        result = self.assert_success(self.cli("context", "worker"))
+
+        self.assertEqual(result.stdout, "worker\t33\n")
+
+    def test_calibration_reports_git_and_task_context_cost(self):
+        task = self.new_task(lines=20)
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        sha = self.commit_file("work.txt", "one\ntwo\n")
+        self.append_usage("worker", input_tokens=15, cache_read=40, cache_creation=5)
+        self.record_commit("worker", sha)
+        self.assert_success(self.cli("verify", str(task)))
+
+        result = self.assert_success(self.cli("calibrate", str(task)))
+
+        self.assertIn("predicted 1 files/20 lines", result.stdout)
+        self.assertIn("actual 1 files/2 lines", result.stdout)
+        self.assertIn("context 60 (session 60, base 0)", result.stdout)
+
+    def test_comments_only_returns_entries_not_seen_by_previous_call(self):
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        comments = self.logs_dir / "chainsaw-comments.md"
+        comments.write_text("first observation\n")
+
+        first = self.assert_success(self.cli("comments"))
+        second = self.assert_success(self.cli("comments"))
+        with comments.open("a") as stream:
+            stream.write("second observation\n")
+        third = self.assert_success(self.cli("comments"))
+
+        self.assertIn("first observation", first.stdout)
+        self.assertEqual(second.stdout, "no new comments\n")
+        self.assertEqual(third.stdout, "second observation\n\n")
+
+    def test_disposition_creates_the_documented_generated_view(self):
+        self.assert_success(self.cli(
+            "disposition", "The gate warning is actionable", "--verdict", "dropped",
+            "--reason", "not a product defect",
+        ))
+
+        view = (self.logs_dir / "chainsaw-dispositions.md").read_text()
+
+        self.assertIn("generated by the supervisor; do not edit", view)
+        self.assertIn("dropped · The gate warning is actionable", view)
+        self.assertIn("not a product defect", view)
+
+    def test_daemon_observes_a_commit_marker_and_marks_task_committed(self):
+        task, sha = self.prepare_committed_task()
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("1 committed")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertIn(sha[:10], state.stdout)
+
+    def test_daemon_observes_commentator_ingestion(self):
+        task, sha = self.prepare_committed_task()
+        self.assert_success(self.cli("verify", str(task)))
+        self.assert_success(self.cli(
+            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
+        ))
+        commentator = next(
+            name for name in self.fake_herdr_state()["agents"]
+            if name.startswith("commentator-")
+        )
+        self.append_text(commentator, f"Reviewed commit {sha[:10]}")
+
+        daemon = self.start_daemon()
+        self.wait_for_state("1 ingested")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+    def test_stop_is_durable_and_ends_a_running_daemon(self):
+        daemon = self.start_daemon()
+        self.wait_for_state("lead             lead")
+
+        result = self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertIn("the daemon will exit", result.stdout)
+        self.assertEqual(daemon.returncode, 0)
+
+    def test_human_wait_open_and_close_are_visible_in_state(self):
+        self.assert_success(self.cli("human-wait", "start"))
+
+        open_state = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("human-wait", "end"))
+        closed_state = self.assert_success(self.cli("state"))
+
+        self.assertIn("a human wait is open", open_state.stdout)
+        self.assertNotIn("a human wait is open", closed_state.stdout)
+
+
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()
