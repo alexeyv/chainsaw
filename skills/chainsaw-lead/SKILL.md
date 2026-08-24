@@ -172,17 +172,14 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task.
 
 ## Stopping
 
-"Stop" means end the run for good, in a fixed order. Do not confirm with a
-yes/no question or AskUserQuestion — those can resolve without the human. Tell the
-human to run `$SUP confirm-stop` in their own terminal or pane (never from yours;
-you must never run it). Wait until `$SUP state` shows stop-confirmed. Only then:
-let the in-flight implementer finish and verify its commit; wait for the
-commentator to comment on that commit; write the continuation prompt to the
-run directory: HEAD, the gate command and exact numbers, done/next derived
-from git not remembered, every open finding in full, judged-and-dropped findings
-with reasons, open questions, traps hit. Then `$SUP stop` and stop. `$SUP stop`
-refuses until confirm-stop is recorded. Nothing restarts itself.
+"Stop" means end the run for good. Ask once — "end the run for good?" — and take
+the answer; never infer it. Then, in order:
 
-When the supervisor tells you your own context passed 250k, it is the same contract:
-wait for the human to `$SUP confirm-stop`, then finish the last implementer, deal
-with the commentator's findings on it, write the continuation prompt, finished.
+1. Let the in-flight implementer finish; verify its commit.
+2. Wait for the commentator on that commit.
+3. Write the continuation prompt to the run directory: HEAD, the gate command and
+   exact numbers, done/next derived from git not remembered, every open finding in
+   full, judged-and-dropped findings with reasons, open questions, traps hit.
+4. `$SUP stop`.
+
+Nothing restarts itself. Same contract when the supervisor says you passed 250k.

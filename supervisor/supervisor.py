@@ -26,7 +26,7 @@ State lives in SQLite next to the run's session logs
     supervisor.py --run-dir DIR disposition FINDING --verdict task|dropped [--task ID] --reason TEXT
     supervisor.py --run-dir DIR config KEY [VALUE]
     supervisor.py --run-dir DIR state | comments [--all] | context [NAME] | human-wait start|end
-    supervisor.py --run-dir DIR confirm-stop | stop
+    supervisor.py --run-dir DIR stop
 """
 
 import argparse
@@ -113,9 +113,7 @@ MIGRATIONS = [
 
 
 def logs_dir(run_dir):
-    # Claude Code munges both "/" and "." to "-" when naming a project's
-    # session-log directory (ui.wt -> ui-wt); diverging from that means
-    # watching a directory the sessions never write to.
+    # Claude Code munges "." as well as "/": ui.wt -> ui-wt.
     munged = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
     return os.path.join(os.path.expanduser("~/.claude/projects"), munged)
 
@@ -402,7 +400,7 @@ def _harmless_after_gate(part, run_dir):
             continue  # fd duplication, not a file write
         if os.path.isabs(target) and not (
                 os.path.realpath(target) + os.sep).startswith(run_root):
-            continue  # a write outside the run tree cannot dirty it
+            continue
         return False
     tokens = part.split()
     while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
@@ -410,7 +408,7 @@ def _harmless_after_gate(part, run_dir):
     if not tokens:
         return True
     if tokens[0] == "mkdir":
-        return True  # git does not track directories; an empty dir is invisible
+        return True  # git does not track directories
     if tokens[0] == "git":
         return _git_subcommand(tokens) in _GIT_PLUMBING
     if tokens[0] == "find":
@@ -695,14 +693,8 @@ def cmd_prompt(st, name, text, wait=False, timeout=PROMPT_TIMEOUT):
 
 
 def daemon_prompt(st, name, text):
-    """Deliver from the daemon loop, surviving an unreachable session.
-
-    A pane can be closed by the human at any moment, and cmd_prompt exits the
-    process when delivery fails. In a client that is the right answer; in the
-    daemon it would trade one dead role for the run's whole bookkeeping —
-    context measurement, commit detection and ingestion all stop. Record the
-    failure and keep polling instead.
-    """
+    """Prompt from the daemon loop. cmd_prompt exits on failed delivery; the
+    daemon must outlive any one session, whose pane can close at any moment."""
     try:
         return cmd_prompt(st, name, text)
     except SystemExit as exc:
@@ -1079,9 +1071,7 @@ def cmd_state(st):
     open_wait = st.one("select 1 from human_waits where ended is null")
     if open_wait:
         print("  (a human wait is open)")
-    if st.cfg("stop-confirmed") == "1":
-        print("stop-confirmed  (human ran confirm-stop; stop is allowed)")
-    for e in st.q("select * from events where kind in ('stop-lead','kick','compact','stop-confirmed','accepted','launch-fresh') order by at desc limit 5"):
+    for e in st.q("select * from events where kind in ('stop-lead','kick','compact','accepted','launch-fresh') order by at desc limit 5"):
         print(f"  {ts(e['at'])} {e['kind']} {e['detail']}")
 
 
@@ -1099,27 +1089,7 @@ def cmd_human_wait(st, action):
         st.db.execute("update human_waits set ended=? where ended is null", (time.time(),))
 
 
-def cmd_confirm_stop(st):
-    """Human-only confirmation that the run may end. The lead must never call this.
-
-    Refuses when invoked from the lead's Herdr pane so an auto-answered prompt
-    cannot complete the gate. The check makes accidental self-confirmation
-    impossible, not deliberate self-confirmation. `stop` (and the skill's stop
-    sequence) wait on this.
-    """
-    pane = os.environ.get("HERDR_PANE_ID") or ""
-    lead_pane = st.cfg("lead-pane") or ""
-    if lead_pane and pane == lead_pane:
-        sys.exit("supervisor: confirm-stop must be run by the human, not from the lead's pane")
-    st.set_cfg("stop-confirmed", "1")
-    st.event("stop-confirmed", "human confirmed the run may stop")
-    print("supervisor: stop confirmed; the lead may run the stop sequence")
-
-
 def cmd_stop(st):
-    if st.cfg("stop-confirmed") != "1":
-        sys.exit("supervisor: stop is not confirmed. The human must run: "
-                 "supervisor.py --run-dir DIR confirm-stop")
     st.set_cfg("stopped", "1")
     st.event("stop", "run ended by the lead")
     print("supervisor: stopped; the daemon will exit on its next poll")
@@ -1129,8 +1099,6 @@ def cmd_stop(st):
 
 def daemon(st, lead):
     st.set_cfg("lead", lead)
-    if os.environ.get("HERDR_PANE_ID"):
-        st.set_cfg("lead-pane", os.environ["HERDR_PANE_ID"])
     st.db.execute("insert or ignore into sessions(name,role,started_at,last_growth) values(?,?,?,?)",
                   (lead, "lead", time.time(), time.time()))
     st.set_cfg("stopped", "0")
@@ -1198,9 +1166,9 @@ def daemon(st, lead):
                     daemon_prompt(st, name,
                                f"supervisor: your context is {ctx} tokens, past {LEAD_STOP_TOKENS}. "
                                "Stop the run per the skill's Stopping section: the human must "
-                               "run confirm-stop (you must never run it; do not ask a yes/no "
-                               "question), then let the in-flight implementer finish, wait for "
-                               "the commentator on that commit, write the continuation prompt.")
+                               "ask them plainly whether to end the run for good, then let the "
+                               "in-flight implementer finish, wait for the commentator on that "
+                               "commit, write the continuation prompt, then stop.")
         time.sleep(POLL_SECONDS)
     st.event("daemon-exit", "")
 
@@ -1245,7 +1213,6 @@ def main():
     p = sub.add_parser("comments"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("context"); p.add_argument("name", nargs="?")
     p = sub.add_parser("human-wait"); p.add_argument("action", choices=["start", "end"])
-    sub.add_parser("confirm-stop")
     sub.add_parser("stop")
     a = ap.parse_args()
     st = Store(a.run_dir)
@@ -1287,8 +1254,6 @@ def main():
         cmd_context(st, a.name)
     elif a.cmd == "human-wait":
         cmd_human_wait(st, a.action)
-    elif a.cmd == "confirm-stop":
-        cmd_confirm_stop(st)
     elif a.cmd == "stop":
         cmd_stop(st)
 
