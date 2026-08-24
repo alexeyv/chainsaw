@@ -15,11 +15,11 @@ State lives in SQLite next to the run's session logs
 
     supervisor.py --run-dir DIR daemon --lead NAME
     supervisor.py --run-dir DIR start-commentator --role-prompt PATH
-    supervisor.py --run-dir DIR launch NAME
+    supervisor.py --run-dir DIR launch NAME [--fresh --reason TEXT]
     supervisor.py --run-dir DIR prompt NAME TEXT [--wait]
-    supervisor.py --run-dir DIR task new --predicted-files N --predicted-lines N [--retry-of ID] < task.md
+    supervisor.py --run-dir DIR task new (--files a,b,c | --predicted-files N) --predicted-lines N [--retry-of ID] < task.md
     supervisor.py --run-dir DIR fail TASK --reason TEXT
-    supervisor.py --run-dir DIR dispatch TASK --to NAME
+    supervisor.py --run-dir DIR dispatch TASK --to NAME [--reuse]
     supervisor.py --run-dir DIR verify TASK
     supervisor.py --run-dir DIR accept TASK --reason TEXT
     supervisor.py --run-dir DIR calibrate TASK
@@ -47,6 +47,13 @@ COMMENTATOR_COMPACT_TOKENS = 150_000
 IMPLEMENTER_LIMIT_TOKENS = 100_000
 STALE_SECONDS = 600
 POLL_SECONDS = 5
+# Reuse (#32): an idle implementer may take another task instead of a fresh launch when
+# its measured context is under REUSE_MAX_CONTEXT and the tree has moved by at most
+# REUSE_MAX_STALE_LINES changed lines (git diff --shortstat, insertions + deletions) since
+# the commit it last saw. Both are overridable per run: config reuse-max-context N,
+# config reuse-max-stale-lines N.
+REUSE_MAX_CONTEXT = 60_000
+REUSE_MAX_STALE_LINES = 200
 PROMPT_ATTEMPTS = 3
 PROMPT_TIMEOUT = 300
 LEAN_FLAGS = [
@@ -78,7 +85,8 @@ SCHEMA = """
 create table if not exists config(key text primary key, value text);
 create table if not exists tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, state text, implementer text, commit_sha text, created_at real,
-  retry_of int, reason text, log_offset int default 0, base_head text);
+  retry_of int, reason text, log_offset int default 0, base_head text,
+  predicted_file_list text, reuse int default 0, context_base int);
 create table if not exists task_log(task_id int, state text, at real);
 create table if not exists sessions(name text primary key, role text, pane_id text,
   tab_id text, session_id text, started_at real, context int default 0,
@@ -88,12 +96,20 @@ create table if not exists prompts(id integer primary key, session text, text te
   sent_at real, landed_at real, attempts int);
 create table if not exists calibration(task_id int primary key, predicted_files int,
   predicted_lines int, actual_files int, actual_lines int, wall_seconds real,
-  context_tokens int, recorded_at real);
+  context_tokens int, recorded_at real, context_base int, context_end int);
 create table if not exists dispositions(id integer primary key, finding text,
   verdict text, task_id int, reason text, at real);
 create table if not exists human_waits(id integer primary key, started real, ended real);
 create table if not exists events(at real, kind text, detail text);
 """
+# Columns added after a table first shipped; applied to databases created before them.
+MIGRATIONS = [
+    "alter table tasks add column predicted_file_list text",
+    "alter table tasks add column reuse int default 0",
+    "alter table tasks add column context_base int",
+    "alter table calibration add column context_base int",
+    "alter table calibration add column context_end int",
+]
 
 
 def logs_dir(run_dir):
@@ -113,6 +129,11 @@ class Store:
         self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        for m in MIGRATIONS:
+            try:
+                self.db.execute(m)
+            except sqlite3.OperationalError:
+                pass  # column already there
 
     def q(self, sql, *a):
         return self.db.execute(sql, a).fetchall()
@@ -202,21 +223,62 @@ def context_size(path):
     except OSError:
         return 0
     for line in reversed(out.stdout.splitlines()):
-        if '"isSidechain":true' in line:
-            continue
-        if '"type":"assistant"' not in line and '"type":"tool_result"' not in line:
-            continue
-        i = line.find('"usage":{')
-        if i < 0:
-            continue
-        seg = line[i:]
-
-        def field(key):
-            m = re.search(r'"%s":\s*(\d+)' % key, seg)
-            return int(m.group(1)) if m else 0
-        return (field("input_tokens") + field("cache_read_input_tokens")
-                + field("cache_creation_input_tokens"))
+        u = usage_of_line(line)
+        if u is not None:
+            return u
     return 0
+
+
+def usage_of_line(line):
+    """Context fill recorded on one log line, or None when the line carries no usage."""
+    if '"isSidechain":true' in line:
+        return None
+    if '"type":"assistant"' not in line and '"type":"tool_result"' not in line:
+        return None
+    i = line.find('"usage":{')
+    if i < 0:
+        return None
+    seg = line[i:]
+
+    def field(key):
+        m = re.search(r'"%s":\s*(\d+)' % key, seg)
+        return int(m.group(1)) if m else 0
+    return (field("input_tokens") + field("cache_read_input_tokens")
+            + field("cache_creation_input_tokens"))
+
+
+def _log_lines(path, start=0, end=None):
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            data = f.read() if end is None else f.read(max(0, end - start))
+    except (OSError, TypeError):
+        return []
+    return data.decode(errors="replace").splitlines()
+
+
+def context_before(path, offset):
+    """Context fill at byte `offset` of the log: the last usage recorded before it.
+
+    The baseline a task starts from — what the session already carried when the task's
+    prompt landed — so a reused session's calibration can subtract it (#48, #32).
+    """
+    last = 0
+    for line in _log_lines(path, 0, offset):
+        u = usage_of_line(line)
+        if u is not None:
+            last = u
+    return last
+
+
+def context_peak(path, start, end=None):
+    """Largest context fill recorded in the log's byte window [start, end)."""
+    peak = 0
+    for line in _log_lines(path, start, end):
+        u = usage_of_line(line)
+        if u is not None and u > peak:
+            peak = u
+    return peak
 
 
 def text_of(content):
@@ -426,10 +488,141 @@ def new_commit_for(st, shas, base_head):
     return None
 
 
+# ---- reuse (#32) ----------------------------------------------------------------------
+
+def cfg_int(st, key, default):
+    try:
+        return int(st.cfg(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def last_task_on(st, name):
+    """The most recent task this session took (any state past drafted), or None."""
+    return st.one("select * from tasks where implementer=? and state!='drafted' "
+                  "order by id desc limit 1", name)
+
+
+def last_seen_commit(st, name):
+    """The commit whose tree the session's memory corresponds to: its own last commit, or
+    the HEAD it was dispatched on if it never landed one. None if it never took a task."""
+    t = last_task_on(st, name)
+    if not t:
+        return None
+    return t["commit_sha"] or t["base_head"]
+
+
+def staleness(st, since_sha):
+    """How far the tree moved since a commit: (commits, files, lines) up to HEAD."""
+    if not since_sha:
+        return 0, 0, 0
+    n = git(st, "rev-list", "--count", f"{since_sha}..HEAD").stdout.strip()
+    stat = git(st, "diff", "--shortstat", since_sha, "HEAD").stdout
+    files = int((re.search(r"(\d+) files? changed", stat) or [0, 0])[1])
+    ins = int((re.search(r"(\d+) insertions?", stat) or [0, 0])[1])
+    dels = int((re.search(r"(\d+) deletions?", stat) or [0, 0])[1])
+    return int(n or 0), files, ins + dels
+
+
+def files_changed_since(st, since_sha):
+    if not since_sha:
+        return []
+    return git(st, "diff", "--name-only", since_sha, "HEAD").stdout.split()
+
+
+def authored_files(st, name):
+    """Files in the commits this session landed, in commit order, de-duplicated."""
+    out, seen = [], set()
+    for t in st.q("select commit_sha from tasks where implementer=? and commit_sha is not null "
+                  "order by id", name):
+        for f in git(st, "show", "--name-only", "--format=", t["commit_sha"]).stdout.split():
+            if f not in seen:
+                seen.add(f)
+                out.append(f)
+    return out
+
+
+def reuse_verdict(st, sess):
+    """None when the session may take another task, else why not (#32).
+
+    Measured, not judged: idle (no task of its in flight), its last task did not fail,
+    context under reuse-max-context, and the tree moved by at most reuse-max-stale-lines
+    since the commit it last saw. In flight and too stale are the two refusals the
+    dispatch --reuse path exists to make.
+    """
+    name = sess["name"]
+    if sess["stopped_at"]:
+        return "session is stopped"
+    if st.one("select 1 from tasks where implementer=? and state in ('dispatched','in_flight')", name):
+        return "session is in flight"
+    last = last_task_on(st, name)
+    if last and last["state"] == "failed":
+        return f"its last task ({last['id']}) failed; a retry gets a fresh head"
+    limit = cfg_int(st, "reuse-max-context", REUSE_MAX_CONTEXT)
+    if sess["context"] > limit:
+        return f"context {sess['context']} is over reuse-max-context {limit}"
+    commits, files, lines = staleness(st, last_seen_commit(st, name))
+    stale_limit = cfg_int(st, "reuse-max-stale-lines", REUSE_MAX_STALE_LINES)
+    if lines > stale_limit:
+        return (f"tree moved {lines} lines in {files} files over {commits} commits since its "
+                f"last turn, over reuse-max-stale-lines {stale_limit}: its memory of the tree "
+                f"is wrong, not merely old")
+    return None
+
+
+def idle_pool(st):
+    """Implementers that could take the next task instead of a fresh launch, with their
+    measured figures: [(session row, context, (commits, files, lines), authored files)]."""
+    pool = []
+    for s in st.q("select * from sessions where role='implementer' order by started_at"):
+        if reuse_verdict(st, s):
+            continue
+        pool.append((s, s["context"], staleness(st, last_seen_commit(st, s["name"])),
+                     authored_files(st, s["name"])))
+    return pool
+
+
+def describe_idle(st, s, ctx, stale, files):
+    """One line naming the session, its measured figures, and the dispatch that uses it.
+
+    A session that has never taken a task is idle but not a reuse: it takes a plain
+    dispatch. Saying so here keeps the refusal's advice from contradicting dispatch's.
+    """
+    if not last_task_on(st, s["name"]):
+        return (f"{s['name']} is idle at context {ctx} and has never taken a task — "
+                f"dispatch <task-id> --to {s['name']}")
+    commits, nfiles, lines = stale
+    return (f"{s['name']} is idle at context {ctx}, tree moved {lines} lines/{nfiles} files/"
+            f"{commits} commits since its last turn, authored "
+            + (", ".join(files) if files else "nothing yet")
+            + f" — dispatch <task-id> --to {s['name']} --reuse")
+
+
 # ---- client commands ------------------------------------------------------------------
 
-def cmd_launch(st, name, role="implementer", flags=None, split=False):
-    """Start a fresh session in its own Herdr tab (or a pane split from the caller)."""
+def cmd_launch(st, name, role="implementer", flags=None, split=False, fresh=False, reason=None):
+    """Start a fresh session in its own Herdr tab (or a pane split from the caller).
+
+    An implementer launch refuses while an idle implementer could take the next task
+    (#32): the lead either dispatches to it with --reuse or passes --fresh --reason,
+    which is recorded like accept's override. Refusing at the action, not advice in
+    state: the idle session's figures were visible in state all along and changed
+    nothing.
+    """
+    if role == "implementer":
+        pool = [p for p in idle_pool(st) if p[0]["name"] != name]
+        if pool and not fresh:
+            print(f"supervisor: launch {name} refused — an idle implementer can take the next task:",
+                  file=sys.stderr)
+            for s, ctx, stale, files in pool:
+                print("  " + describe_idle(st, s, ctx, stale, files), file=sys.stderr)
+            sys.exit(f"dispatch to one of those, or launch {name} --fresh --reason \"...\" "
+                     "to record why a fresh head is needed")
+        if fresh:
+            if not (reason or "").strip():
+                sys.exit("supervisor: --fresh requires a non-empty --reason")
+            idle = ", ".join(s["name"] for s, *_ in pool) or "none"
+            st.event("launch-fresh", f"{name} (idle: {idle}): {reason}")
     workspace = os.environ.get("HERDR_WORKSPACE_ID")
     if not workspace:
         sys.exit("supervisor: must run inside a Herdr pane")
@@ -510,16 +703,29 @@ def cmd_start_commentator(st, role_prompt):
                f"Session-log directory: {st.logs}\nRun directory: {st.run_dir}")
 
 
-def cmd_task_new(st, predicted_files, predicted_lines, retry_of=None):
+def cmd_task_new(st, predicted_files, predicted_lines, retry_of=None, files=None):
+    """Record a drafted task. --files names the predicted file set (comma-separated);
+    --predicted-files N is the count alone. With a list the supervisor can tell a reused
+    implementer what moved outside its task's files and nothing about the files it will
+    edit; with a count it cannot."""
     text = sys.stdin.read()
     if not text.strip():
         sys.exit("supervisor: task text on stdin is empty")
     if retry_of and not st.one("select 1 from tasks where id=? and state='failed'", retry_of):
         sys.exit(f"supervisor: --retry-of {retry_of} is not a failed task")
+    file_list = [f.strip() for f in (files or "").split(",") if f.strip()]
+    if file_list:
+        if predicted_files is not None and predicted_files != len(file_list):
+            sys.exit(f"supervisor: --predicted-files {predicted_files} disagrees with "
+                     f"--files ({len(file_list)} names); give one or the other")
+        predicted_files = len(file_list)
+    elif predicted_files is None:
+        sys.exit("supervisor: task new needs --files a,b,c or --predicted-files N")
     tid = st.db.execute(
-        "insert into tasks(text,predicted_files,predicted_lines,state,created_at,retry_of) "
-        "values(?,?,?,?,?,?)",
-        (text, predicted_files, predicted_lines, "drafted", time.time(), retry_of)
+        "insert into tasks(text,predicted_files,predicted_lines,state,created_at,retry_of,"
+        "predicted_file_list) values(?,?,?,?,?,?,?)",
+        (text, predicted_files, predicted_lines, "drafted", time.time(), retry_of,
+         ",".join(file_list) or None)
     ).lastrowid
     st.set_task_state(tid, "drafted")
     print(tid)
@@ -542,20 +748,61 @@ def predecessor_unverified(st, task_id):
             f"if the failure is a false positive")
 
 
-def cmd_dispatch(st, task_id, to):
+def reuse_preamble(st, task, to):
+    """What a reused implementer has no reason to open and so cannot discover by itself:
+    the commits that landed since its last turn and the files they touched outside this
+    task's own file set. Deliberately nothing about the files it is about to edit — a
+    stale memory of those fails loudly on the first exact-match edit and it goes and
+    reads; a stale memory of the rest never collides with anything (#32)."""
+    since = last_seen_commit(st, to)
+    commits, _, _ = staleness(st, since)
+    if not commits:
+        return ""
+    log = git(st, "log", "--oneline", "--no-decorate", f"{since}..HEAD").stdout.strip()
+    changed = files_changed_since(st, since)
+    own = set((task["predicted_file_list"] or "").split(",")) - {""}
+    outside = [f for f in changed if f not in own]
+    lines = [f"Since your last turn (your commit {since[:10]}), {commits} commit"
+             f"{'s' if commits != 1 else ''} landed:", log]
+    if own:
+        lines.append("Outside this task's files they touched: "
+                     + (", ".join(outside) if outside else "nothing")
+                     + ". Files in your task are not listed here; read them fresh as you open them.")
+    else:
+        lines.append("They touched: " + (", ".join(changed) or "nothing")
+                     + " (this task carries no file list, so this is unfiltered).")
+    return "\n".join(lines) + "\n\n"
+
+
+def cmd_dispatch(st, task_id, to, reuse=False):
     task = st.one("select * from tasks where id=?", task_id)
     if not task or task["state"] != "drafted":
         sys.exit(f"supervisor: task {task_id} is not in state drafted")
-    if st.one("select 1 from tasks where state in ('dispatched','in_flight')"):
-        sys.exit("supervisor: an implementer is already in flight (#33)")
+    flying = st.one("select * from tasks where state in ('dispatched','in_flight')")
+    if flying:
+        who = f"{flying['implementer']} is in flight on task {flying['id']}"
+        sys.exit(f"supervisor: an implementer is already in flight ({who})")
     blocked = predecessor_unverified(st, task_id)
     if blocked:
         sys.exit("supervisor: " + blocked)
     sess = st.one("select * from sessions where name=?", to)
     if not sess:
         sys.exit(f"supervisor: no session {to}; launch it first")
+    prior = last_task_on(st, to)
+    if prior and not reuse:
+        sys.exit(f"supervisor: {to} already took task {prior['id']} ({prior['state']}); "
+                 "dispatching to it again is a reuse: pass --reuse, or launch a "
+                 "fresh implementer")
+    if reuse and not prior:
+        sys.exit(f"supervisor: {to} has never taken a task; dispatch without --reuse")
+    if reuse:
+        why = reuse_verdict(st, sess)
+        if why:
+            sys.exit(f"supervisor: cannot reuse {to}: {why}")
     preamble = ""
-    if sess["prepopulated_at"]:
+    if reuse:
+        preamble = reuse_preamble(st, task, to)
+    elif sess["prepopulated_at"]:
         since = st.one("select commit_sha from tasks where state in ('committed','verified',"
                        "'accepted','ingested') order by id desc limit 1")
         if since and since["commit_sha"]:
@@ -564,7 +811,7 @@ def cmd_dispatch(st, task_id, to):
                                    capture_output=True, text=True).stdout.split()
             preamble = ("These files changed since your reading turn; read them first: "
                         + ", ".join(files) + "\n\n")
-    st.db.execute("update tasks set implementer=? where id=?", (to, task_id))
+    st.db.execute("update tasks set implementer=?, reuse=? where id=?", (to, int(reuse), task_id))
     st.set_task_state(task_id, "dispatched")
     st.event("dispatch", f"task {task_id} -> {to}")
     try:
@@ -574,14 +821,19 @@ def cmd_dispatch(st, task_id, to):
         st.set_task_state(task_id, "drafted")
         st.event("dispatch-failed", f"task {task_id} -> {to}: prompt never landed")
         raise
-    # Landed: the implementer is working. Remember where in its log this task starts and
-    # what HEAD was, so a reused implementer's earlier commit is never taken for this one
-    # (#32). The daemon marks committed from the log; the lead is free to draft and
-    # pre-populate the next task (#18, #30).
-    st.db.execute("update tasks set log_offset=?, base_head=? where id=?",
-                  (fsize(st.session_log(to)), git(st, "rev-parse", "HEAD").stdout.strip(), task_id))
+    # Landed: the implementer is working. Remember where in its log this task starts,
+    # what HEAD was, and what context the session already carried, so a reused
+    # implementer's earlier commit is never taken for this one and its calibration
+    # describes this task, not the session's cumulative total (#32, #48). The daemon marks
+    # committed from the log; the lead is free to draft and pre-populate the next task
+    # (#18, #30).
+    log = st.session_log(to)
+    offset = fsize(log)
+    base = context_before(log, offset)
+    st.db.execute("update tasks set log_offset=?, base_head=?, context_base=? where id=?",
+                  (offset, git(st, "rev-parse", "HEAD").stdout.strip(), base, task_id))
     st.set_task_state(task_id, "in_flight")
-    print(f"task {task_id} in flight on {to}")
+    print(f"task {task_id} in flight on {to}" + (f" (reuse, context base {base})" if reuse else ""))
     # A session that took a dispatch is no longer pre-populated for a later one.
     st.db.execute("update sessions set prepopulated_at=NULL where name=?", (to,))
 
@@ -687,7 +939,7 @@ def cmd_fail(st, task_id, reason):
     if dirty:
         print("WARNING: tree is dirty — the implementer did not leave it clean:\n" + dirty)
     if n >= 3:
-        print("three failures on the same task: escalate to the human (#28)")
+        print("three failures on the same task: escalate to the human")
     else:
         print("adjust the task and retry with a fresh implementer: "
               f"task new --retry-of {task_id} < task.md")
@@ -706,15 +958,29 @@ def cmd_calibrate(st, task_id):
     t0 = st.one("select at from task_log where task_id=? and state='dispatched'", task_id)
     t1 = st.one("select at from task_log where task_id=? and state='committed'", task_id)
     wall = (t1["at"] - t0["at"]) if t0 and t1 else None
-    sess = st.one("select context_max from sessions where name=?", task["implementer"])
-    ctx = sess["context_max"] if sess else None
+    # Context is read from the session log's window for this task — from its dispatch to
+    # the next dispatch on the same session, or the end of the log — and the baseline the
+    # session carried at dispatch is subtracted, so a reused session's figure is this
+    # task's cost, not the session's cumulative total (#32, #48).
+    log = st.session_log(task["implementer"]) if task["implementer"] else None
+    nxt = st.one("select log_offset from tasks where implementer=? and id>? and log_offset>0 "
+                 "order by id limit 1", task["implementer"], task_id)
+    end = context_peak(log, task["log_offset"] or 0, nxt["log_offset"] if nxt else None) if log else 0
+    if not end:
+        sess = st.one("select context_max from sessions where name=?", task["implementer"])
+        end = sess["context_max"] if sess else 0
+    base = task["context_base"] or 0
+    ctx = max(end - base, 0)
     st.db.execute(
-        "insert or replace into calibration values(?,?,?,?,?,?,?,?)",
+        "insert or replace into calibration(task_id,predicted_files,predicted_lines,"
+        "actual_files,actual_lines,wall_seconds,context_tokens,recorded_at,context_base,"
+        "context_end) values(?,?,?,?,?,?,?,?,?,?)",
         (task_id, task["predicted_files"], task["predicted_lines"], files, ins + dels,
-         wall, ctx, time.time()))
+         wall, ctx, time.time(), base, end))
     print(f"task {task_id}: predicted {task['predicted_files']} files/{task['predicted_lines']} "
           f"lines, actual {files} files/{ins + dels} lines, wall {wall and int(wall)}s, "
-          f"context {ctx}")
+          f"context {ctx} (session {end}, base {base}"
+          + (", reuse" if task["reuse"] else "") + ")")
 
 
 def cmd_disposition(st, finding, verdict, task_id, reason):
@@ -762,6 +1028,7 @@ def cmd_state(st):
               f"{(t['commit_sha'] or '-')[:10]:<10} "
               + " ".join(f"{s}@{ts(log[s])}" for s in TASK_STATES if s in log)
               + (f"  retry of {t['retry_of']}" if t["retry_of"] else "")
+              + (f"  reuse (context base {t['context_base']})" if t["reuse"] else "")
               + (f"  reason: {t['reason']}" if t["reason"] else ""))
     print("sessions")
     for s in st.q("select * from sessions order by started_at"):
@@ -770,6 +1037,8 @@ def cmd_state(st):
             flag = " OVER-LIMIT"
         if s["prepopulated_at"]:
             flag += " pre-populated"
+        if s["role"] == "implementer" and last_task_on(st, s["name"]) and not reuse_verdict(st, s):
+            flag += " idle, reusable"
         print(f"  {s['name']:<16} {s['role']:<12} context {s['context']:>7} "
               f"(max {s['context_max']}) quiet {int(time.time() - (s['last_growth'] or time.time()))}s{flag}")
     first = st.one("select min(at) a from task_log")
@@ -793,7 +1062,7 @@ def cmd_state(st):
         print("  (a human wait is open)")
     if st.cfg("stop-confirmed") == "1":
         print("stop-confirmed  (human ran confirm-stop; stop is allowed)")
-    for e in st.q("select * from events where kind in ('stop-lead','kick','compact','stop-confirmed','accepted') order by at desc limit 5"):
+    for e in st.q("select * from events where kind in ('stop-lead','kick','compact','stop-confirmed','accepted','launch-fresh') order by at desc limit 5"):
         print(f"  {ts(e['at'])} {e['kind']} {e['detail']}")
 
 
@@ -928,17 +1197,23 @@ def main():
     p = sub.add_parser("daemon"); p.add_argument("--lead", required=True)
     p = sub.add_parser("start-commentator"); p.add_argument("--role-prompt", required=True)
     p = sub.add_parser("launch"); p.add_argument("name")
+    p.add_argument("--fresh", action="store_true",
+                   help="launch even though an idle implementer could take the task")
+    p.add_argument("--reason", help="why a fresh head is needed; required with --fresh, recorded")
     p = sub.add_parser("prompt"); p.add_argument("name"); p.add_argument("text")
     p.add_argument("--wait", action="store_true", help="also wait for the turn and print the reply")
     p.add_argument("--timeout", type=int, default=PROMPT_TIMEOUT)
     p.add_argument("--prepopulate", action="store_true",
                    help="mark the session as pre-populated (dispatch adds the changed-files preamble)")
     p = sub.add_parser("task"); p.add_argument("action", choices=["new"])
-    p.add_argument("--predicted-files", type=int, required=True)
+    p.add_argument("--files", help="predicted file set, comma-separated (preferred)")
+    p.add_argument("--predicted-files", type=int, help="predicted file count, when no --files")
     p.add_argument("--predicted-lines", type=int, required=True)
-    p.add_argument("--retry-of", type=int, help="the failed task this one retries (#28)")
+    p.add_argument("--retry-of", type=int, help="the failed task this one retries")
     p = sub.add_parser("fail"); p.add_argument("task", type=int); p.add_argument("--reason", required=True)
     p = sub.add_parser("dispatch"); p.add_argument("task", type=int); p.add_argument("--to", required=True)
+    p.add_argument("--reuse", action="store_true",
+                   help="the target already took a task; measured refusals apply")
     p = sub.add_parser("verify"); p.add_argument("task", type=int)
     p = sub.add_parser("accept"); p.add_argument("task", type=int)
     p.add_argument("--reason", required=True)
@@ -961,17 +1236,17 @@ def main():
     elif a.cmd == "start-commentator":
         cmd_start_commentator(st, a.role_prompt)
     elif a.cmd == "launch":
-        cmd_launch(st, a.name)
+        cmd_launch(st, a.name, fresh=a.fresh, reason=a.reason)
     elif a.cmd == "prompt":
         cmd_prompt(st, a.name, a.text, a.wait, a.timeout)
         if a.prepopulate:
             st.db.execute("update sessions set prepopulated_at=? where name=?", (time.time(), a.name))
     elif a.cmd == "task":
-        cmd_task_new(st, a.predicted_files, a.predicted_lines, a.retry_of)
+        cmd_task_new(st, a.predicted_files, a.predicted_lines, a.retry_of, a.files)
     elif a.cmd == "fail":
         cmd_fail(st, a.task, a.reason)
     elif a.cmd == "dispatch":
-        cmd_dispatch(st, a.task, a.to)
+        cmd_dispatch(st, a.task, a.to, a.reuse)
     elif a.cmd == "verify":
         cmd_verify(st, a.task)
     elif a.cmd == "accept":
