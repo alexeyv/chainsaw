@@ -31,10 +31,12 @@ State lives in SQLite next to the run's session logs
 
 import argparse
 import fcntl
+import glob
 import hashlib
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -56,6 +58,7 @@ REUSE_MAX_CONTEXT = 60_000
 REUSE_MAX_STALE_LINES = 200
 PROMPT_ATTEMPTS = 3
 PROMPT_TIMEOUT = 300
+VERIFY_LOG_RETRY_SECONDS = 1
 LEAN_FLAGS = [
     "--strict-mcp-config", "--no-chrome",
     "--disallowedTools",
@@ -91,7 +94,7 @@ create table if not exists task_log(task_id int, state text, at real);
 create table if not exists sessions(name text primary key, role text, pane_id text,
   tab_id text, session_id text, started_at real, context int default 0,
   context_max int default 0, last_growth real, kicked_at real,
-  prepopulated_at real, stopped_at real);
+  prepopulated_at real, stopped_at real, log_path text);
 create table if not exists prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table if not exists calibration(task_id int primary key, predicted_files int,
@@ -109,6 +112,7 @@ MIGRATIONS = [
     "alter table tasks add column context_base int",
     "alter table calibration add column context_base int",
     "alter table calibration add column context_end int",
+    "alter table sessions add column log_path text",
 ]
 
 
@@ -156,15 +160,42 @@ class Store:
         self.db.execute("insert into task_log values(?,?,?)", (task_id, state, now))
 
     def session_log(self, name):
-        """Path of the session's JSONL. Herdr is asked first — the id appears or changes
-        when a session's first message lands — and the stored id is the fallback."""
+        """Existing path of the session's JSONL, wherever the session was started.
+
+        Herdr is asked first — the id appears or changes when a session's first message
+        lands — and the stored id is the fallback. Most roles start in ``run_dir``, but
+        a lead commonly starts in a worktree harness above it. Claude stores that log
+        under a different project directory, so locate the globally unique session id
+        across the projects root and cache the resolved path.
+        """
         sid = herdr_session_id(name)
         if sid:
-            self.db.execute("update sessions set session_id=? where name=?", (sid, name))
+            old = self.one("select session_id from sessions where name=?", name)
+            if old and old["session_id"] != sid:
+                self.db.execute("update sessions set session_id=?,log_path=NULL where name=?",
+                                (sid, name))
+            else:
+                self.db.execute("update sessions set session_id=? where name=?", (sid, name))
         else:
-            s = self.one("select session_id from sessions where name=?", name)
-            sid = s["session_id"] if s else None
-        return os.path.join(self.logs, sid + ".jsonl") if sid else None
+            old = self.one("select session_id from sessions where name=?", name)
+            sid = old["session_id"] if old else None
+        if not sid:
+            return None
+
+        expected = os.path.join(self.logs, sid + ".jsonl")
+        if os.path.isfile(expected):
+            self.db.execute("update sessions set log_path=? where name=?", (expected, name))
+            return expected
+        cached = self.one("select log_path from sessions where name=?", name)
+        if cached and cached["log_path"] and os.path.isfile(cached["log_path"]):
+            return cached["log_path"]
+        projects = os.path.dirname(self.logs)
+        matches = glob.glob(os.path.join(projects, "*", sid + ".jsonl"))
+        if matches:
+            path = max(matches, key=os.path.getmtime)
+            self.db.execute("update sessions set log_path=? where name=?", (path, name))
+            return path
+        return None
 
 
 # ---- herdr ----------------------------------------------------------------------------
@@ -347,9 +378,101 @@ _FIND_WRITE = frozenset((
 ))
 
 
+def _without_heredoc_bodies(cmd):
+    """Remove heredoc data while retaining the shell command that consumes it."""
+    kept, delimiters = [], []
+    for line in cmd.splitlines():
+        if delimiters:
+            if line.strip() == delimiters[0]:
+                delimiters.pop(0)
+            continue
+        kept.append(line)
+        for match in re.finditer(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line):
+            delimiters.append(match.group(2))
+    return "\n".join(kept).replace("\\\n", " ")
+
+
 def _shell_parts(cmd):
     """Split a compound bash invocation. Heuristic, not a parser."""
+    cmd = _without_heredoc_bodies(cmd)
     return [p.strip() for p in _PART_SPLIT.split(cmd.strip()) if p.strip()]
+
+
+def _shell_tokens(part):
+    try:
+        lexer = shlex.shlex(part, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return part.split()
+
+
+def _command_backbone(cmd):
+    """Shell tokens with redirections removed, for tolerant gate matching."""
+    tokens = _shell_tokens(_without_heredoc_bodies(cmd))
+    backbone, i = [], 0
+    while i < len(tokens):
+        if tokens[i].isdigit() and i + 1 < len(tokens) and \
+                any(c in tokens[i + 1] for c in "<>"):
+            i += 1
+        if i < len(tokens) and any(c in tokens[i] for c in "<>"):
+            i += 2  # operator and its file, fd, or heredoc delimiter
+            continue
+        if i < len(tokens):
+            backbone.append(tokens[i])
+        i += 1
+    return backbone
+
+
+def _contains_gate(command, gate):
+    """True when gate's non-redirection token sequence occurs in command."""
+    wanted, actual = _command_backbone(gate), _command_backbone(command)
+    if not wanted:
+        return False
+    width = len(wanted)
+    return any(actual[i:i + width] == wanted for i in range(len(actual) - width + 1))
+
+
+def _inside(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
+def _expand_path(token, variables, cwd):
+    def replace(match):
+        key = match.group(1) or match.group(2)
+        return variables.get(key, match.group(0))
+
+    token = re.sub(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                   replace, token)
+    if "$" in token:
+        return None
+    return os.path.realpath(token if os.path.isabs(token) else os.path.join(cwd, token))
+
+
+def _redirection_targets(tokens, variables, cwd):
+    """File-writing redirect targets, or ``None`` when a target is unresolved."""
+    targets, i = [], 0
+    while i < len(tokens):
+        if tokens[i].isdigit() and i + 1 < len(tokens) and \
+                any(c in tokens[i + 1] for c in "<>"):
+            i += 1
+        if i >= len(tokens) or not any(c in tokens[i] for c in "<>"):
+            i += 1
+            continue
+        operator = tokens[i]
+        target = tokens[i + 1] if i + 1 < len(tokens) else ""
+        i += 2
+        if "<" in operator and ">" not in operator:
+            continue
+        if "&" in operator and (target.isdigit() or target == "-"):
+            continue
+        resolved = _expand_path(target, variables, cwd)
+        if resolved is None:
+            return None
+        targets.append(resolved)
+    return targets
 
 
 def _looks_gitignored(path):
@@ -391,20 +514,31 @@ def _git_subcommand(tokens):
     return None
 
 
-def _harmless_after_gate(part, run_dir):
+def _harmless_after_gate(part, run_dir, variables=None, cwd=None):
     """True when this shell part cannot change the tree the gate tested."""
-    cleaned = re.sub(r"\d*>\s*/dev/null", "", part)
-    run_root = os.path.realpath(run_dir) + os.sep
-    for target in re.findall(r"\d*>>?\s*([^\s;|&]+)", cleaned):
-        if target.startswith("&"):
-            continue  # fd duplication, not a file write
-        if os.path.isabs(target) and not (
-                os.path.realpath(target) + os.sep).startswith(run_root):
-            continue
-        return False
-    tokens = part.split()
+    variables = variables if variables is not None else {}
+    cwd = cwd or run_dir
+    tokens = _shell_tokens(part)
     while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        key, value = tokens[0].split("=", 1)
+        variables[key] = value
         tokens = tokens[1:]
+    if not tokens:
+        return True
+    targets = _redirection_targets(tokens, variables, cwd)
+    if targets is None:
+        return False
+    for target in targets:
+        if not _inside(target, run_dir):
+            continue
+        relative = os.path.relpath(target, run_dir)
+        ignored = subprocess.run(
+            ["git", "-C", run_dir, "check-ignore", "-q", "--", relative],
+            capture_output=True).returncode == 0
+        if not ignored:
+            return False
+    # Remove redirects before identifying the command itself.
+    tokens = _command_backbone(" ".join(tokens))
     if not tokens:
         return True
     if tokens[0] == "mkdir":
@@ -418,6 +552,31 @@ def _harmless_after_gate(part, run_dir):
     return _is_safe_rm(part)
 
 
+def _command_harmless_after_gate(command, run_dir):
+    """Check a whole Bash invocation, carrying its simple assignments and cwd."""
+    variables, cwd = {}, os.path.realpath(run_dir)
+    parts = _shell_parts(command)
+    for part in parts:
+        tokens = _shell_tokens(part)
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            key, value = tokens[0].split("=", 1)
+            variables[key] = value
+            tokens = tokens[1:]
+        if tokens and tokens[0] == "cd" and len(tokens) > 1:
+            target = _expand_path(tokens[1], variables, cwd)
+            if target is None:
+                return False
+            cwd = target
+            continue
+        if not _harmless_after_gate(part, run_dir, variables, cwd):
+            # An opaque command deliberately run outside the worktree cannot affect it
+            # through relative paths. Keep explicit references back into the tree unsafe.
+            if not _inside(cwd, run_dir) and os.path.realpath(run_dir) not in command:
+                continue
+            return False
+    return True
+
+
 def gate_last_problem(cmds, gate, run_dir):
     """None if the gate ran, passed, and nothing after it could change its result.
 
@@ -429,7 +588,7 @@ def gate_last_problem(cmds, gate, run_dir):
     idx = max((i for i, (c, _) in enumerate(cmds) if "git commit" in c), default=-1)
     if idx < 0:
         return f"no git commit in the log; gate-last unchecked ({gate!r})"
-    gate_idx = max((i for i, (c, _) in enumerate(cmds[:idx]) if gate in c), default=-1)
+    gate_idx = max((i for i, (c, _) in enumerate(cmds[:idx]) if _contains_gate(c, gate)), default=-1)
     if gate_idx < 0:
         return f"the gate ({gate!r}) did not run before the commit"
     if not cmds[gate_idx][1]:
@@ -441,9 +600,10 @@ def gate_last_problem(cmds, gate, run_dir):
     for cmd, ok in intervening:
         if not ok:
             return f"a command after the gate failed: {cmd.splitlines()[0][:80]!r}"
-        for part in _shell_parts(cmd):
-            if not _harmless_after_gate(part, run_dir):
-                return f"source-modifying command after the gate: {part[:80]!r}"
+        if not _command_harmless_after_gate(cmd, run_dir):
+            part = next((p for p in _shell_parts(cmd)
+                         if not _harmless_after_gate(p, run_dir)), cmd)
+            return f"source-modifying command after the gate: {part[:80]!r}"
     return None
 
 
@@ -849,14 +1009,49 @@ def cmd_dispatch(st, task_id, to, reuse=False):
     st.db.execute("update sessions set prepopulated_at=NULL where name=?", (to,))
 
 
+def _head_advanced_cleanly(st, base_head):
+    """True when HEAD is a clean descendant newer than the task's dispatch point."""
+    if not base_head:
+        return False
+    head = git(st, "rev-parse", "HEAD").stdout.strip()
+    if not head or head == base_head:
+        return False
+    if git(st, "merge-base", "--is-ancestor", base_head, head).returncode:
+        return False
+    return not git(st, "status", "--porcelain").stdout.strip()
+
+
+def _commit_for_verify(st, task):
+    """Read the commit marker, retrying once for a just-flushed session log.
+
+    The retry is deliberately conditional: a moved HEAD and clean tree are evidence
+    that a commit landed, but the marker remains the contract and must appear before
+    verification succeeds.
+    """
+    log = st.session_log(task["implementer"]) if task["implementer"] else None
+
+    def read(path):
+        shas = commits_in_log(path, task["log_offset"] or 0) if path else []
+        return new_commit_for(st, shas, task["base_head"])
+
+    sha = read(log)
+    if not sha and _head_advanced_cleanly(st, task["base_head"]):
+        time.sleep(VERIFY_LOG_RETRY_SECONDS)
+        log = st.session_log(task["implementer"])
+        sha = read(log)
+    return sha, log
+
+
 def cmd_verify(st, task_id):
     """Commit landed, no trailers, tree clean, gate last in the log (#35)."""
     task = st.one("select * from tasks where id=?", task_id)
     if not task:
         sys.exit(f"supervisor: no task {task_id}")
-    log = st.session_log(task["implementer"]) if task["implementer"] else None
-    shas = commits_in_log(log, task["log_offset"] or 0) if log else []
-    sha = task["commit_sha"] or new_commit_for(st, shas, task["base_head"])
+    if task["commit_sha"]:
+        sha = task["commit_sha"]
+        log = st.session_log(task["implementer"]) if task["implementer"] else None
+    else:
+        sha, log = _commit_for_verify(st, task)
     problems = []
     if not sha:
         problems.append("no commit found in the implementer's log")
@@ -1050,8 +1245,14 @@ def cmd_state(st):
             flag += " pre-populated"
         if s["role"] == "implementer" and last_task_on(st, s["name"]) and not reuse_verdict(st, s):
             flag += " idle, reusable"
-        print(f"  {s['name']:<16} {s['role']:<12} context {s['context']:>7} "
-              f"(max {s['context_max']}) quiet {int(time.time() - (s['last_growth'] or time.time()))}s{flag}")
+        quiet = int(time.time() - (s["last_growth"] or time.time()))
+        if st.session_log(s["name"]):
+            print(f"  {s['name']:<16} {s['role']:<12} context {s['context']:>7} "
+                  f"(max {s['context_max']}) quiet {quiet}s{flag}")
+        else:
+            danger = "; lead stop threshold disabled" if s["role"] == "lead" else ""
+            print(f"  {s['name']:<16} {s['role']:<12} context UNAVAILABLE "
+                  f"(session log not found{danger}) quiet {quiet}s{flag}")
     first = st.one("select min(at) a from task_log")
     busy = 0.0
     for t in st.q("select id from tasks"):
@@ -1078,7 +1279,8 @@ def cmd_state(st):
 def cmd_context(st, name=None):
     rows = st.q("select name from sessions where ? is null or name=? order by started_at", name, name)
     for r in rows:
-        print(f"{r['name']}\t{context_size(st.session_log(r['name']))}")
+        log = st.session_log(r["name"])
+        print(f"{r['name']}\t{context_size(log) if log else 'UNAVAILABLE (session log not found)'}")
 
 
 def cmd_human_wait(st, action):
@@ -1104,12 +1306,27 @@ def daemon(st, lead):
     st.set_cfg("stopped", "0")
     st.event("daemon-start", f"pid {os.getpid()}")
     sizes = {}
+    missing_logs = set()
     compacting = False
     while st.cfg("stopped") != "1":
         now = time.time()
         for s in st.q("select * from sessions where stopped_at is null"):
             name = s["name"]
             log = st.session_log(name)
+            if not log:
+                if name not in missing_logs:
+                    detail = f"{name} ({s['role']}): session log not found"
+                    if s["role"] == "lead":
+                        detail += "; the lead context stop threshold cannot fire"
+                    print("WARNING: " + detail, file=sys.stderr, flush=True)
+                    st.event("session-log-missing", detail)
+                    missing_logs.add(name)
+                continue
+            if name in missing_logs:
+                print(f"supervisor: session log found for {name}: {log}",
+                      file=sys.stderr, flush=True)
+                st.event("session-log-found", f"{name}: {log}")
+                missing_logs.remove(name)
             size = fsize(log)
             ctx = context_size(log)
             grew = size != sizes.get(name)
