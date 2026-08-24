@@ -5,7 +5,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -13,7 +12,19 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SUPERVISOR = PROJECT_ROOT / "supervisor" / "supervisor.py"
+MANIFEST = PROJECT_ROOT / "Cargo.toml"
+BINARY = PROJECT_ROOT / "target" / "debug" / "chainsaw"
+
+_configured_command = os.environ.get("CHAINSAW_SUPERVISOR_COMMAND")
+if _configured_command:
+    SUPERVISOR_COMMAND = shlex.split(_configured_command)
+else:
+    subprocess.run(
+        ["cargo", "build", "--manifest-path", str(MANIFEST)],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    SUPERVISOR_COMMAND = [str(BINARY)]
 FAKE_HERDR = Path(__file__).parent / "fixtures" / "fake_herdr.py"
 
 
@@ -50,11 +61,7 @@ class SupervisorContractCase(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Chainsaw Tests",
             "GIT_COMMITTER_EMAIL": "chainsaw-tests@example.invalid",
         })
-        configured = os.environ.get("CHAINSAW_SUPERVISOR_COMMAND")
-        self.supervisor_command = (
-            shlex.split(configured) if configured
-            else [sys.executable, str(SUPERVISOR)]
-        )
+        self.supervisor_command = SUPERVISOR_COMMAND
 
         self.git("init", "-q", "-b", "master")
         (self.run_dir / "seed.txt").write_text("initial\n")

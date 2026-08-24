@@ -17,10 +17,12 @@ the commentator's findings — not implementation detail.
 2. Inputs: a spec and a clean-slate run directory — a checkout in which no session has
    ever started, so its session-log directory (`~/.claude/projects/<munged-path>/`)
    holds exactly this run. If logs already exist there, tell the human and stop.
-3. Resolve two paths from this file's own location, not the run directory:
-   `SUPERVISOR=$(realpath <dir of this SKILL.md>/../../supervisor/supervisor.py)` and
-   `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`. Then define the
-   client invocation once — `--run-dir` comes before the subcommand:
+3. Resolve the project root and role path from this file's own location, not the run
+   directory: `CHAINSAW_ROOT=$(realpath <dir of this SKILL.md>/../..)` and
+   `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`. Run
+   `cargo build --manifest-path "$CHAINSAW_ROOT/Cargo.toml"`, then set
+   `SUPERVISOR="$CHAINSAW_ROOT/target/debug/chainsaw"`. Define the client invocation
+   once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
    Start the supervisor once, as a background process:
    `$SUP daemon --lead <your-agent-name> &`. From then on you are its client; you never

@@ -11,12 +11,13 @@ Agentic software development process, minimizing downtime between coding session
 
 - Lead prompt: `skills/chainsaw-lead/SKILL.md`
 - Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
-- Supervisor script: `supervisor/supervisor.py`
+- Supervisor binary: `target/debug/chainsaw`, built from `src/`
 - Context probe: `tools/bin/context-probe` built from `tools/context-probe.cc` 
 
 ## Running and verifying
 
-- `--run-dir` is a parent flag and must precede the subcommand: `python3 supervisor/supervisor.py --run-dir DIR <subcommand>`
+- `--run-dir` is a parent flag and must precede the subcommand: `target/debug/chainsaw --run-dir DIR <subcommand>`
+- Build the supervisor with `cargo build`.
 - Compile the probe with `mkdir -p tools/bin && clang++ -o tools/bin/context-probe tools/context-probe.cc` — no Makefile.
 
 ## Conventions that differ from defaults

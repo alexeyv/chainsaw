@@ -1,6 +1,6 @@
 """Behavioral contract for the supervisor's public CLI.
 
-Nothing in this module imports the supervisor implementation or reads its SQLite
+Nothing in this module imports the coordinator implementation or reads its SQLite
 database. The same suite can therefore target a replacement executable by setting
 CHAINSAW_SUPERVISOR_COMMAND.
 """
