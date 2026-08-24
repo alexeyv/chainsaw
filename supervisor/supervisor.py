@@ -55,8 +55,9 @@ LEAN_FLAGS = [
     "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,"
     "ExitPlanMode,TaskOutput",
 ]
-IMPLEMENTER_FLAGS = ["--model", "sonnet", "--disable-slash-commands", *LEAN_FLAGS]
-COMMENTATOR_FLAGS = ["--model", "opus", *LEAN_FLAGS]
+IMPLEMENTER_FLAGS = ["--model", "opus", "--effort", "high",
+                     "--disable-slash-commands", *LEAN_FLAGS]
+COMMENTATOR_FLAGS = ["--model", "opus", "--effort", "high", *LEAN_FLAGS]
 TRAILER_RE = re.compile(r"^(Co-Authored-By|Claude-Session):", re.M | re.I)
 COMMIT_RE = re.compile(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]")
 TASK_STATES = ["drafted", "dispatched", "in_flight", "committed", "verified",
@@ -65,8 +66,9 @@ TASK_STATES = ["drafted", "dispatched", "in_flight", "committed", "verified",
 CONTRACT = (
     "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's "
     "checks, then the project's quality gate last. Commit without attribution trailers, "
-    "leave the tree clean, and finish with the commit id, changed-file manifest, and a "
-    "one-paragraph semantic delta."
+    "leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the "
+    "supervisor reads that record), and finish with the commit id, changed-file "
+    "manifest, and a one-paragraph semantic delta."
 )
 NUDGE = "continue"
 
@@ -95,7 +97,10 @@ create table if not exists events(at real, kind text, detail text);
 
 
 def logs_dir(run_dir):
-    munged = os.path.realpath(run_dir).replace("/", "-")
+    # Claude Code munges both "/" and "." to "-" when naming a project's
+    # session-log directory (ui.wt -> ui-wt); diverging from that means
+    # watching a directory the sessions never write to.
+    munged = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
     return os.path.join(os.path.expanduser("~/.claude/projects"), munged)
 
 
@@ -326,16 +331,24 @@ def _git_subcommand(tokens):
     return None
 
 
-def _harmless_after_gate(part):
+def _harmless_after_gate(part, run_dir):
     """True when this shell part cannot change the tree the gate tested."""
     cleaned = re.sub(r"\d*>\s*/dev/null", "", part)
-    if re.search(r"(^|[\s])\d*>>?", cleaned):
+    run_root = os.path.realpath(run_dir) + os.sep
+    for target in re.findall(r"\d*>>?\s*([^\s;|&]+)", cleaned):
+        if target.startswith("&"):
+            continue  # fd duplication, not a file write
+        if os.path.isabs(target) and not (
+                os.path.realpath(target) + os.sep).startswith(run_root):
+            continue  # a write outside the run tree cannot dirty it
         return False
     tokens = part.split()
     while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
         tokens = tokens[1:]
     if not tokens:
         return True
+    if tokens[0] == "mkdir":
+        return True  # git does not track directories; an empty dir is invisible
     if tokens[0] == "git":
         return _git_subcommand(tokens) in _GIT_PLUMBING
     if tokens[0] == "find":
@@ -345,7 +358,7 @@ def _harmless_after_gate(part):
     return _is_safe_rm(part)
 
 
-def gate_last_problem(cmds, gate):
+def gate_last_problem(cmds, gate, run_dir):
     """None if the gate ran, passed, and nothing after it could change its result.
 
     cmds is bash_commands() output: [(command, ok), ...]. Heuristic over the log
@@ -369,7 +382,7 @@ def gate_last_problem(cmds, gate):
         if not ok:
             return f"a command after the gate failed: {cmd.splitlines()[0][:80]!r}"
         for part in _shell_parts(cmd):
-            if not _harmless_after_gate(part):
+            if not _harmless_after_gate(part, run_dir):
                 return f"source-modifying command after the gate: {part[:80]!r}"
     return None
 
@@ -601,7 +614,7 @@ def cmd_verify(st, task_id):
     gate = st.cfg("gate")
     if gate and log:
         cmds = bash_commands(log, task["log_offset"] or 0)
-        problem = gate_last_problem(cmds, gate)
+        problem = gate_last_problem(cmds, gate, st.run_dir)
         if problem:
             problems.append(problem)
     elif not gate:

@@ -73,10 +73,11 @@ measured separately (`$SUP state` shows both).
 
    ```text
    You are about to be given one task in this repository. This turn is preparation
-   only. 1. Read these files entirely: [...]. 2. Read only these line ranges of these
-   large files: [file, range]. 3. Another session is committing here right now: do not
-   read, edit or run anything outside the list, do not build, do not touch git.
-   4. Do not act, summarize, or comment. Just read and stop.
+   only: read, then stop. 1. Read these files entirely: [...]. 2. Read only these
+   line ranges of these large files: [file, range]. 3. The list is exhaustive — your
+   whole turn consists of reads of exactly the listed items. Another session owns
+   the rest of the repository, the build, and git until your task arrives.
+   4. When the list is read, stop and wait.
    ```
 
    Choose against the in-flight implementer's predicted file set: anything it will
