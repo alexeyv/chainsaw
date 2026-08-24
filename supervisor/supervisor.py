@@ -694,6 +694,25 @@ def cmd_prompt(st, name, text, wait=False, timeout=PROMPT_TIMEOUT):
         fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def daemon_prompt(st, name, text):
+    """Deliver from the daemon loop, surviving an unreachable session.
+
+    A pane can be closed by the human at any moment, and cmd_prompt exits the
+    process when delivery fails. In a client that is the right answer; in the
+    daemon it would trade one dead role for the run's whole bookkeeping —
+    context measurement, commit detection and ingestion all stop. Record the
+    failure and keep polling instead.
+    """
+    try:
+        return cmd_prompt(st, name, text)
+    except SystemExit as exc:
+        st.event("prompt-unreachable", f"{name}: {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - never let one role kill the loop
+        st.event("prompt-error", f"{name}: {exc!r}")
+        return False
+
+
 def cmd_start_commentator(st, role_prompt):
     name = commentator_agent_name(st.run_dir)
     cmd_launch(st, name, role="commentator", flags=COMMENTATOR_FLAGS, split=True)
@@ -1147,7 +1166,7 @@ def daemon(st, lead):
                     elif quiet > STALE_SECONDS and not s["kicked_at"] and herdr_status(name) in ("idle", "done"):
                         st.event("kick", name)
                         st.db.execute("update sessions set kicked_at=? where name=?", (now, name))
-                        cmd_prompt(st, name, NUDGE)
+                        daemon_prompt(st, name, NUDGE)
             elif s["role"] == "commentator":
                 pending = st.q(
                     "select * from tasks where state in ('verified','committed','accepted') "
@@ -1164,19 +1183,19 @@ def daemon(st, lead):
                 if ctx > COMMENTATOR_COMPACT_TOKENS and not compacting:
                     compacting = True
                     st.event("compact", f"{name} at {ctx}")
-                    cmd_prompt(st, name, "/compact")
+                    daemon_prompt(st, name, "/compact")
                 elif ctx < COMMENTATOR_COMPACT_TOKENS:
                     compacting = False
                 if quiet > STALE_SECONDS and not s["kicked_at"] \
                         and herdr_status(name) in ("idle", "done"):
                     st.event("kick", name)
                     st.db.execute("update sessions set kicked_at=? where name=?", (now, name))
-                    cmd_prompt(st, name, NUDGE)
+                    daemon_prompt(st, name, NUDGE)
             elif s["role"] == "lead":
                 if ctx > LEAD_STOP_TOKENS and st.cfg("lead-told-stop") != "1":
                     st.set_cfg("lead-told-stop", "1")
                     st.event("stop-lead", f"context {ctx}")
-                    cmd_prompt(st, name,
+                    daemon_prompt(st, name,
                                f"supervisor: your context is {ctx} tokens, past {LEAD_STOP_TOKENS}. "
                                "Stop the run per the skill's Stopping section: the human must "
                                "run confirm-stop (you must never run it; do not ask a yes/no "
