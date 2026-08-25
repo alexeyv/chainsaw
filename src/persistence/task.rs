@@ -114,6 +114,23 @@ pub fn tasks_for_session(transaction: &Transaction<'_>, session_id: i64) -> Resu
     .collect()
 }
 
+pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
+  let row = transaction
+    .query_row(
+      "
+        select id, text, predicted_files, predicted_lines, session_id,
+               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               base_head, predicted_file_list, is_session_reuse,
+               context_size_start, context_size_end
+        from tasks where id < ? order by id desc limit 1
+        ",
+      [id],
+      task_row,
+    )
+    .optional()?;
+  row.map(|row| materialize(transaction, row)).transpose()
+}
+
 pub fn record_finding(
   transaction: &Transaction<'_>,
   task: &Task,
@@ -211,7 +228,7 @@ mod tests {
   use anyhow::Result;
   use chrono::Utc;
 
-  use super::{all, create, get, record_finding, tasks_for_session};
+  use super::{all, create, get, predecessor, record_finding, tasks_for_session};
   use crate::domain::{FindingVerdict, TaskState};
   use crate::persistence::task_event;
   use crate::persistence::test_fixture::database;
@@ -494,6 +511,35 @@ mod tests {
     assert_eq!(tasks[0].findings().len(), 1);
     assert_eq!(tasks[1].events().len(), 2);
     assert_eq!(tasks[1].findings().len(), 1);
+    Ok(())
+  }
+
+  #[test]
+  fn reads_the_fully_materialized_immediate_identity_predecessor() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    assert_eq!(predecessor(&transaction, 1)?, None);
+
+    let first = create(&transaction, "first", 0, 10, None, None)?;
+    let second = create(&transaction, "second", 0, 20, None, None)?;
+    let third = create(&transaction, "third", 0, 30, None, None)?;
+    task_event::create(&transaction, second.id(), TaskState::Drafted)?;
+    let second = record_finding(
+      &transaction,
+      &second,
+      "predecessor finding",
+      FindingVerdict::Dropped,
+      "not actionable",
+      None,
+    )?;
+
+    assert_eq!(predecessor(&transaction, first.id())?, None);
+    assert_eq!(predecessor(&transaction, third.id())?, Some(second.clone()));
+    assert_eq!(predecessor(&transaction, i64::MAX)?, Some(third));
+    assert_eq!(second.events().len(), 2);
+    assert_eq!(second.findings().len(), 1);
+    transaction.commit()?;
     Ok(())
   }
 

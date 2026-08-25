@@ -604,28 +604,31 @@ fn cmd_task_new(
 }
 
 fn predecessor_unverified(store: &Store, task_id: i64) -> Result<Option<String>> {
-  let previous = store.tasks()?.into_iter().rfind(|task| task.id < task_id);
+  let transaction = store.db.unchecked_transaction()?;
+  let previous = task::predecessor(&transaction, task_id)?;
+  transaction.commit()?;
   let Some(previous) = previous else {
     return Ok(None);
   };
   if matches!(
-    previous.state.as_str(),
-    "drafted" | "dispatched" | "in_flight" | "failed"
+    previous.state(),
+    TaskState::Drafted | TaskState::Dispatched | TaskState::InFlight | TaskState::Failed
   ) {
     return Ok(None);
   }
-  let mut statement = store
-    .db
-    .prepare("select state from task_events where task_id=?")?;
-  let states = statement
-    .query_map([previous.id], |row| row.get::<_, String>(0))?
-    .collect::<rusqlite::Result<HashSet<_>>>()?;
-  if states.contains("verified") || states.contains("accepted") {
+  if previous
+    .events()
+    .iter()
+    .any(|event| matches!(event.state(), TaskState::Verified | TaskState::Accepted))
+  {
     return Ok(None);
   }
   Ok(Some(format!(
     "task {} is {} but never verified; run verify {}, or accept {} --reason ... if the failure is a false positive",
-    previous.id, previous.state, previous.id, previous.id
+    previous.id(),
+    previous.state(),
+    previous.id(),
+    previous.id()
   )))
 }
 
