@@ -700,12 +700,13 @@ fn cmd_dispatch(
   if task.state() != TaskState::Drafted {
     bail!("supervisor: task {task_id} is not in state drafted");
   }
-  if let Some(flying) = store
-    .tasks()?
+  let transaction = store.db.unchecked_transaction()?;
+  let flying = task::all(&transaction)?
     .into_iter()
-    .find(|task| matches!(task.state.as_str(), "dispatched" | "in_flight"))
-  {
-    let session_name = match flying.session_id {
+    .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
+  transaction.commit()?;
+  if let Some(flying) = flying {
+    let session_name = match flying.session_id() {
       Some(session_id) => store
         .session(session_id)?
         .map_or_else(|| "-".to_owned(), |session| session.name),
@@ -714,7 +715,7 @@ fn cmd_dispatch(
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
       session_name,
-      flying.id
+      flying.id()
     );
   }
   if let Some(problem) = predecessor_unverified(store, task_id)? {
@@ -743,13 +744,15 @@ fn cmd_dispatch(
   let preamble = if reuse {
     reuse_preamble(store, &task, &session)?
   } else if session.prepopulated_at.is_some() {
-    let since = store.tasks()?.into_iter().rev().find(|task| {
+    let transaction = store.db.unchecked_transaction()?;
+    let since = task::all(&transaction)?.into_iter().rev().find(|task| {
       matches!(
-        task.state.as_str(),
-        "committed" | "verified" | "accepted" | "ingested"
-      ) && task.commit_sha.is_some()
+        task.state(),
+        TaskState::Committed | TaskState::Verified | TaskState::Accepted | TaskState::Ingested
+      ) && task.commit_sha().is_some()
     });
-    if let Some(sha) = since.and_then(|task| task.commit_sha) {
+    transaction.commit()?;
+    if let Some(sha) = since.and_then(|task| task.commit_sha().map(str::to_owned)) {
       let files = git_stdout(store, &["show", "--name-only", "--format=", &sha])?;
       format!(
         "These files changed since your reading turn; read them first: {}\n\n",
@@ -1927,18 +1930,25 @@ fn observe_commentator(
   quiet: f64,
   compacting: &mut bool,
 ) -> Result<()> {
-  let pending = store.tasks()?.into_iter().filter(|task| {
-    matches!(task.state.as_str(), "verified" | "committed" | "accepted")
-      && task.commit_sha.is_some()
-  });
+  let transaction = store.db.unchecked_transaction()?;
+  let pending = task::all(&transaction)?
+    .into_iter()
+    .filter(|task| {
+      matches!(
+        task.state(),
+        TaskState::Verified | TaskState::Committed | TaskState::Accepted
+      ) && task.commit_sha().is_some()
+    })
+    .collect::<Vec<_>>();
+  transaction.commit()?;
   if let Some(log) = log {
     let text = fs::read_to_string(log).unwrap_or_default();
     for task in pending {
-      let sha = task.commit_sha.as_deref().unwrap_or_default();
+      let sha = task.commit_sha().unwrap_or_default();
       let abbreviation = sha.get(..7).unwrap_or(sha);
       if text.contains(abbreviation) {
-        store.set_task_state(task.id, TaskState::Ingested)?;
-        store.event("ingested", &format!("task {}", task.id))?;
+        store.set_task_state(task.id(), TaskState::Ingested)?;
+        store.event("ingested", &format!("task {}", task.id()))?;
       }
     }
   }

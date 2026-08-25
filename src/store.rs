@@ -59,24 +59,6 @@ pub const TASK_STATES: &[&str] = &[
 ];
 
 #[derive(Clone, Debug)]
-pub struct Task {
-  pub id: i64,
-  pub text: String,
-  pub predicted_files: i64,
-  pub predicted_lines: i64,
-  pub state: String,
-  pub session_id: Option<i64>,
-  pub commit_sha: Option<String>,
-  pub retry_of_task_id: Option<i64>,
-  pub reason: Option<String>,
-  pub log_offset: i64,
-  pub base_head: Option<String>,
-  pub predicted_file_list: Option<String>,
-  pub is_session_reuse: bool,
-  pub context_size_start: Option<i64>,
-}
-
-#[derive(Clone, Debug)]
 pub struct Session {
   pub id: i64,
   pub name: String,
@@ -172,14 +154,6 @@ impl Store {
     Ok(event)
   }
 
-  pub fn tasks(&self) -> Result<Vec<Task>> {
-    let mut statement = self.db.prepare("select * from tasks order by id")?;
-    let rows = statement.query_map([], task_from_row)?;
-    rows
-      .collect::<rusqlite::Result<Vec<_>>>()
-      .map_err(Into::into)
-  }
-
   pub fn session(&self, id: i64) -> Result<Option<Session>> {
     self
       .db
@@ -239,25 +213,6 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
   transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
   Ok(())
-}
-
-fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
-  Ok(Task {
-    id: row.get("id")?,
-    text: row.get("text")?,
-    predicted_files: row.get("predicted_files")?,
-    predicted_lines: row.get("predicted_lines")?,
-    state: row.get("state")?,
-    session_id: row.get("session_id")?,
-    commit_sha: row.get("commit_sha")?,
-    retry_of_task_id: row.get("retry_of_task_id")?,
-    reason: row.get("reason")?,
-    log_offset: row.get::<_, Option<i64>>("log_offset")?.unwrap_or_default(),
-    base_head: row.get("base_head")?,
-    predicted_file_list: row.get("predicted_file_list")?,
-    is_session_reuse: row.get::<_, i64>("is_session_reuse")? != 0,
-    context_size_start: row.get("context_size_start")?,
-  })
 }
 
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
