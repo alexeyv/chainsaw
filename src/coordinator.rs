@@ -16,10 +16,12 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
+use crate::domain::TaskState;
 use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
   latest_assistant_text, prompt_landed,
 };
+use crate::persistence::task_event;
 use crate::store::{Session, Store, TASK_STATES, Task, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
@@ -638,7 +640,7 @@ fn cmd_task_new(
         params![text, predicted_files, predicted_lines, "drafted", now(), retry_of_task_id, predicted_file_list],
     )?;
   let task_id = store.db.last_insert_rowid();
-  store.set_task_state(task_id, "drafted")?;
+  store.set_task_state(task_id, TaskState::Drafted)?;
   println!("{task_id}");
   Ok(())
 }
@@ -798,7 +800,7 @@ fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> 
     "update tasks set session_id=?, is_session_reuse=? where id=?",
     params![session.id, i64::from(reuse), task_id],
   )?;
-  store.set_task_state(task_id, "dispatched")?;
+  store.set_task_state(task_id, TaskState::Dispatched)?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
@@ -806,7 +808,7 @@ fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> 
     text = task.text.trim_end()
   );
   if let Err(error) = cmd_prompt(store, implementer, &prompt, false, 300) {
-    store.set_task_state(task_id, "drafted")?;
+    store.set_task_state(task_id, TaskState::Drafted)?;
     store.event(
       "dispatch-failed",
       &format!("task {task_id} -> {implementer}: prompt never landed"),
@@ -821,7 +823,7 @@ fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> 
     "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
     params![offset as i64, head, base as i64, task_id],
   )?;
-  store.set_task_state(task_id, "in_flight")?;
+  store.set_task_state(task_id, TaskState::InFlight)?;
   if reuse {
     println!("task {task_id} in flight on {implementer} (reuse, context base {base})");
   } else {
@@ -942,7 +944,7 @@ fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
     .iter()
     .any(|problem| !problem.starts_with("gate not configured"));
   if !has_hard_problem {
-    store.set_task_state(task_id, "verified")?;
+    store.set_task_state(task_id, TaskState::Verified)?;
     println!(
       "task {task_id} verified: {}",
       sha.as_deref().unwrap_or_default()
@@ -1365,12 +1367,11 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
     params![reason, task_id],
   )?;
   if task.state == "committed" {
-    store.set_task_state(task_id, "accepted")?;
+    store.set_task_state(task_id, TaskState::Accepted)?;
   } else {
-    store.db.execute(
-      "insert into task_events values(?,?,?)",
-      params![task_id, "accepted", now()],
-    )?;
+    let transaction = store.db.unchecked_transaction()?;
+    task_event::create(&transaction, task_id, TaskState::Accepted)?;
+    transaction.commit()?;
   }
   store.event("accepted", &format!("task {task_id}: {reason}"))?;
   println!("task {task_id} accepted without verify: {reason}");
@@ -1405,7 +1406,7 @@ fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
     "update tasks set reason=? where id=?",
     params![reason, task_id],
   )?;
-  store.set_task_state(task_id, "failed")?;
+  store.set_task_state(task_id, TaskState::Failed)?;
   store.event("failed", &format!("task {task_id}: {reason}"))?;
   let failures = failures_in_lineage(store, task_id)?;
   let plural = if failures == 1 { "" } else { "s" };
@@ -1436,7 +1437,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let dispatched_at: Option<f64> = store
     .db
     .query_row(
-      "select at from task_events where task_id=? and state='dispatched'",
+      "select created_at / 1000.0 from task_events where task_id=? and state='dispatched'",
       [task_id],
       |row| row.get(0),
     )
@@ -1444,7 +1445,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let committed_at: Option<f64> = store
     .db
     .query_row(
-      "select at from task_events where task_id=? and state='committed'",
+      "select created_at / 1000.0 from task_events where task_id=? and state='committed'",
       [task_id],
       |row| row.get(0),
     )
@@ -1570,7 +1571,7 @@ fn cmd_state(store: &Store) -> Result<()> {
   for task in store.tasks()? {
     let mut statement = store
       .db
-      .prepare("select state,at from task_events where task_id=?")?;
+      .prepare("select state,created_at / 1000.0 from task_events where task_id=?")?;
     let log = statement
       .query_map([task.id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
@@ -1693,15 +1694,17 @@ fn clock_time(timestamp: f64) -> String {
 }
 
 fn print_time_summary(store: &Store) -> Result<()> {
-  let first: Option<f64> = store
-    .db
-    .query_row("select min(at) from task_events", [], |row| row.get(0))?;
+  let first: Option<f64> = store.db.query_row(
+    "select min(created_at) / 1000.0 from task_events",
+    [],
+    |row| row.get(0),
+  )?;
   let mut busy = 0.0;
   for task in store.tasks()? {
     let start: Option<f64> = store
       .db
       .query_row(
-        "select at from task_events where task_id=? and state='dispatched'",
+        "select created_at / 1000.0 from task_events where task_id=? and state='dispatched'",
         [task.id],
         |row| row.get(0),
       )
@@ -1709,7 +1712,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
     let end: Option<f64> = store
             .db
             .query_row(
-                "select at from task_events where task_id=? and state in ('committed','verified','ingested','failed') order by at limit 1",
+                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed','verified','ingested','failed') order by created_at limit 1",
                 [task.id],
                 |row| row.get(0),
             )
@@ -1887,7 +1890,7 @@ fn observe_implementer(
       "update tasks set commit_sha=? where id=?",
       params![sha, task.id],
     )?;
-    store.set_task_state(task.id, "committed")?;
+    store.set_task_state(task.id, TaskState::Committed)?;
     store.event("committed", &format!("task {} {sha}", task.id))?;
   } else if quiet > STALE_SECONDS
     && session.kicked_at.is_none()
@@ -1923,7 +1926,7 @@ fn observe_commentator(
       let sha = task.commit_sha.as_deref().unwrap_or_default();
       let abbreviation = sha.get(..7).unwrap_or(sha);
       if text.contains(abbreviation) {
-        store.set_task_state(task.id, "ingested")?;
+        store.set_task_state(task.id, TaskState::Ingested)?;
         store.event("ingested", &format!("task {}", task.id))?;
       }
     }

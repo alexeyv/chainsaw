@@ -17,6 +17,19 @@ pub enum TaskState {
 }
 
 impl TaskState {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Drafted => "drafted",
+      Self::Dispatched => "dispatched",
+      Self::InFlight => "in_flight",
+      Self::Committed => "committed",
+      Self::Verified => "verified",
+      Self::Accepted => "accepted",
+      Self::Ingested => "ingested",
+      Self::Failed => "failed",
+    }
+  }
+
   fn requires_session(self) -> bool {
     self != Self::Drafted
   }
@@ -39,7 +52,6 @@ pub struct Task {
   text: String,
   predicted_files: i64,
   predicted_lines: i64,
-  state: TaskState,
   session_id: Option<i64>,
   commit_sha: Option<String>,
   created_at: f64,
@@ -61,7 +73,6 @@ impl Task {
     text: String,
     predicted_files: i64,
     predicted_lines: i64,
-    state: TaskState,
     session_id: Option<i64>,
     commit_sha: Option<String>,
     created_at: f64,
@@ -93,6 +104,8 @@ impl Task {
     require_optional_nonblank("base_head", base_head.as_deref())?;
     require_optional_nonnegative("context_size_start", context_size_start)?;
     require_optional_nonnegative("context_size_end", context_size_end)?;
+    validate_events(&events)?;
+    let state = events.last().expect("validated nonempty event log").state();
 
     if state.requires_session() && session_id.is_none() {
       bail!("{state:?} task requires a session");
@@ -110,14 +123,12 @@ impl Task {
       bail!("context end requires a context start");
     }
     validate_predicted_files(predicted_files, predicted_file_list.as_deref())?;
-    validate_events(state, &events)?;
 
     Ok(Self {
       id,
       text,
       predicted_files,
       predicted_lines,
-      state,
       session_id,
       commit_sha,
       created_at,
@@ -150,7 +161,11 @@ impl Task {
   }
 
   pub fn state(&self) -> TaskState {
-    self.state
+    self
+      .events
+      .last()
+      .expect("task event log is never empty")
+      .state()
   }
 
   pub fn session_id(&self) -> Option<i64> {
@@ -270,10 +285,10 @@ fn validate_predicted_files(
   Ok(())
 }
 
-fn validate_events(state: TaskState, events: &[TaskEvent]) -> Result<()> {
-  let Some(latest) = events.last() else {
+fn validate_events(events: &[TaskEvent]) -> Result<()> {
+  if events.is_empty() {
     bail!("a task requires at least one event");
-  };
+  }
   let mut ids = HashSet::new();
   for event in events {
     if !ids.insert(event.id()) {
@@ -281,7 +296,7 @@ fn validate_events(state: TaskState, events: &[TaskEvent]) -> Result<()> {
     }
   }
   for pair in events.windows(2) {
-    if pair[0].at() > pair[1].at() {
+    if pair[0].created_at() > pair[1].created_at() {
       bail!(
         "task event {} occurs before event {}",
         pair[1].id(),
@@ -289,21 +304,20 @@ fn validate_events(state: TaskState, events: &[TaskEvent]) -> Result<()> {
       );
     }
   }
-  if latest.state() != state {
-    bail!(
-      "task state {state:?} does not match latest event state {:?}",
-      latest.state()
-    );
-  }
   Ok(())
 }
 
 #[cfg(test)]
 mod tests {
   use anyhow::Result;
+  use chrono::{DateTime, Utc};
 
   use super::{Task, TaskState};
   use crate::domain::TaskEvent;
+
+  fn timestamp(seconds: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(seconds, 0).unwrap()
+  }
 
   #[allow(clippy::too_many_arguments)]
   fn task_with(
@@ -324,7 +338,6 @@ mod tests {
       text.to_owned(),
       predicted_files,
       20,
-      state,
       session_id,
       commit_sha.map(str::to_owned),
       1_700_000_000.0,
@@ -336,7 +349,7 @@ mod tests {
       is_session_reuse,
       context_size_start,
       context_size_end,
-      vec![TaskEvent::new(1, state, 1_700_000_000.0).unwrap()],
+      vec![TaskEvent::new(1, state, timestamp(1_700_000_000)).unwrap()],
     )
   }
 
@@ -346,7 +359,6 @@ mod tests {
       "task".to_owned(),
       0,
       0,
-      TaskState::Drafted,
       None,
       None,
       1_700_000_000.0,
@@ -365,15 +377,14 @@ mod tests {
   #[test]
   fn exposes_every_field_without_mutators() {
     let events = vec![
-      TaskEvent::new(1, TaskState::Drafted, 1_699_999_900.0).unwrap(),
-      TaskEvent::new(2, TaskState::InFlight, 1_700_000_000.0).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, timestamp(1_699_999_900)).unwrap(),
+      TaskEvent::new(2, TaskState::InFlight, timestamp(1_700_000_000)).unwrap(),
     ];
     let task = Task::new(
       2,
       "Implement the task".to_owned(),
       2,
       20,
-      TaskState::InFlight,
       Some(7),
       None,
       1_700_000_000.0,
@@ -533,7 +544,6 @@ mod tests {
       "task".to_owned(),
       0,
       0,
-      TaskState::Drafted,
       None,
       None,
       1.0,
@@ -545,7 +555,7 @@ mod tests {
       false,
       None,
       None,
-      vec![TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap()],
+      vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
     )
     .unwrap_err();
 
@@ -666,8 +676,8 @@ mod tests {
   #[test]
   fn event_ids_are_unique_within_a_task() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap(),
-      TaskEvent::new(1, TaskState::Drafted, 2.0).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, timestamp(2)).unwrap(),
     ])
     .unwrap_err();
 
@@ -677,25 +687,11 @@ mod tests {
   #[test]
   fn events_are_in_nondecreasing_timestamp_order() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, 2.0).unwrap(),
-      TaskEvent::new(2, TaskState::Drafted, 1.0).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, timestamp(2)).unwrap(),
+      TaskEvent::new(2, TaskState::Drafted, timestamp(1)).unwrap(),
     ])
     .unwrap_err();
 
     assert_eq!(error.to_string(), "task event 2 occurs before event 1");
-  }
-
-  #[test]
-  fn latest_event_state_matches_the_task_state() {
-    let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap(),
-      TaskEvent::new(2, TaskState::InFlight, 2.0).unwrap(),
-    ])
-    .unwrap_err();
-
-    assert_eq!(
-      error.to_string(),
-      "task state Drafted does not match latest event state InFlight"
-    );
   }
 }

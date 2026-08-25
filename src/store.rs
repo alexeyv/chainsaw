@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+
+use crate::domain::{TaskEvent, TaskState};
+use crate::persistence::task_event;
 
 const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
-begin immediate;
 create table config(key text primary key, value text);
 create table sessions(id integer primary key, name text not null, role text,
   pane_id text, tab_id text, external_session_id text unique, started_at real,
@@ -21,7 +23,10 @@ create table tasks(id integer primary key, text text, predicted_files int,
   reason text, log_offset int default 0, base_head text, predicted_file_list text,
   is_session_reuse int not null default 0, context_size_start int,
   context_size_end int);
-create table task_events(task_id int, state text, at real);
+create table task_events(
+  id integer primary key autoincrement,
+  task_id int not null references tasks(id), state text,
+  created_at int not null);
 create table prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table calibration(task_id int primary key, predicted_files int,
@@ -32,7 +37,6 @@ create table dispositions(id integer primary key, finding text,
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
 pragma user_version=1;
-commit;
 "#;
 
 pub const TASK_STATES: &[&str] = &[
@@ -149,18 +153,15 @@ impl Store {
     Ok(())
   }
 
-  pub fn set_task_state(&self, task_id: i64, state: &str) -> Result<()> {
-    debug_assert!(TASK_STATES.contains(&state));
-    let timestamp = now();
-    self.db.execute(
+  pub fn set_task_state(&self, task_id: i64, state: TaskState) -> Result<TaskEvent> {
+    let transaction = self.db.unchecked_transaction()?;
+    transaction.execute(
       "update tasks set state=? where id=?",
-      params![state, task_id],
+      params![state.as_str(), task_id],
     )?;
-    self.db.execute(
-      "insert into task_events values(?,?,?)",
-      params![task_id, state, timestamp],
-    )?;
-    Ok(())
+    let event = task_event::create(&transaction, task_id, state)?;
+    transaction.commit()?;
+    Ok(event)
   }
 
   pub fn task(&self, id: i64) -> Result<Option<Task>> {
@@ -218,10 +219,11 @@ pub fn now() -> f64 {
 }
 
 pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
-  let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+  let transaction = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+  let version = transaction.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
   match version {
     0 => {
-      let table_count = db.query_row(
+      let table_count = transaction.query_row(
         "select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'",
         [],
         |row| row.get::<_, i64>(0),
@@ -229,11 +231,12 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       if table_count != 0 {
         bail!("database schema is unversioned; remove it before starting chainsaw");
       }
-      db.execute_batch(SCHEMA)?;
+      transaction.execute_batch(SCHEMA)?;
     }
     SCHEMA_VERSION => {}
     version => bail!("database schema version {version} is unsupported; expected {SCHEMA_VERSION}"),
   }
+  transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
   Ok(())
 }
@@ -273,4 +276,53 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     prepopulated_at: row.get("prepopulated_at")?,
     stopped_at: row.get("stopped_at")?,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use std::fs;
+  use std::sync::atomic::{AtomicU64, Ordering};
+  use std::sync::{Arc, Barrier};
+  use std::thread;
+  use std::time::Duration;
+
+  use anyhow::Result;
+  use rusqlite::Connection;
+
+  use super::initialize_schema;
+
+  static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
+
+  #[test]
+  fn initializes_one_database_concurrently() -> Result<()> {
+    let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+      "chainsaw-schema-{}-{suffix}.db",
+      std::process::id()
+    ));
+    let workers = 8;
+    let barrier = Arc::new(Barrier::new(workers));
+    let handles = (0..workers)
+      .map(|_| {
+        let barrier = Arc::clone(&barrier);
+        let path = path.clone();
+        thread::spawn(move || -> Result<()> {
+          let db = Connection::open(path)?;
+          db.busy_timeout(Duration::from_secs(5))?;
+          barrier.wait();
+          initialize_schema(&db)
+        })
+      })
+      .collect::<Vec<_>>();
+
+    let results = handles
+      .into_iter()
+      .map(|handle| handle.join())
+      .collect::<Vec<_>>();
+    let _ = fs::remove_file(&path);
+    for result in results {
+      result.expect("schema initialization worker panicked")?;
+    }
+    Ok(())
+  }
 }

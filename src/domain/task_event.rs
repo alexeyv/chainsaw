@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 
 use super::task::TaskState;
 
@@ -6,19 +7,20 @@ use super::task::TaskState;
 pub struct TaskEvent {
   id: i64,
   state: TaskState,
-  at: f64,
+  created_at: DateTime<Utc>,
 }
 
 impl TaskEvent {
-  pub fn new(id: i64, state: TaskState, at: f64) -> Result<Self> {
+  pub fn new(id: i64, state: TaskState, created_at: DateTime<Utc>) -> Result<Self> {
     if id <= 0 {
       bail!("id must be positive");
     }
-    if !at.is_finite() || at < 0.0 {
-      bail!("at must be finite and nonnegative");
-    }
 
-    Ok(Self { id, state, at })
+    Ok(Self {
+      id,
+      state,
+      created_at,
+    })
   }
 
   pub fn id(&self) -> i64 {
@@ -29,23 +31,30 @@ impl TaskEvent {
     self.state
   }
 
-  pub fn at(&self) -> f64 {
-    self.at
+  pub fn created_at(&self) -> DateTime<Utc> {
+    self.created_at
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use chrono::{DateTime, Utc};
+
   use super::TaskEvent;
   use crate::domain::TaskState;
 
+  fn timestamp(seconds: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(seconds, 0).unwrap()
+  }
+
   #[test]
   fn constructor_exposes_every_field_without_mutators() {
-    let event = TaskEvent::new(3, TaskState::InFlight, 1_700_000_000.0).unwrap();
+    let created_at = timestamp(1_700_000_000);
+    let event = TaskEvent::new(3, TaskState::InFlight, created_at).unwrap();
 
     assert_eq!(event.id(), 3);
     assert_eq!(event.state(), TaskState::InFlight);
-    assert_eq!(event.at(), 1_700_000_000.0);
+    assert_eq!(event.created_at(), created_at);
   }
 
   #[test]
@@ -62,25 +71,15 @@ mod tests {
     ];
 
     for (index, state) in states.into_iter().enumerate() {
-      assert!(TaskEvent::new(index as i64 + 1, state, 1.0).is_ok());
+      assert!(TaskEvent::new(index as i64 + 1, state, timestamp(1)).is_ok());
     }
   }
 
   #[test]
   fn constructor_requires_a_positive_id() {
     for id in [i64::MIN, -1, 0] {
-      let error = TaskEvent::new(id, TaskState::Drafted, 1.0).unwrap_err();
+      let error = TaskEvent::new(id, TaskState::Drafted, timestamp(1)).unwrap_err();
       assert_eq!(error.to_string(), "id must be positive");
     }
-  }
-
-  #[test]
-  fn constructor_requires_a_finite_nonnegative_timestamp() {
-    for at in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-      let error = TaskEvent::new(1, TaskState::Drafted, at).unwrap_err();
-      assert_eq!(error.to_string(), "at must be finite and nonnegative");
-    }
-
-    assert!(TaskEvent::new(1, TaskState::Drafted, 0.0).is_ok());
   }
 }
