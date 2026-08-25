@@ -36,6 +36,8 @@ clang++ -o tools/bin/context-probe tools/context-probe.cc
 The Python command is the black-box contract harness; the system under test is the
 Rust coordinator.
 
+- Every failing automatic test is a show stopper, even if unrelated to work at hand. Fix or escalate, never ignore.
+
 ## Conventions that differ from defaults
 
 - Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
