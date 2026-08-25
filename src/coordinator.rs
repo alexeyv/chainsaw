@@ -23,7 +23,7 @@ use crate::logs::{
 };
 use crate::persistence::{calibration, finding, task, task_event};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::store::{Session, Store, TASK_STATES, Task as StoreTask, now};
+use crate::store::{Session, Store, TASK_STATES, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
@@ -221,18 +221,20 @@ fn git_stdout(store: &Store, args: &[&str]) -> Result<String> {
   )
 }
 
-fn last_task_on(store: &Store, session_id: i64) -> Result<Option<StoreTask>> {
+fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
   Ok(
-    store
-      .tasks()?
+    task_snapshots_for_session(store, session_id)?
       .into_iter()
       .rev()
-      .find(|task| task.session_id == Some(session_id) && task.state != "drafted"),
+      .find(|task| task.state() != TaskState::Drafted),
   )
 }
 
 fn last_seen_commit(store: &Store, session_id: i64) -> Result<Option<String>> {
-  Ok(last_task_on(store, session_id)?.and_then(|task| task.commit_sha.or(task.base_head)))
+  Ok(
+    last_task_on(store, session_id)?
+      .and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned)),
+  )
 }
 
 fn staleness(store: &Store, since: Option<&str>) -> Result<(i64, i64, i64)> {
@@ -262,12 +264,11 @@ fn stat_number(text: &str, noun: &str) -> i64 {
 fn authored_files(store: &Store, session_id: i64) -> Result<Vec<String>> {
   let mut files = Vec::new();
   let mut seen = HashSet::new();
-  for task in store
-    .tasks()?
+  for task in task_snapshots_for_session(store, session_id)?
     .into_iter()
-    .filter(|task| task.session_id == Some(session_id) && task.commit_sha.is_some())
+    .filter(|task| task.commit_sha().is_some())
   {
-    let sha = task.commit_sha.as_deref().unwrap_or_default();
+    let sha = task.commit_sha().unwrap_or_default();
     for file in git_stdout(store, &["show", "--name-only", "--format=", sha])?.lines() {
       if seen.insert(file.to_owned()) {
         files.push(file.to_owned());
@@ -281,18 +282,23 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
   if session.stopped_at.is_some() {
     return Ok(Some("session is stopped".to_owned()));
   }
-  if store.tasks()?.iter().any(|task| {
-    task.session_id == Some(session.id) && matches!(task.state.as_str(), "dispatched" | "in_flight")
-  }) {
+  let tasks = task_snapshots_for_session(store, session.id)?;
+  if tasks
+    .iter()
+    .any(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
+  {
     return Ok(Some("session is in flight".to_owned()));
   }
-  let last = last_task_on(store, session.id)?;
+  let last = tasks
+    .into_iter()
+    .rev()
+    .find(|task| task.state() != TaskState::Drafted);
   if let Some(task) = &last
-    && task.state == "failed"
+    && task.state() == TaskState::Failed
   {
     return Ok(Some(format!(
       "its last task ({}) failed; a retry gets a fresh head",
-      task.id
+      task.id()
     )));
   }
   let context_limit = store.cfg_i64("reuse-max-context", REUSE_MAX_CONTEXT);
@@ -302,7 +308,7 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
       session.context
     )));
   }
-  let since = last.and_then(|task| task.commit_sha.or(task.base_head));
+  let since = last.and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned));
   let (commits, files, lines) = staleness(store, since.as_deref())?;
   let stale_limit = store.cfg_i64("reuse-max-stale-lines", REUSE_MAX_STALE_LINES);
   if lines > stale_limit {
@@ -538,6 +544,13 @@ fn task_snapshot(store: &Store, task_id: i64) -> Result<Option<Task>> {
   Ok(task)
 }
 
+fn task_snapshots_for_session(store: &Store, session_id: i64) -> Result<Vec<Task>> {
+  let transaction = store.db.unchecked_transaction()?;
+  let tasks = task::tasks_for_session(&transaction, session_id)?;
+  transaction.commit()?;
+  Ok(tasks)
+}
+
 fn cmd_task_new(
   store: &Store,
   mut predicted_files: Option<i64>,
@@ -713,8 +726,8 @@ fn cmd_dispatch(
   {
     bail!(
       "supervisor: {implementer} already took task {} ({}); dispatching to it again is a reuse: pass --reuse, or launch a fresh implementer",
-      prior.id,
-      prior.state
+      prior.id(),
+      prior.state()
     );
   }
   if reuse && prior.is_none() {
@@ -1412,15 +1425,13 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
     },
     None => None,
   };
-  let next_offset = store
-    .tasks()?
-    .into_iter()
-    .find(|candidate| {
-      candidate.id > task_id
-        && candidate.session_id == task.session_id()
-        && candidate.log_offset > 0
-    })
-    .map(|candidate| candidate.log_offset as u64);
+  let next_offset = match task.session_id() {
+    Some(session_id) => task_snapshots_for_session(store, session_id)?
+      .into_iter()
+      .find(|candidate| candidate.id() > task_id && candidate.log_offset() > 0)
+      .map(|candidate| candidate.log_offset() as u64),
+    None => None,
+  };
   let mut end = context_peak(log.as_deref(), task.log_offset() as u64, next_offset) as i64;
   if end == 0
     && let Some(session_id) = task.session_id()
@@ -1867,22 +1878,23 @@ fn observe_implementer(
   log: Option<&Path>,
   quiet: f64,
 ) -> Result<()> {
-  let task = store.tasks()?.into_iter().rev().find(|task| {
-    task.session_id == Some(session.id) && matches!(task.state.as_str(), "dispatched" | "in_flight")
-  });
+  let task = task_snapshots_for_session(store, session.id)?
+    .into_iter()
+    .rev()
+    .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
   let Some(task) = task else {
     return Ok(());
   };
   let shas = log
-    .map(|path| commits_in_log(path, task.log_offset as u64))
+    .map(|path| commits_in_log(path, task.log_offset() as u64))
     .unwrap_or_default();
-  if let Some(sha) = new_commit_for(store, &shas, task.base_head.as_deref())? {
+  if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     store.db.execute(
       "update tasks set commit_sha=? where id=?",
-      params![sha, task.id],
+      params![sha, task.id()],
     )?;
-    store.set_task_state(task.id, TaskState::Committed)?;
-    store.event("committed", &format!("task {} {sha}", task.id))?;
+    store.set_task_state(task.id(), TaskState::Committed)?;
+    store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else if quiet > STALE_SECONDS
     && session.kicked_at.is_none()
     && runtime
