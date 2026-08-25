@@ -1028,14 +1028,38 @@ fn gate_last_problem(commands: &[(String, bool)], gate: &str, run_dir: &Path) ->
 fn contains_gate(command: &str, gate: &str) -> bool {
   let actual = command_backbone(command);
   let wanted = command_backbone(gate);
-  !wanted.is_empty() && format!(" {actual} ").contains(&format!(" {wanted} "))
+  !wanted.is_empty()
+    && actual.match_indices(&wanted).any(|(start, matched)| {
+      let end = start + matched.len();
+      shell_boundary_before(&actual[..start]) && shell_boundary_after(&actual[end..])
+    })
+}
+
+fn shell_boundary_before(prefix: &str) -> bool {
+  prefix
+    .trim_end()
+    .chars()
+    .next_back()
+    .is_none_or(shell_boundary)
+}
+
+fn shell_boundary_after(suffix: &str) -> bool {
+  suffix
+    .trim_start()
+    .chars()
+    .next()
+    .is_none_or(shell_boundary)
+}
+
+fn shell_boundary(character: char) -> bool {
+  matches!(character, ';' | '|' | '&' | '(' | ')' | '{' | '}')
 }
 
 fn command_backbone(command: &str) -> String {
   let redirect = Regex::new(r#"(?:\d+\s*)?(?:>&|<&|>>|<<|>|<)\s*(?:"[^"]*"|'[^']*'|[^\s;|&]+)"#)
     .expect("valid redirect regex");
   let separators = Regex::new(r"\s*([;|&]+)\s*").expect("valid separator regex");
-  let without_heredocs = without_heredoc_bodies(command);
+  let without_heredocs = without_heredoc_bodies(command).replace('\n', ";");
   let without_redirects = redirect.replace_all(&without_heredocs, "");
   separators
     .replace_all(&without_redirects, "$1")
@@ -1216,11 +1240,19 @@ fn expand_path(token: &str, variables: &HashMap<String, String>, cwd: &Path) -> 
     return None;
   }
   let path = PathBuf::from(expanded);
-  Some(normalize_path(if path.is_absolute() {
+  let path = if path.is_absolute() {
     path
   } else {
     cwd.join(path)
-  }))
+  };
+  resolve_path(&path)
+}
+
+fn resolve_path(path: &Path) -> Option<PathBuf> {
+  let ancestor = path.ancestors().find(|ancestor| ancestor.exists())?;
+  let mut resolved = ancestor.canonicalize().ok()?;
+  resolved.push(path.strip_prefix(ancestor).ok()?);
+  Some(normalize_path(resolved))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {
