@@ -81,7 +81,7 @@ def main():
             name = args[2]
             pane_id = _option(args, "--pane")
             run_dir = state["panes"].get(pane_id, {}).get("cwd", os.getcwd())
-            session_id = f"session-{name}"
+            session_id = f"session-{name}-{state['sequence']}"
             state["agents"][name] = {
                 "session_id": session_id,
                 "status": "idle",

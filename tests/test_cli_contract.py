@@ -265,6 +265,18 @@ class ReuseContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "its last task (1) failed")
 
+    def test_repeated_implementer_name_creates_a_distinct_session(self):
+        first = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(first))
+        self.assert_success(self.cli("fail", str(first), "--reason", "first session failed"))
+
+        second = self.new_task(text="Try in a new session.", files="second.txt")
+        self.assert_success(self.launch())
+        dispatched = self.assert_success(self.dispatch(second))
+
+        self.assertIn("task 2 in flight on worker", dispatched.stdout)
+
     def test_session_over_configured_context_limit_cannot_be_reused(self):
         self.verified_first_task()
         self.assert_success(self.cli("config", "reuse-max-context", "-1"))
