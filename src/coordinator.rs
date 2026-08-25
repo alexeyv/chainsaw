@@ -21,7 +21,7 @@ use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
   latest_assistant_text, prompt_landed,
 };
-use crate::persistence::{calibration, finding, task, task_event};
+use crate::persistence::{calibration, finding, observation, task, task_event};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::store::{Session, Store, TASK_STATES, now};
 
@@ -114,6 +114,19 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       fix_task_id,
       &verdict_reason,
     ),
+    Command::Observe { task, text } => cmd_observe(store, task, &text),
+    Command::Finding { task, description } => cmd_finding(store, task, &description),
+    Command::Poll {
+      after_observation,
+      task,
+    } => cmd_poll(store, after_observation, task),
+    Command::Resolve {
+      finding,
+      verdict,
+      fix_task_id,
+      reason,
+    } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
+    Command::Resolutions => cmd_resolutions(store),
     Command::Config { key, value } => {
       if let Some(value) = value {
         store.set_cfg(&key, &value)
@@ -418,7 +431,7 @@ fn cmd_launch(
   store.db.execute(
         "insert into sessions(name,role,pane_id,tab_id,external_session_id,started_at,last_growth) values(?,?,?,?,?,?,?)",
         params![name, options.role, pane_id, tab_id, external_session_id, now(), now()],
-    )?;
+  )?;
   store.event("launch", name)?;
   println!(
     "{}",
@@ -1508,12 +1521,131 @@ fn cmd_disposition(
   write_dispositions_view(store)
 }
 
+fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
+  let transaction = store.db.unchecked_transaction()?;
+  if let Some(task_id) = task_id {
+    require_task(&transaction, task_id)?;
+  }
+  let observation = observation::create(&transaction, task_id, text)?;
+  transaction.commit()?;
+  println!("{}", observation.id());
+  Ok(())
+}
+
+fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
+  let transaction = store.db.unchecked_transaction()?;
+  require_task(&transaction, task_id)?;
+  let finding = finding::register(&transaction, task_id, description)?;
+  transaction.commit()?;
+  println!("{}", finding.id());
+  Ok(())
+}
+
+fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Result<()> {
+  if after_observation < 0 {
+    bail!("supervisor: --after-observation must be nonnegative");
+  }
+  if let Some(task_id) = task_id {
+    let transaction = store.db.unchecked_transaction()?;
+    require_task(&transaction, task_id)?;
+    transaction.commit()?;
+  }
+  let observations = observation::after(&store.db, after_observation, task_id)?;
+  let observation_cursor = observations
+    .last()
+    .map_or(after_observation, |observation| observation.id());
+  let observations = observations
+    .into_iter()
+    .map(|observation| {
+      json!({
+        "id": observation.id(),
+        "task_id": observation.task_id(),
+        "text": observation.text(),
+        "created_at": observation.created_at().to_rfc3339(),
+      })
+    })
+    .collect::<Vec<_>>();
+  let findings = finding::unresolved(&store.db, task_id)?
+    .into_iter()
+    .map(|finding| {
+      json!({
+        "id": finding.id(),
+        "task_id": finding.task_id(),
+        "description": finding.description(),
+        "created_at": finding.created_at().to_rfc3339(),
+      })
+    })
+    .collect::<Vec<_>>();
+  println!(
+    "{}",
+    json!({
+      "observation_cursor": observation_cursor,
+      "observations": observations,
+      "findings": findings,
+    })
+  );
+  Ok(())
+}
+
+fn cmd_resolve(
+  store: &Store,
+  finding_id: i64,
+  verdict: &Verdict,
+  fix_task_id: Option<i64>,
+  reason: &str,
+) -> Result<()> {
+  let verdict = match verdict {
+    Verdict::Task => FindingVerdict::Task,
+    Verdict::Dropped => FindingVerdict::Dropped,
+  };
+  let transaction = store.db.unchecked_transaction()?;
+  let finding = finding::get(&transaction, finding_id)?
+    .with_context(|| format!("supervisor: no finding {finding_id}"))?;
+  if let Some(fix_task_id) = fix_task_id {
+    require_task(&transaction, fix_task_id)?;
+  }
+  finding::resolve(&transaction, &finding, verdict, reason, fix_task_id)
+    .map_err(|error| anyhow!("supervisor: {error}"))?;
+  transaction.commit()?;
+  println!("finding {finding_id} resolved");
+  Ok(())
+}
+
+fn cmd_resolutions(store: &Store) -> Result<()> {
+  let resolutions = finding::resolved(&store.db)?
+    .into_iter()
+    .map(|finding| {
+      json!({
+        "finding_id": finding.id(),
+        "task_id": finding.task_id(),
+        "description": finding.description(),
+        "verdict": finding.verdict().map(FindingVerdict::as_str),
+        "reason": finding.verdict_reason(),
+        "fix_task_id": finding.fix_task_id(),
+        "resolved_at": finding.resolved_at().map(|time| time.to_rfc3339()),
+      })
+    })
+    .collect::<Vec<_>>();
+  println!("{}", json!({"resolutions": resolutions}));
+  Ok(())
+}
+
+fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result<Task> {
+  task::get(transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))
+}
+
 fn write_dispositions_view(store: &Store) -> Result<()> {
   let mut lines = vec![
     "# Dispositions (generated by the supervisor; do not edit)".to_owned(),
     String::new(),
   ];
-  for finding in finding::all(&store.db)? {
+  for finding in finding::legacy_dispositions(&store.db)? {
+    let Some(verdict) = finding.verdict() else {
+      continue;
+    };
+    let Some(verdict_reason) = finding.verdict_reason() else {
+      continue;
+    };
     let when = finding
       .created_at()
       .with_timezone(&Local)
@@ -1523,9 +1655,7 @@ fn write_dispositions_view(store: &Store) -> Result<()> {
       .fix_task_id()
       .map_or_else(String::new, |id| format!(" (fix task {id})"));
     let task_id = finding.task_id();
-    let verdict = finding.verdict();
     let description = finding.description();
-    let verdict_reason = finding.verdict_reason();
     lines.push(format!(
       "- {when} · task {task_id} · {verdict}{target} · {description} — {verdict_reason}"
     ));

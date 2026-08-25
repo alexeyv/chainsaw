@@ -389,6 +389,143 @@ class ReuseContractTests(SupervisorContractCase):
         self.assertIn("task 2 in flight on replacement", dispatched.stdout)
 
 
+class CommunicationProtocolContractTests(SupervisorContractCase):
+    def test_complete_incremental_run_wide_protocol(self):
+        first_task = self.new_task(text="First reviewed task.", files="first.txt")
+        second_task = self.new_task(text="Second reviewed task.", files="second.txt")
+
+        first_observation = self.assert_success(self.cli(
+            "observe", "--task", str(first_task), "first observation",
+        ))
+        second_observation = self.assert_success(self.cli(
+            "observe", "run-wide observation",
+        ))
+        first_finding = self.assert_success(self.cli(
+            "finding", "--task", str(first_task), "first defect",
+        ))
+        second_finding = self.assert_success(self.cli(
+            "finding", "--task", str(second_task), "second defect",
+        ))
+
+        self.assertEqual(first_observation.stdout, "1\n")
+        self.assertEqual(second_observation.stdout, "2\n")
+        self.assertEqual(first_finding.stdout, "1\n")
+        self.assertEqual(second_finding.stdout, "2\n")
+
+        initial = json.loads(self.assert_success(self.cli("poll")).stdout)
+        repeated = json.loads(self.assert_success(self.cli(
+            "poll", "--after-observation", str(initial["observation_cursor"]),
+        )).stdout)
+        task_filtered = json.loads(self.assert_success(self.cli(
+            "poll", "--task", str(first_task),
+        )).stdout)
+
+        self.assertEqual(initial["observation_cursor"], 2)
+        self.assertEqual([item["id"] for item in initial["observations"]], [1, 2])
+        self.assertEqual([item["id"] for item in initial["findings"]], [1, 2])
+        self.assertEqual(repeated["observations"], [])
+        self.assertEqual([item["id"] for item in repeated["findings"]], [1, 2])
+        self.assertEqual(
+            [item["id"] for item in task_filtered["observations"]], [1, 2],
+        )
+        self.assertEqual([item["id"] for item in task_filtered["findings"]], [1])
+
+        self.assert_success(self.cli(
+            "resolve", "1", "--verdict", "dropped", "--reason", "not actionable",
+        ))
+        after_resolution = json.loads(self.assert_success(self.cli(
+            "poll", "--after-observation", "2",
+        )).stdout)
+        self.assert_success(self.cli(
+            "resolve", "2", "--verdict", "dropped", "--reason", "also resolved",
+        ))
+        resolutions = json.loads(self.assert_success(self.cli("resolutions")).stdout)
+
+        self.assertEqual(after_resolution["observations"], [])
+        self.assertEqual([item["id"] for item in after_resolution["findings"]], [2])
+        self.assertEqual(
+            [item["finding_id"] for item in resolutions["resolutions"]], [1, 2],
+        )
+        self.assertEqual(resolutions["resolutions"][0]["verdict"], "dropped")
+        self.assertFalse((self.logs_dir / "chainsaw-dispositions.md").exists())
+
+        self.assert_success(self.cli(
+            "disposition", str(first_task), "legacy disposition", "--verdict",
+            "dropped", "--reason", "legacy reason",
+        ))
+        legacy_view = (self.logs_dir / "chainsaw-dispositions.md").read_text()
+        self.assertIn("legacy disposition", legacy_view)
+        self.assertNotIn("first defect", legacy_view)
+
+    def test_task_filtered_cursor_does_not_skip_later_relevant_observations(self):
+        relevant_task = self.new_task(text="Relevant task.", files="relevant.txt")
+        other_task = self.new_task(text="Other task.", files="other.txt")
+        self.assert_success(self.cli(
+            "observe", "--task", str(other_task), "other-task observation",
+        ))
+
+        empty = json.loads(self.assert_success(self.cli(
+            "poll", "--task", str(relevant_task),
+        )).stdout)
+        self.assertEqual(empty["observation_cursor"], 0)
+        self.assertEqual(empty["observations"], [])
+
+        self.assert_success(self.cli(
+            "observe", "--task", str(relevant_task), "relevant observation",
+        ))
+        later = json.loads(self.assert_success(self.cli(
+            "poll", "--task", str(relevant_task), "--after-observation",
+            str(empty["observation_cursor"]),
+        )).stdout)
+
+        self.assertEqual([item["id"] for item in later["observations"]], [2])
+        self.assertEqual(later["observation_cursor"], 2)
+
+    def test_resolution_validation_preserves_unresolved_findings(self):
+        source = self.new_task()
+        fix = self.new_task(text="Fix it.", files="fix.txt")
+        self.assert_success(self.cli(
+            "finding", "--task", str(source), "a defect",
+        ))
+
+        self.assert_failure(self.cli(
+            "resolve", "1", "--verdict", "task", "--reason", "worth fixing",
+        ), "task verdict requires a fix_task_id")
+        self.assert_failure(self.cli(
+            "resolve", "1", "--verdict", "dropped", "--fix-task", str(fix),
+            "--reason", "not actionable",
+        ), "dropped verdict cannot have a fix_task_id")
+        self.assert_failure(self.cli(
+            "resolve", "1", "--verdict", "task", "--fix-task", "99",
+            "--reason", "worth fixing",
+        ), "supervisor: no task 99")
+
+        poll = json.loads(self.assert_success(self.cli("poll")).stdout)
+        self.assertEqual([item["id"] for item in poll["findings"]], [1])
+
+        self.assert_success(self.cli(
+            "resolve", "1", "--verdict", "task", "--fix-task", str(fix),
+            "--reason", "worth fixing",
+        ))
+        self.assert_failure(self.cli(
+            "resolve", "1", "--verdict", "dropped", "--reason", "changed mind",
+        ), "finding 1 is already resolved")
+
+    def test_missing_protocol_references_are_explicit_errors(self):
+        self.assert_failure(self.cli(
+            "observe", "--task", "99", "observation",
+        ), "supervisor: no task 99")
+        self.assert_failure(self.cli(
+            "finding", "--task", "99", "defect",
+        ), "supervisor: no task 99")
+        self.assert_failure(self.cli(
+            "resolve", "99", "--verdict", "dropped", "--reason", "not found",
+        ), "supervisor: no finding 99")
+        self.assert_failure(self.cli(
+            "poll", "--task", "99",
+        ), "supervisor: no task 99")
+
+
 class ReportingAndDaemonContractTests(SupervisorContractCase):
     def test_context_reports_latest_non_sidechain_usage(self):
         self.launch()

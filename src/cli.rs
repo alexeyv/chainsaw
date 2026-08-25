@@ -87,6 +87,40 @@ pub enum Command {
     #[arg(long = "reason")]
     verdict_reason: String,
   },
+  /// Record informational context that requires no response.
+  Observe {
+    /// Task the observation concerns; omit for a run-wide observation.
+    #[arg(long)]
+    task: Option<i64>,
+    text: String,
+  },
+  /// Register a concern that requires a verdict and reason.
+  Finding {
+    #[arg(long)]
+    task: i64,
+    description: String,
+  },
+  /// Print JSON containing new observations and unresolved findings.
+  Poll {
+    /// Return observations after this cursor.
+    #[arg(long = "after-observation", default_value_t = 0)]
+    after_observation: i64,
+    /// Limit findings to this task and observations to this task or the run.
+    #[arg(long)]
+    task: Option<i64>,
+  },
+  /// Resolve a supervisor-mediated finding.
+  Resolve {
+    finding: i64,
+    #[arg(long)]
+    verdict: Verdict,
+    #[arg(long = "fix-task")]
+    fix_task_id: Option<i64>,
+    #[arg(long)]
+    reason: String,
+  },
+  /// Print JSON containing all resolved findings.
+  Resolutions,
   /// Read or write a run setting.
   Config {
     key: String,

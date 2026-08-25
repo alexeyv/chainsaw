@@ -36,15 +36,17 @@ impl TryFrom<&str> for FindingVerdict {
   }
 }
 
+/// A tracked concern requiring a verdict and reason before it is resolved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finding {
   id: i64,
   task_id: i64,
   description: String,
-  verdict: FindingVerdict,
-  verdict_reason: String,
+  verdict: Option<FindingVerdict>,
+  verdict_reason: Option<String>,
   fix_task_id: Option<i64>,
   created_at: DateTime<Utc>,
+  resolved_at: Option<DateTime<Utc>>,
 }
 
 impl Finding {
@@ -57,17 +59,60 @@ impl Finding {
     fix_task_id: Option<i64>,
     created_at: DateTime<Utc>,
   ) -> Result<Self> {
+    Self::from_record(
+      id,
+      task_id,
+      description,
+      Some(verdict),
+      Some(verdict_reason),
+      fix_task_id,
+      created_at,
+      Some(created_at),
+    )
+  }
+
+  pub fn registered(
+    id: i64,
+    task_id: i64,
+    description: String,
+    created_at: DateTime<Utc>,
+  ) -> Result<Self> {
+    Self::from_record(id, task_id, description, None, None, None, created_at, None)
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn from_record(
+    id: i64,
+    task_id: i64,
+    description: String,
+    verdict: Option<FindingVerdict>,
+    verdict_reason: Option<String>,
+    fix_task_id: Option<i64>,
+    created_at: DateTime<Utc>,
+    resolved_at: Option<DateTime<Utc>>,
+  ) -> Result<Self> {
     require_positive("id", id)?;
     require_positive("task_id", task_id)?;
     require_nonblank("description", &description)?;
-    require_nonblank("verdict_reason", &verdict_reason)?;
+    if let Some(verdict_reason) = &verdict_reason {
+      require_nonblank("verdict_reason", verdict_reason)?;
+    }
     if let Some(fix_task_id) = fix_task_id {
       require_positive("fix_task_id", fix_task_id)?;
     }
-    match (verdict, fix_task_id) {
-      (FindingVerdict::Task, None) => bail!("task verdict requires a fix_task_id"),
-      (FindingVerdict::Dropped, Some(_)) => bail!("dropped verdict cannot have a fix_task_id"),
-      _ => {}
+    match (verdict, verdict_reason.as_ref(), fix_task_id, resolved_at) {
+      (None, None, None, None) => {}
+      (Some(FindingVerdict::Task), Some(_), Some(_), Some(_)) => {}
+      (Some(FindingVerdict::Dropped), Some(_), None, Some(_)) => {}
+      (Some(FindingVerdict::Task), _, None, _) => {
+        bail!("task verdict requires a fix_task_id")
+      }
+      (Some(FindingVerdict::Dropped), _, Some(_), _) => {
+        bail!("dropped verdict cannot have a fix_task_id")
+      }
+      (Some(_), None, _, _) => bail!("resolved finding requires a verdict_reason"),
+      (Some(_), Some(_), _, None) => bail!("resolved finding requires a resolved_at"),
+      (None, _, _, _) => bail!("unresolved finding cannot have resolution fields"),
     }
 
     Ok(Self {
@@ -78,6 +123,7 @@ impl Finding {
       verdict_reason,
       fix_task_id,
       created_at,
+      resolved_at,
     })
   }
 
@@ -93,12 +139,12 @@ impl Finding {
     &self.description
   }
 
-  pub fn verdict(&self) -> FindingVerdict {
+  pub fn verdict(&self) -> Option<FindingVerdict> {
     self.verdict
   }
 
-  pub fn verdict_reason(&self) -> &str {
-    &self.verdict_reason
+  pub fn verdict_reason(&self) -> Option<&str> {
+    self.verdict_reason.as_deref()
   }
 
   pub fn fix_task_id(&self) -> Option<i64> {
@@ -107,6 +153,14 @@ impl Finding {
 
   pub fn created_at(&self) -> DateTime<Utc> {
     self.created_at
+  }
+
+  pub fn resolved_at(&self) -> Option<DateTime<Utc>> {
+    self.resolved_at
+  }
+
+  pub fn is_resolved(&self) -> bool {
+    self.verdict.is_some()
   }
 }
 
@@ -173,13 +227,27 @@ mod tests {
       finding.description(),
       "verification can accept the wrong commit"
     );
-    assert_eq!(finding.verdict(), FindingVerdict::Task);
+    assert_eq!(finding.verdict(), Some(FindingVerdict::Task));
     assert_eq!(
       finding.verdict_reason(),
-      "the check trusts an ambiguous log entry"
+      Some("the check trusts an ambiguous log entry")
     );
     assert_eq!(finding.fix_task_id(), Some(7));
     assert_eq!(finding.created_at(), created_at);
+    assert_eq!(finding.resolved_at(), Some(created_at));
+    assert!(finding.is_resolved());
+  }
+
+  #[test]
+  fn registered_finding_is_unresolved() {
+    let created_at = timestamp(1_700_000_000);
+    let finding = Finding::registered(3, 5, "a defect".to_owned(), created_at).unwrap();
+
+    assert_eq!(finding.verdict(), None);
+    assert_eq!(finding.verdict_reason(), None);
+    assert_eq!(finding.fix_task_id(), None);
+    assert_eq!(finding.resolved_at(), None);
+    assert!(!finding.is_resolved());
   }
 
   #[test]

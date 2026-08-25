@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -33,15 +33,20 @@ create table calibrations(
   actual_files int not null, actual_lines int not null, wall_seconds real,
   created_at int not null, context_size_start int not null,
   context_size_end int not null);
+create table observations(
+  id integer primary key autoincrement,
+  task_id int references tasks(id), text text not null,
+  created_at int not null);
 create table findings(
   id integer primary key autoincrement,
   task_id int not null references tasks(id),
-  description text not null, verdict text not null,
-  verdict_reason text not null, fix_task_id int references tasks(id),
-  created_at int not null);
+  description text not null, verdict text,
+  verdict_reason text, fix_task_id int references tasks(id),
+  created_at int not null, resolved_at int,
+  legacy_disposition int not null default 0);
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
-pragma user_version=1;
+pragma user_version=2;
 "#;
 
 pub const TASK_STATES: &[&str] = &[
@@ -235,7 +240,7 @@ mod tests {
   static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 
   #[test]
-  fn creates_findings_with_both_task_foreign_keys() -> Result<()> {
+  fn creates_communication_storage_with_foreign_keys() -> Result<()> {
     let db = Connection::open_in_memory()?;
 
     initialize_schema(&db)?;
@@ -252,14 +257,21 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
+    let observation_foreign_keys = db.query_row(
+      "select count(*) from pragma_foreign_key_list('observations')
+       where \"table\"='tasks' and \"from\"='task_id'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
     let task_state_columns = db.query_row(
       "select count(*) from pragma_table_info('tasks') where name='state'",
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
+    assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
     Ok(())
   }
