@@ -18,7 +18,7 @@ create table if not exists tasks(id integer primary key, text text, predicted_fi
   reason text, log_offset int default 0, base_head text, predicted_file_list text,
   is_session_reuse int not null default 0, context_size_start int,
   context_size_end int);
-create table if not exists task_log(task_id int, state text, at real);
+create table if not exists taskEvents(task_id int, state text, at real);
 create table if not exists prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table if not exists calibration(task_id int primary key, predicted_files int,
@@ -186,7 +186,7 @@ impl Store {
       params![state, task_id],
     )?;
     self.db.execute(
-      "insert into task_log values(?,?,?)",
+      "insert into taskEvents values(?,?,?)",
       params![task_id, state, timestamp],
     )?;
     Ok(())
@@ -247,6 +247,7 @@ pub fn now() -> f64 {
 }
 
 fn apply_migrations(db: &Connection) -> Result<()> {
+  migrate_task_events_table(db)?;
   if column_exists(db, "tasks", "retry_of")? && !column_exists(db, "tasks", "retry_of_task_id")? {
     db.execute(
       "alter table tasks rename column retry_of to retry_of_task_id",
@@ -274,6 +275,26 @@ fn apply_migrations(db: &Connection) -> Result<()> {
   }
   if !column_exists(db, "sessions", "id")? {
     migrate_session_identity(db)?;
+  }
+  Ok(())
+}
+
+fn migrate_task_events_table(db: &Connection) -> Result<()> {
+  if !table_exists(db, "task_log")? {
+    return Ok(());
+  }
+  if table_exists(db, "taskEvents")? {
+    db.execute_batch(
+      "
+          begin immediate;
+          insert into taskEvents(task_id, state, at)
+            select task_id, state, at from task_log;
+          drop table task_log;
+          commit;
+          ",
+    )?;
+  } else {
+    db.execute("alter table task_log rename to taskEvents", [])?;
   }
   Ok(())
 }
@@ -357,6 +378,17 @@ fn column_exists(db: &Connection, table: &str, column: &str) -> Result<bool> {
   Ok(false)
 }
 
+fn table_exists(db: &Connection, table: &str) -> Result<bool> {
+  db.query_row(
+    "select 1 from sqlite_master where type='table' and name=?",
+    [table],
+    |_| Ok(()),
+  )
+  .optional()
+  .map(|result| result.is_some())
+  .map_err(Into::into)
+}
+
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
   Ok(Task {
     id: row.get("id")?,
@@ -395,7 +427,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
 
 #[cfg(test)]
 mod tests {
-  use super::{apply_migrations, column_exists};
+  use super::{SCHEMA, apply_migrations, column_exists, table_exists};
   use rusqlite::Connection;
 
   #[test]
@@ -463,5 +495,44 @@ mod tests {
       )
       .unwrap();
     assert_eq!(external_session_id, "external-123");
+  }
+
+  #[test]
+  fn renames_task_log_table_without_losing_rows() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+      "
+          create table task_log(task_id int, state text, at real);
+          insert into task_log values(7, 'drafted', 1.0);
+          insert into task_log values(7, 'in_flight', 2.0);
+          ",
+    )
+    .unwrap();
+    db.execute_batch(SCHEMA).unwrap();
+
+    apply_migrations(&db).unwrap();
+
+    assert!(!table_exists(&db, "task_log").unwrap());
+    assert!(table_exists(&db, "taskEvents").unwrap());
+    let rows = db
+      .prepare("select task_id, state, at from taskEvents order by at")
+      .unwrap()
+      .query_map([], |row| {
+        Ok((
+          row.get::<_, i64>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, f64>(2)?,
+        ))
+      })
+      .unwrap()
+      .collect::<rusqlite::Result<Vec<_>>>()
+      .unwrap();
+    assert_eq!(
+      rows,
+      vec![
+        (7, "drafted".to_owned(), 1.0),
+        (7, "in_flight".to_owned(), 2.0)
+      ]
+    );
   }
 }
