@@ -1,6 +1,6 @@
 use std::collections::HashSet;
-use std::error::Error;
-use std::fmt;
+
+use anyhow::{Result, bail};
 
 use super::task_event::TaskEvent;
 
@@ -74,7 +74,7 @@ impl Task {
     context_size_start: Option<i64>,
     context_size_end: Option<i64>,
     events: Vec<TaskEvent>,
-  ) -> Result<Self, TaskError> {
+  ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("text", &text)?;
     require_nonnegative("predicted_files", predicted_files)?;
@@ -82,11 +82,11 @@ impl Task {
     require_optional_positive("session_id", session_id)?;
     require_optional_nonblank("commit_sha", commit_sha.as_deref())?;
     if !created_at.is_finite() || created_at < 0.0 {
-      return Err(TaskError::InvalidTimestamp);
+      bail!("created_at must be finite and nonnegative");
     }
     require_optional_positive("retry_of_task_id", retry_of_task_id)?;
     if retry_of_task_id == Some(id) {
-      return Err(TaskError::RetriesItself);
+      bail!("a task cannot retry itself");
     }
     require_optional_nonblank("reason", reason.as_deref())?;
     require_nonnegative("log_offset", log_offset)?;
@@ -95,21 +95,22 @@ impl Task {
     require_optional_nonnegative("context_size_end", context_size_end)?;
 
     if state.requires_session() && session_id.is_none() {
-      return Err(TaskError::MissingSession(state));
+      bail!("{state:?} task requires a session");
     }
     if state.requires_commit() && commit_sha.is_none() {
-      return Err(TaskError::MissingCommit(state));
+      bail!("{state:?} task requires a commit");
     }
     if state.requires_reason() && reason.is_none() {
-      return Err(TaskError::MissingReason(state));
+      bail!("{state:?} task requires a reason");
     }
     if is_session_reuse && session_id.is_none() {
-      return Err(TaskError::SessionReuseWithoutSession);
+      bail!("session reuse requires an assigned session");
     }
     if context_size_end.is_some() && context_size_start.is_none() {
-      return Err(TaskError::ContextEndWithoutStart);
+      bail!("context end requires a context start");
     }
     validate_predicted_files(predicted_files, predicted_file_list.as_deref())?;
+    validate_events(state, &events)?;
 
     Ok(Self {
       id,
@@ -201,93 +202,45 @@ impl Task {
   }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TaskError {
-  NonPositive { field: &'static str },
-  Negative { field: &'static str },
-  Blank { field: &'static str },
-  InvalidTimestamp,
-  RetriesItself,
-  MissingSession(TaskState),
-  MissingCommit(TaskState),
-  MissingReason(TaskState),
-  SessionReuseWithoutSession,
-  ContextEndWithoutStart,
-  PredictedFileCountMismatch { predicted: i64, listed: usize },
-  DuplicatePredictedFile(String),
-}
-
-impl fmt::Display for TaskError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::NonPositive { field } => write!(formatter, "{field} must be positive"),
-      Self::Negative { field } => write!(formatter, "{field} cannot be negative"),
-      Self::Blank { field } => write!(formatter, "{field} cannot be blank"),
-      Self::InvalidTimestamp => {
-        write!(formatter, "created_at must be finite and nonnegative")
-      }
-      Self::RetriesItself => write!(formatter, "a task cannot retry itself"),
-      Self::MissingSession(state) => write!(formatter, "{state:?} task requires a session"),
-      Self::MissingCommit(state) => write!(formatter, "{state:?} task requires a commit"),
-      Self::MissingReason(state) => write!(formatter, "{state:?} task requires a reason"),
-      Self::SessionReuseWithoutSession => {
-        write!(formatter, "session reuse requires an assigned session")
-      }
-      Self::ContextEndWithoutStart => {
-        write!(formatter, "context end requires a context start")
-      }
-      Self::PredictedFileCountMismatch { predicted, listed } => write!(
-        formatter,
-        "predicted file count {predicted} does not match {listed} listed files"
-      ),
-      Self::DuplicatePredictedFile(path) => {
-        write!(formatter, "predicted file list contains duplicate {path:?}")
-      }
-    }
-  }
-}
-
-impl Error for TaskError {}
-
-fn require_positive(field: &'static str, value: i64) -> Result<(), TaskError> {
+fn require_positive(field: &'static str, value: i64) -> Result<()> {
   if value <= 0 {
-    Err(TaskError::NonPositive { field })
+    bail!("{field} must be positive");
   } else {
     Ok(())
   }
 }
 
-fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<(), TaskError> {
+fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<()> {
   match value {
     Some(value) => require_positive(field, value),
     None => Ok(()),
   }
 }
 
-fn require_nonnegative(field: &'static str, value: i64) -> Result<(), TaskError> {
+fn require_nonnegative(field: &'static str, value: i64) -> Result<()> {
   if value < 0 {
-    Err(TaskError::Negative { field })
+    bail!("{field} cannot be negative");
   } else {
     Ok(())
   }
 }
 
-fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<(), TaskError> {
+fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<()> {
   match value {
     Some(value) => require_nonnegative(field, value),
     None => Ok(()),
   }
 }
 
-fn require_nonblank(field: &'static str, value: &str) -> Result<(), TaskError> {
+fn require_nonblank(field: &'static str, value: &str) -> Result<()> {
   if value.trim().is_empty() {
-    Err(TaskError::Blank { field })
+    bail!("{field} cannot be blank");
   } else {
     Ok(())
   }
 }
 
-fn require_optional_nonblank(field: &'static str, value: Option<&str>) -> Result<(), TaskError> {
+fn require_optional_nonblank(field: &'static str, value: Option<&str>) -> Result<()> {
   match value {
     Some(value) => require_nonblank(field, value),
     None => Ok(()),
@@ -297,29 +250,59 @@ fn require_optional_nonblank(field: &'static str, value: Option<&str>) -> Result
 fn validate_predicted_files(
   predicted_files: i64,
   predicted_file_list: Option<&[String]>,
-) -> Result<(), TaskError> {
+) -> Result<()> {
   let Some(files) = predicted_file_list else {
     return Ok(());
   };
   if predicted_files != i64::try_from(files.len()).unwrap_or(i64::MAX) {
-    return Err(TaskError::PredictedFileCountMismatch {
-      predicted: predicted_files,
-      listed: files.len(),
-    });
+    bail!(
+      "predicted file count {predicted_files} does not match {} listed files",
+      files.len()
+    );
   }
   let mut unique = HashSet::new();
   for file in files {
     require_nonblank("predicted_file_list", file)?;
     if !unique.insert(file) {
-      return Err(TaskError::DuplicatePredictedFile(file.clone()));
+      bail!("predicted file list contains duplicate {file:?}");
     }
+  }
+  Ok(())
+}
+
+fn validate_events(state: TaskState, events: &[TaskEvent]) -> Result<()> {
+  let Some(latest) = events.last() else {
+    bail!("a task requires at least one event");
+  };
+  let mut ids = HashSet::new();
+  for event in events {
+    if !ids.insert(event.id()) {
+      bail!("task events contain duplicate id {}", event.id());
+    }
+  }
+  for pair in events.windows(2) {
+    if pair[0].at() > pair[1].at() {
+      bail!(
+        "task event {} occurs before event {}",
+        pair[1].id(),
+        pair[0].id()
+      );
+    }
+  }
+  if latest.state() != state {
+    bail!(
+      "task state {state:?} does not match latest event state {:?}",
+      latest.state()
+    );
   }
   Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-  use super::{Task, TaskError, TaskState};
+  use anyhow::Result;
+
+  use super::{Task, TaskState};
   use crate::domain::TaskEvent;
 
   #[allow(clippy::too_many_arguments)]
@@ -335,7 +318,7 @@ mod tests {
     is_session_reuse: bool,
     context_size_start: Option<i64>,
     context_size_end: Option<i64>,
-  ) -> Result<Task, TaskError> {
+  ) -> Result<Task> {
     Task::new(
       id,
       text.to_owned(),
@@ -353,7 +336,29 @@ mod tests {
       is_session_reuse,
       context_size_start,
       context_size_end,
-      Vec::new(),
+      vec![TaskEvent::new(1, state, 1_700_000_000.0).unwrap()],
+    )
+  }
+
+  fn drafted_task_with_events(events: Vec<TaskEvent>) -> Result<Task> {
+    Task::new(
+      1,
+      "task".to_owned(),
+      0,
+      0,
+      TaskState::Drafted,
+      None,
+      None,
+      1_700_000_000.0,
+      None,
+      None,
+      0,
+      None,
+      None,
+      false,
+      None,
+      None,
+      events,
     )
   }
 
@@ -423,7 +428,7 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::NonPositive { field: "id" });
+    assert_eq!(error.to_string(), "id must be positive");
   }
 
   #[test]
@@ -457,13 +462,8 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(blank, TaskError::Blank { field: "text" });
-    assert_eq!(
-      negative,
-      TaskError::Negative {
-        field: "predicted_files"
-      }
-    );
+    assert_eq!(blank.to_string(), "text cannot be blank");
+    assert_eq!(negative.to_string(), "predicted_files cannot be negative");
   }
 
   #[test]
@@ -483,7 +483,7 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::MissingSession(TaskState::InFlight));
+    assert_eq!(error.to_string(), "InFlight task requires a session");
   }
 
   #[test]
@@ -503,7 +503,7 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::MissingCommit(TaskState::Verified));
+    assert_eq!(error.to_string(), "Verified task requires a commit");
   }
 
   #[test]
@@ -523,7 +523,7 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::MissingReason(TaskState::Failed));
+    assert_eq!(error.to_string(), "Failed task requires a reason");
   }
 
   #[test]
@@ -545,11 +545,11 @@ mod tests {
       false,
       None,
       None,
-      Vec::new(),
+      vec![TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap()],
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::RetriesItself);
+    assert_eq!(error.to_string(), "a task cannot retry itself");
   }
 
   #[test]
@@ -570,11 +570,8 @@ mod tests {
     .unwrap_err();
 
     assert_eq!(
-      error,
-      TaskError::PredictedFileCountMismatch {
-        predicted: 1,
-        listed: 2
-      }
+      error.to_string(),
+      "predicted file count 1 does not match 2 listed files"
     );
   }
 
@@ -609,15 +606,10 @@ mod tests {
     )
     .unwrap_err();
 
+    assert_eq!(blank.to_string(), "predicted_file_list cannot be blank");
     assert_eq!(
-      blank,
-      TaskError::Blank {
-        field: "predicted_file_list"
-      }
-    );
-    assert_eq!(
-      duplicate,
-      TaskError::DuplicatePredictedFile("a.rs".to_owned())
+      duplicate.to_string(),
+      "predicted file list contains duplicate \"a.rs\""
     );
   }
 
@@ -638,7 +630,10 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::SessionReuseWithoutSession);
+    assert_eq!(
+      error.to_string(),
+      "session reuse requires an assigned session"
+    );
   }
 
   #[test]
@@ -658,6 +653,49 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error, TaskError::ContextEndWithoutStart);
+    assert_eq!(error.to_string(), "context end requires a context start");
+  }
+
+  #[test]
+  fn requires_at_least_one_event() {
+    let error = drafted_task_with_events(Vec::new()).unwrap_err();
+
+    assert_eq!(error.to_string(), "a task requires at least one event");
+  }
+
+  #[test]
+  fn event_ids_are_unique_within_a_task() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, 2.0).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "task events contain duplicate id 1");
+  }
+
+  #[test]
+  fn events_are_in_nondecreasing_timestamp_order() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, 2.0).unwrap(),
+      TaskEvent::new(2, TaskState::Drafted, 1.0).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "task event 2 occurs before event 1");
+  }
+
+  #[test]
+  fn latest_event_state_matches_the_task_state() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, 1.0).unwrap(),
+      TaskEvent::new(2, TaskState::InFlight, 2.0).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "task state Drafted does not match latest event state InFlight"
+    );
   }
 }

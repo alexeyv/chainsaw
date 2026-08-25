@@ -39,3 +39,12 @@ Rust coordinator.
 ## Conventions that differ from defaults
 
 - Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
+
+## Error handling
+
+- Let errors propagate to the top of the call stack by default.
+- In Rust, use `anyhow::Error` and `anyhow::Result` as the default catch-all error type,
+  adding context where it helps explain the failure.
+- Create a custom error type or enum variant only when a caller actually needs to
+  match it and take different action. Tests matching a variant do not justify an error
+  taxonomy on their own.

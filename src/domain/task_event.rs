@@ -1,5 +1,4 @@
-use std::error::Error;
-use std::fmt;
+use anyhow::{Result, bail};
 
 use super::task::TaskState;
 
@@ -11,12 +10,12 @@ pub struct TaskEvent {
 }
 
 impl TaskEvent {
-  pub fn new(id: i64, state: TaskState, at: f64) -> Result<Self, TaskEventError> {
+  pub fn new(id: i64, state: TaskState, at: f64) -> Result<Self> {
     if id <= 0 {
-      return Err(TaskEventError::NonPositiveId);
+      bail!("id must be positive");
     }
     if !at.is_finite() || at < 0.0 {
-      return Err(TaskEventError::InvalidTimestamp);
+      bail!("at must be finite and nonnegative");
     }
 
     Ok(Self { id, state, at })
@@ -35,26 +34,9 @@ impl TaskEvent {
   }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TaskEventError {
-  NonPositiveId,
-  InvalidTimestamp,
-}
-
-impl fmt::Display for TaskEventError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::NonPositiveId => write!(formatter, "id must be positive"),
-      Self::InvalidTimestamp => write!(formatter, "at must be finite and nonnegative"),
-    }
-  }
-}
-
-impl Error for TaskEventError {}
-
 #[cfg(test)]
 mod tests {
-  use super::{TaskEvent, TaskEventError};
+  use super::TaskEvent;
   use crate::domain::TaskState;
 
   #[test]
@@ -88,7 +70,7 @@ mod tests {
   fn constructor_requires_a_positive_id() {
     for id in [i64::MIN, -1, 0] {
       let error = TaskEvent::new(id, TaskState::Drafted, 1.0).unwrap_err();
-      assert_eq!(error, TaskEventError::NonPositiveId);
+      assert_eq!(error.to_string(), "id must be positive");
     }
   }
 
@@ -96,7 +78,7 @@ mod tests {
   fn constructor_requires_a_finite_nonnegative_timestamp() {
     for at in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
       let error = TaskEvent::new(1, TaskState::Drafted, at).unwrap_err();
-      assert_eq!(error, TaskEventError::InvalidTimestamp);
+      assert_eq!(error.to_string(), "at must be finite and nonnegative");
     }
 
     assert!(TaskEvent::new(1, TaskState::Drafted, 0.0).is_ok());
