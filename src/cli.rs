@@ -19,6 +19,8 @@ pub enum Command {
   Daemon {
     #[arg(long)]
     lead: String,
+    #[arg(long, default_value_t = 5_000, hide = true)]
+    poll_interval_ms: u64,
   },
   /// Start the run's commentator session.
   StartCommentator {

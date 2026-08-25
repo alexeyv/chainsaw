@@ -233,7 +233,7 @@ class SupervisorContractCase(unittest.TestCase):
 
     def start_daemon(self, lead="lead"):
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
-                   "daemon", "--lead", lead]
+                   "daemon", "--lead", lead, "--poll-interval-ms", "10"]
         process = subprocess.Popen(
             command,
             text=True,

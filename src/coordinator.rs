@@ -28,7 +28,6 @@ const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
-const POLL_SECONDS: u64 = 5;
 const REUSE_MAX_CONTEXT: i64 = 60_000;
 const REUSE_MAX_STALE_LINES: i64 = 200;
 const PROMPT_ATTEMPTS: i64 = 3;
@@ -61,7 +60,10 @@ const COMMENTATOR_FLAGS: &[&str] = &[
 
 pub fn execute(store: &Store, command: Command) -> Result<()> {
   match command {
-    Command::Daemon { lead } => daemon(store, &lead),
+    Command::Daemon {
+      lead,
+      poll_interval_ms,
+    } => daemon(store, &lead, Duration::from_millis(poll_interval_ms)),
     Command::StartCommentator { role_prompt } => cmd_start_commentator(store, &role_prompt),
     Command::Launch {
       name,
@@ -1811,7 +1813,7 @@ fn daemon_prompt(store: &Store, name: &str, text: &str) -> bool {
   }
 }
 
-fn daemon(store: &Store, lead: &str) -> Result<()> {
+fn daemon(store: &Store, lead: &str, poll_interval: Duration) -> Result<()> {
   store.set_cfg("lead", lead)?;
   store.db.execute(
     "insert into sessions(name,role,started_at,last_growth)
@@ -1873,7 +1875,7 @@ fn daemon(store: &Store, lead: &str) -> Result<()> {
         _ => {}
       }
     }
-    thread::sleep(Duration::from_secs(POLL_SECONDS));
+    thread::sleep(poll_interval);
   }
   store.event("daemon-exit", "")
 }
