@@ -20,6 +20,22 @@ Agentic software development process, minimizing downtime between coding session
 - Build the supervisor with `cargo build`.
 - Compile the probe with `mkdir -p tools/bin && clang++ -o tools/bin/context-probe tools/context-probe.cc` — no Makefile.
 
+## Quality gate
+
+Run the complete gate from the repository root, in this order:
+
+```sh
+cargo fmt --check
+cargo clippy --quiet --all-targets --all-features --locked -- -D warnings
+cargo test --quiet --locked
+python3 -m unittest discover -s tests -q
+mkdir -p tools/bin
+clang++ -o tools/bin/context-probe tools/context-probe.cc
+```
+
+The Python command is the black-box contract harness; the system under test is the
+Rust coordinator.
+
 ## Conventions that differ from defaults
 
 - Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
