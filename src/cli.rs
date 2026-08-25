@@ -75,13 +75,13 @@ pub enum Command {
   Calibrate { task: i64 },
   /// Record a commentator finding's disposition.
   Disposition {
-    finding: String,
+    description: String,
     #[arg(long)]
     verdict: Verdict,
-    #[arg(long)]
-    task: Option<i64>,
-    #[arg(long)]
-    reason: String,
+    #[arg(long = "task")]
+    fix_task_id: Option<i64>,
+    #[arg(long = "reason")]
+    verdict_reason: String,
   },
   /// Read or write a run setting.
   Config {
@@ -123,15 +123,6 @@ pub enum TaskCommand {
 pub enum Verdict {
   Task,
   Dropped,
-}
-
-impl Verdict {
-  pub fn as_str(&self) -> &'static str {
-    match self {
-      Self::Task => "task",
-      Self::Dropped => "dropped",
-    }
-  }
 }
 
 #[derive(Clone, Debug, ValueEnum)]

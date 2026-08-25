@@ -36,8 +36,11 @@ create table calibrations(
   actual_files int not null, actual_lines int not null, wall_seconds real,
   created_at int not null, context_size_start int not null,
   context_size_end int not null);
-create table dispositions(id integer primary key, finding text,
-  verdict text, task_id int, reason text, at real);
+create table findings(
+  id integer primary key autoincrement,
+  description text not null, verdict text not null,
+  verdict_reason text not null, fix_task_id int references tasks(id),
+  created_at int not null);
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
 pragma user_version=1;

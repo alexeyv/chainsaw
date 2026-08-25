@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 
 use anyhow::{Result, bail};
 
@@ -43,6 +44,12 @@ impl TaskState {
 
   fn requires_reason(self) -> bool {
     matches!(self, Self::Accepted | Self::Failed)
+  }
+}
+
+impl fmt::Display for TaskState {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.as_str())
   }
 }
 
@@ -317,6 +324,23 @@ mod tests {
 
   fn timestamp(seconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(seconds, 0).unwrap()
+  }
+
+  #[test]
+  fn states_display_with_their_stable_names() {
+    for (state, name) in [
+      (TaskState::Drafted, "drafted"),
+      (TaskState::Dispatched, "dispatched"),
+      (TaskState::InFlight, "in_flight"),
+      (TaskState::Committed, "committed"),
+      (TaskState::Verified, "verified"),
+      (TaskState::Accepted, "accepted"),
+      (TaskState::Ingested, "ingested"),
+      (TaskState::Failed, "failed"),
+    ] {
+      assert_eq!(state.to_string(), state.as_str());
+      assert_eq!(state.to_string(), name);
+    }
   }
 
   #[allow(clippy::too_many_arguments)]
