@@ -16,14 +16,14 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{FindingVerdict, TaskState};
+use crate::domain::{FindingVerdict, Task, TaskState};
 use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
   latest_assistant_text, prompt_landed,
 };
-use crate::persistence::{calibration, finding, task_event};
+use crate::persistence::{calibration, finding, task, task_event};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::store::{Session, Store, TASK_STATES, Task, now};
+use crate::store::{Session, Store, TASK_STATES, Task as StoreTask, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
@@ -221,7 +221,7 @@ fn git_stdout(store: &Store, args: &[&str]) -> Result<String> {
   )
 }
 
-fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
+fn last_task_on(store: &Store, session_id: i64) -> Result<Option<StoreTask>> {
   Ok(
     store
       .tasks()?
@@ -531,6 +531,13 @@ fn commentator_agent_name(run_dir: &Path) -> String {
   format!("commentator-{:x}", hasher.finalize())[..20].to_owned()
 }
 
+fn task_snapshot(store: &Store, task_id: i64) -> Result<Option<Task>> {
+  let transaction = store.db.unchecked_transaction()?;
+  let task = task::get(&transaction, task_id)?;
+  transaction.commit()?;
+  Ok(task)
+}
+
 fn cmd_task_new(
   store: &Store,
   mut predicted_files: Option<i64>,
@@ -544,9 +551,7 @@ fn cmd_task_new(
     bail!("supervisor: task text on stdin is empty");
   }
   if let Some(retry_of_task_id) = retry_of_task_id
-    && store
-      .task(retry_of_task_id)?
-      .is_none_or(|task| task.state != "failed")
+    && task_snapshot(store, retry_of_task_id)?.is_none_or(|task| task.state() != TaskState::Failed)
   {
     bail!("supervisor: --retry-of {retry_of_task_id} is not a failed task");
   }
@@ -568,14 +573,20 @@ fn cmd_task_new(
   } else if predicted_files.is_none() {
     bail!("supervisor: task new needs --files a,b,c or --predicted-files N");
   }
-  let predicted_file_list = (!file_list.is_empty()).then(|| file_list.join(","));
-  store.db.execute(
-        "insert into tasks(text,predicted_files,predicted_lines,state,created_at,retry_of_task_id,predicted_file_list) values(?,?,?,?,?,?,?)",
-        params![text, predicted_files, predicted_lines, "drafted", now(), retry_of_task_id, predicted_file_list],
-    )?;
-  let task_id = store.db.last_insert_rowid();
-  store.set_task_state(task_id, TaskState::Drafted)?;
-  println!("{task_id}");
+  let predicted_files = predicted_files.context("task file prediction was not validated")?;
+  let predicted_file_list =
+    (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
+  let transaction = store.db.unchecked_transaction()?;
+  let task = task::create(
+    &transaction,
+    &text,
+    predicted_files,
+    predicted_lines,
+    retry_of_task_id,
+    predicted_file_list,
+  )?;
+  transaction.commit()?;
+  println!("{}", task.id());
   Ok(())
 }
 
@@ -620,11 +631,10 @@ fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<Strin
     .map(str::to_owned)
     .collect::<Vec<_>>();
   let own: HashSet<_> = task
-    .predicted_file_list
-    .as_deref()
+    .predicted_file_list()
     .unwrap_or_default()
-    .split(',')
-    .filter(|file| !file.is_empty())
+    .iter()
+    .map(String::as_str)
     .collect();
   let outside = changed
     .iter()
@@ -668,10 +678,10 @@ fn cmd_dispatch(
   implementer: &str,
   reuse: bool,
 ) -> Result<()> {
-  let Some(task) = store.task(task_id)? else {
+  let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: task {task_id} is not in state drafted");
   };
-  if task.state != "drafted" {
+  if task.state() != TaskState::Drafted {
     bail!("supervisor: task {task_id} is not in state drafted");
   }
   if let Some(flying) = store
@@ -745,7 +755,7 @@ fn cmd_dispatch(
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
     preamble,
-    text = task.text.trim_end()
+    text = task.text().trim_end()
   );
   if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
     store.set_task_state(task_id, TaskState::Drafted)?;
@@ -805,10 +815,10 @@ fn new_commit_for(
 }
 
 fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
-  let Some(task) = store.task(task_id)? else {
+  let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
-  let mut log = match task.session_id {
+  let mut log = match task.session_id() {
     Some(session_id) => match store.session(session_id)? {
       Some(session) => session_log(store, runtime, &session)?,
       None => None,
@@ -817,15 +827,15 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
   };
   let shas = log
     .as_deref()
-    .map(|path| commits_in_log(path, task.log_offset as u64))
+    .map(|path| commits_in_log(path, task.log_offset() as u64))
     .unwrap_or_default();
-  let mut sha = match &task.commit_sha {
-    Some(sha) => Some(sha.clone()),
-    None => new_commit_for(store, &shas, task.base_head.as_deref())?,
+  let mut sha = match task.commit_sha() {
+    Some(sha) => Some(sha.to_owned()),
+    None => new_commit_for(store, &shas, task.base_head())?,
   };
-  if sha.is_none() && head_advanced_cleanly(store, task.base_head.as_deref())? {
+  if sha.is_none() && head_advanced_cleanly(store, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
-    log = match task.session_id {
+    log = match task.session_id() {
       Some(session_id) => match store.session(session_id)? {
         Some(session) => session_log(store, runtime, &session)?,
         None => None,
@@ -834,9 +844,9 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
     };
     let shas = log
       .as_deref()
-      .map(|path| commits_in_log(path, task.log_offset as u64))
+      .map(|path| commits_in_log(path, task.log_offset() as u64))
       .unwrap_or_default();
-    sha = new_commit_for(store, &shas, task.base_head.as_deref())?;
+    sha = new_commit_for(store, &shas, task.base_head())?;
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
@@ -861,7 +871,7 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
   match (store.cfg("gate")?, log.as_deref()) {
     (Some(gate), Some(log)) => {
       if let Some(problem) = gate_last_problem(
-        &bash_commands(log, task.log_offset as u64),
+        &bash_commands(log, task.log_offset() as u64),
         &gate,
         &store.run_dir,
       ) {
@@ -873,7 +883,7 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
     _ => {}
   }
   if let Some(sha) = &sha
-    && task.commit_sha.is_none()
+    && task.commit_sha().is_none()
   {
     store.db.execute(
       "update tasks set commit_sha=? where id=?",
@@ -1278,7 +1288,7 @@ fn looks_gitignored(path: &str) -> bool {
 }
 
 fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = store.task(task_id)? else {
+  let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -1296,17 +1306,19 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   if states.contains("accepted") {
     bail!("supervisor: task {task_id} is already accepted");
   }
-  if !matches!(task.state.as_str(), "committed" | "ingested") || task.commit_sha.is_none() {
+  if !matches!(task.state(), TaskState::Committed | TaskState::Ingested)
+    || task.commit_sha().is_none()
+  {
     bail!(
       "supervisor: task {task_id} is {}, not a committed unverified task",
-      task.state
+      task.state()
     );
   }
   store.db.execute(
     "update tasks set reason=? where id=?",
     params![reason, task_id],
   )?;
-  if task.state == "committed" {
+  if task.state() == TaskState::Committed {
     store.set_task_state(task_id, TaskState::Accepted)?;
   } else {
     let transaction = store.db.unchecked_transaction()?;
@@ -1320,13 +1332,13 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
 
 fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
   let mut failures = 0;
-  let mut current = store.task(task_id)?;
+  let mut current = task_snapshot(store, task_id)?;
   while let Some(task) = current {
-    if task.state == "failed" {
+    if task.state() == TaskState::Failed {
       failures += 1;
     }
-    current = match task.retry_of_task_id {
-      Some(retry_of_task_id) => store.task(retry_of_task_id)?,
+    current = match task.retry_of_task_id() {
+      Some(retry_of_task_id) => task_snapshot(store, retry_of_task_id)?,
       None => None,
     };
   }
@@ -1334,10 +1346,10 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
 }
 
 fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let task = store.task(task_id)?;
+  let task = task_snapshot(store, task_id)?;
   if !task
     .as_ref()
-    .is_some_and(|task| matches!(task.state.as_str(), "dispatched" | "in_flight"))
+    .is_some_and(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
   {
     bail!("supervisor: task {task_id} is not in flight");
   }
@@ -1365,10 +1377,10 @@ fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
 }
 
 fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
-  let Some(task) = store.task(task_id)? else {
+  let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
-  let Some(commit_sha) = task.commit_sha.as_deref() else {
+  let Some(commit_sha) = task.commit_sha() else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
   let stat = git_stdout(store, &["show", "--shortstat", "--format=", commit_sha])?;
@@ -1393,7 +1405,7 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| end - start);
-  let log = match task.session_id {
+  let log = match task.session_id() {
     Some(session_id) => match store.session(session_id)? {
       Some(session) => session_log(store, runtime, &session)?,
       None => None,
@@ -1404,25 +1416,27 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
     .tasks()?
     .into_iter()
     .find(|candidate| {
-      candidate.id > task_id && candidate.session_id == task.session_id && candidate.log_offset > 0
+      candidate.id > task_id
+        && candidate.session_id == task.session_id()
+        && candidate.log_offset > 0
     })
     .map(|candidate| candidate.log_offset as u64);
-  let mut end = context_peak(log.as_deref(), task.log_offset as u64, next_offset) as i64;
+  let mut end = context_peak(log.as_deref(), task.log_offset() as u64, next_offset) as i64;
   if end == 0
-    && let Some(session_id) = task.session_id
+    && let Some(session_id) = task.session_id()
   {
     end = store
       .session(session_id)?
       .map_or(0, |session| session.context_max);
   }
-  let base = task.context_size_start.unwrap_or_default();
+  let base = task.context_size_start().unwrap_or_default();
   let context = (end - base).max(0);
   let transaction = store.db.unchecked_transaction()?;
   calibration::create(
     &transaction,
     task_id,
-    task.predicted_files,
-    task.predicted_lines,
+    task.predicted_files(),
+    task.predicted_lines(),
     actual_files,
     actual_lines,
     wall,
@@ -1431,10 +1445,15 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
   )?;
   transaction.commit()?;
   let wall_text = wall.map_or_else(|| "None".to_owned(), |wall| (wall as i64).to_string());
-  let reuse = if task.is_session_reuse { ", reuse" } else { "" };
+  let reuse = if task.is_session_reuse() {
+    ", reuse"
+  } else {
+    ""
+  };
   println!(
     "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {context} (session {end}, base {base}{reuse})",
-    task.predicted_files, task.predicted_lines
+    task.predicted_files(),
+    task.predicted_lines()
   );
   Ok(())
 }
