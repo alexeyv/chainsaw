@@ -71,7 +71,10 @@ class SupervisorContractCase(unittest.TestCase):
 
     @property
     def logs_dir(self):
-        munged = os.path.realpath(self.run_dir).replace("/", "-").replace(".", "-")
+        return self.logs_dir_for(self.run_dir)
+
+    def logs_dir_for(self, run_dir):
+        munged = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
         return self.home / ".claude" / "projects" / munged
 
     def cli(self, *args, input_text=None, timeout=30):

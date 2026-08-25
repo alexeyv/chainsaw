@@ -30,6 +30,7 @@ const POLL_SECONDS: u64 = 5;
 const REUSE_MAX_CONTEXT: i64 = 60_000;
 const REUSE_MAX_STALE_LINES: i64 = 200;
 const PROMPT_ATTEMPTS: i64 = 3;
+const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks, then the project's quality gate last. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, and a one-paragraph semantic delta.";
 
@@ -175,19 +176,51 @@ fn herdr_status(name: &str) -> Option<String> {
 }
 
 fn session_log(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
-  let external_session_id = if let Some(external_session_id) = herdr_session_id(&session.name) {
-    store.db.execute(
-      "update sessions set external_session_id=? where id=?",
-      params![external_session_id, session.id],
-    )?;
+  let live_session_id = herdr_session_id(&session.name);
+  let external_session_id = if let Some(external_session_id) = live_session_id {
+    if session.external_session_id.as_deref() != Some(&external_session_id) {
+      store.db.execute(
+        "update sessions set external_session_id=?,log_path=NULL where id=?",
+        params![external_session_id, session.id],
+      )?;
+    }
     Some(external_session_id)
   } else {
     session.external_session_id.clone()
   };
-  Ok(
-    external_session_id
-      .map(|external_session_id| store.logs_dir.join(format!("{external_session_id}.jsonl"))),
-  )
+  let Some(external_session_id) = external_session_id else {
+    return Ok(None);
+  };
+  let expected = store.logs_dir.join(format!("{external_session_id}.jsonl"));
+  let cached = if session.external_session_id.as_deref() == Some(&external_session_id) {
+    session.log_path.as_deref()
+  } else {
+    None
+  };
+  let path = if expected.is_file() {
+    Some(expected)
+  } else if cached.is_some_and(Path::is_file) {
+    cached.map(Path::to_path_buf)
+  } else {
+    find_session_log(store, &external_session_id)
+  };
+  if let Some(path) = &path {
+    store.db.execute(
+      "update sessions set log_path=? where id=?",
+      params![path.to_string_lossy(), session.id],
+    )?;
+  }
+  Ok(path)
+}
+
+fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf> {
+  let projects_dir = store.logs_dir.parent()?;
+  let filename = format!("{external_session_id}.jsonl");
+  fs::read_dir(projects_dir)
+    .ok()?
+    .filter_map(Result::ok)
+    .map(|entry| entry.path().join(&filename))
+    .find(|path| path.is_file())
 }
 
 fn session_log_named(store: &Store, name: &str) -> Result<Option<PathBuf>> {
@@ -833,7 +866,7 @@ fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
   let Some(task) = store.task(task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
-  let log = match task.session_id {
+  let mut log = match task.session_id {
     Some(session_id) => match store.session(session_id)? {
       Some(session) => session_log(store, &session)?,
       None => None,
@@ -844,10 +877,25 @@ fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
     .as_deref()
     .map(|path| commits_in_log(path, task.log_offset as u64))
     .unwrap_or_default();
-  let sha = match &task.commit_sha {
+  let mut sha = match &task.commit_sha {
     Some(sha) => Some(sha.clone()),
     None => new_commit_for(store, &shas, task.base_head.as_deref())?,
   };
+  if sha.is_none() && head_advanced_cleanly(store, task.base_head.as_deref())? {
+    thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
+    log = match task.session_id {
+      Some(session_id) => match store.session(session_id)? {
+        Some(session) => session_log(store, &session)?,
+        None => None,
+      },
+      None => None,
+    };
+    let shas = log
+      .as_deref()
+      .map(|path| commits_in_log(path, task.log_offset as u64))
+      .unwrap_or_default();
+    sha = new_commit_for(store, &shas, task.base_head.as_deref())?;
+  }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
     let show = git(store, &["log", "-1", "--format=%H%n%B", sha])?;
@@ -911,6 +959,23 @@ fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
   Err(anyhow!(""))
 }
 
+fn head_advanced_cleanly(store: &Store, base_head: Option<&str>) -> Result<bool> {
+  let Some(base_head) = base_head else {
+    return Ok(false);
+  };
+  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  if head.is_empty() || head == base_head {
+    return Ok(false);
+  }
+  if !git(store, &["merge-base", "--is-ancestor", base_head, &head])?
+    .status
+    .success()
+  {
+    return Ok(false);
+  }
+  Ok(git_stdout(store, &["status", "--porcelain"])?.is_empty())
+}
+
 fn has_attribution_trailer(message: &str) -> bool {
   message.lines().any(|line| {
     let lowercase = line.to_ascii_lowercase();
@@ -929,7 +994,7 @@ fn gate_last_problem(commands: &[(String, bool)], gate: &str, run_dir: &Path) ->
   };
   let gate_index = commands[..commit_index]
     .iter()
-    .rposition(|(command, _)| command.contains(gate));
+    .rposition(|(command, _)| contains_gate(command, gate));
   let Some(gate_index) = gate_index else {
     return Some(format!("the gate ({gate:?}) did not run before the commit"));
   };
@@ -950,16 +1015,33 @@ fn gate_last_problem(commands: &[(String, bool)], gate: &str, run_dir: &Path) ->
         truncate(first_line, 80)
       ));
     }
-    for part in shell_parts(&command) {
-      if !harmless_after_gate(part, run_dir) {
-        return Some(format!(
-          "source-modifying command after the gate: {:?}",
-          truncate(part, 80)
-        ));
-      }
+    if !command_harmless_after_gate(&command, run_dir) {
+      return Some(format!(
+        "source-modifying command after the gate: {:?}",
+        truncate(command.lines().next().unwrap_or_default(), 80)
+      ));
     }
   }
   None
+}
+
+fn contains_gate(command: &str, gate: &str) -> bool {
+  let actual = command_backbone(command);
+  let wanted = command_backbone(gate);
+  !wanted.is_empty() && format!(" {actual} ").contains(&format!(" {wanted} "))
+}
+
+fn command_backbone(command: &str) -> String {
+  let redirect = Regex::new(r#"(?:\d+\s*)?(?:>&|<&|>>|<<|>|<)\s*(?:"[^"]*"|'[^']*'|[^\s;|&]+)"#)
+    .expect("valid redirect regex");
+  let separators = Regex::new(r"\s*([;|&]+)\s*").expect("valid separator regex");
+  let without_heredocs = without_heredoc_bodies(command);
+  let without_redirects = redirect.replace_all(&without_heredocs, "");
+  separators
+    .replace_all(&without_redirects, "$1")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 fn before_git_commit(command: &str) -> Option<&str> {
@@ -971,32 +1053,96 @@ fn truncate(text: &str, limit: usize) -> String {
   text.chars().take(limit).collect()
 }
 
-fn shell_parts(command: &str) -> Vec<&str> {
+fn without_heredoc_bodies(command: &str) -> String {
+  let marker =
+    Regex::new(r#"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?"#).expect("valid heredoc regex");
+  let mut delimiter = None;
+  let mut kept = Vec::new();
+  for line in command.lines() {
+    if let Some(expected) = delimiter.as_deref() {
+      if line.trim() == expected {
+        delimiter = None;
+      }
+      continue;
+    }
+    kept.push(line);
+    if let Some(capture) = marker.captures(line) {
+      delimiter = Some(capture[1].to_owned());
+    }
+  }
+  kept.join("\n").replace("\\\n", " ")
+}
+
+fn shell_parts(command: &str) -> Vec<String> {
   let pattern = Regex::new(r"(?:\n|&&|\|\||;|\|)+").expect("valid shell regex");
   pattern
-    .split(command.trim())
+    .split(without_heredoc_bodies(command).trim())
     .map(str::trim)
     .filter(|part| !part.is_empty())
+    .map(str::to_owned)
     .collect()
 }
 
-fn harmless_after_gate(part: &str, run_dir: &Path) -> bool {
-  let dev_null = Regex::new(r"\d*>\s*/dev/null").expect("valid redirect regex");
-  let cleaned = dev_null.replace_all(part, "");
-  let redirects = Regex::new(r"\d*>>?\s*([^\s;|&]+)").expect("valid redirect regex");
-  for capture in redirects.captures_iter(&cleaned) {
-    let target = &capture[1];
-    if target.starts_with('&') {
+fn command_harmless_after_gate(command: &str, run_dir: &Path) -> bool {
+  let assignment = Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$").expect("valid assignment regex");
+  let mut variables = HashMap::new();
+  let mut cwd = run_dir.to_path_buf();
+  for part in shell_parts(command) {
+    let mut tokens = part.split_whitespace();
+    for token in tokens.by_ref() {
+      let Some(capture) = assignment.captures(token) else {
+        if token == "cd" {
+          let Some(target) = tokens
+            .next()
+            .and_then(|target| expand_path(target, &variables, &cwd))
+          else {
+            return false;
+          };
+          cwd = target;
+        }
+        break;
+      };
+      variables.insert(capture[1].to_owned(), unquote(&capture[2]).to_owned());
+    }
+    if harmless_after_gate(&part, run_dir, &variables, &cwd) {
       continue;
     }
-    let path = Path::new(target);
-    if path.is_absolute() && !path.starts_with(run_dir) {
+    if !cwd.starts_with(run_dir) && !command.contains(&run_dir.to_string_lossy().into_owned()) {
       continue;
     }
     return false;
   }
+  true
+}
+
+fn harmless_after_gate(
+  part: &str,
+  run_dir: &Path,
+  variables: &HashMap<String, String>,
+  cwd: &Path,
+) -> bool {
+  let redirects = Regex::new(r#"(?:\d+\s*)?(>&|<&|>>|<<|>|<)\s*("[^"]*"|'[^']*'|[^\s;|&]+)"#)
+    .expect("valid redirect regex");
+  for capture in redirects.captures_iter(part) {
+    let operator = &capture[1];
+    let target = unquote(&capture[2]);
+    if operator.starts_with('<') && operator != "<>" {
+      continue;
+    }
+    if operator.contains('&') && (target.chars().all(|c| c.is_ascii_digit()) || target == "-") {
+      continue;
+    }
+    let Some(path) = expand_path(target, variables, cwd) else {
+      return false;
+    };
+    if !path.starts_with(run_dir) || git_ignored(run_dir, &path) {
+      continue;
+    }
+    return false;
+  }
+  let cleaned = command_backbone(part);
   let assignment = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=").expect("valid assignment regex");
-  let mut tokens: Vec<_> = part.split_whitespace().collect();
+  let mut tokens: Vec<_> = cleaned.split_whitespace().collect();
   while tokens
     .first()
     .is_some_and(|token| assignment.is_match(token))
@@ -1042,6 +1188,68 @@ fn harmless_after_gate(part: &str, run_dir: &Path) -> bool {
     "rm" => safe_rm(&tokens),
     _ => false,
   }
+}
+
+fn unquote(token: &str) -> &str {
+  token
+    .strip_prefix('"')
+    .and_then(|token| token.strip_suffix('"'))
+    .or_else(|| {
+      token
+        .strip_prefix('\'')
+        .and_then(|token| token.strip_suffix('\''))
+    })
+    .unwrap_or(token)
+}
+
+fn expand_path(token: &str, variables: &HashMap<String, String>, cwd: &Path) -> Option<PathBuf> {
+  let variable = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").expect("valid variable regex");
+  let expanded = variable
+    .replace_all(unquote(token), |capture: &regex::Captures<'_>| {
+      variables
+        .get(&capture[1])
+        .cloned()
+        .unwrap_or_else(|| capture[0].to_owned())
+    })
+    .into_owned();
+  if expanded.contains('$') {
+    return None;
+  }
+  let path = PathBuf::from(expanded);
+  Some(normalize_path(if path.is_absolute() {
+    path
+  } else {
+    cwd.join(path)
+  }))
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+  use std::path::Component;
+
+  let mut normalized = PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::CurDir => {}
+      Component::ParentDir => {
+        normalized.pop();
+      }
+      other => normalized.push(other.as_os_str()),
+    }
+  }
+  normalized
+}
+
+fn git_ignored(run_dir: &Path, path: &Path) -> bool {
+  let Ok(relative) = path.strip_prefix(run_dir) else {
+    return false;
+  };
+  ProcessCommand::new("git")
+    .arg("-C")
+    .arg(run_dir)
+    .args(["check-ignore", "-q", "--"])
+    .arg(relative)
+    .output()
+    .is_ok_and(|output| output.status.success())
 }
 
 fn git_subcommand<'a>(tokens: &'a [&str]) -> Option<&'a str> {
@@ -1390,10 +1598,22 @@ fn cmd_state(store: &Store) -> Result<()> {
       flags.push_str(" idle, reusable");
     }
     let quiet = (now() - session.last_growth.unwrap_or_else(now)) as i64;
-    println!(
-      "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
-      session.name, session.role, session.context, session.context_max
-    );
+    if session_log(store, &session)?.is_some() {
+      println!(
+        "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
+        session.name, session.role, session.context, session.context_max
+      );
+    } else {
+      let danger = if session.role == "lead" {
+        "; lead stop threshold disabled"
+      } else {
+        ""
+      };
+      println!(
+        "  {:<16} {:<12} context UNAVAILABLE (session log not found{danger}) quiet {quiet}s{flags}",
+        session.name, session.role
+      );
+    }
   }
   print_time_summary(store)?;
   let unread = file_size(Some(&store.logs_dir.join("chainsaw-comments.md"))) as i64
@@ -1497,7 +1717,11 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
     .filter(|session| name.is_none_or(|name| session.name == name))
   {
     let log = session_log(store, &session)?;
-    println!("{}\t{}", session.name, context_size(log.as_deref()));
+    if let Some(log) = log {
+      println!("{}\t{}", session.name, context_size(Some(&log)));
+    } else {
+      println!("{}\tUNAVAILABLE (session log not found)", session.name);
+    }
   }
   Ok(())
 }
@@ -1556,6 +1780,7 @@ fn daemon(store: &Store, lead: &str) -> Result<()> {
   store.set_cfg("stopped", "0")?;
   store.event("daemon-start", &format!("pid {}", std::process::id()))?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
+  let mut missing_logs = HashSet::new();
   let mut compacting = false;
   while store.cfg("stopped")?.as_deref() != Some("1") {
     let timestamp = now();
@@ -1566,8 +1791,28 @@ fn daemon(store: &Store, lead: &str) -> Result<()> {
     {
       let name = &session.name;
       let log = session_log(store, &session)?;
-      let size = file_size(log.as_deref());
-      let context = context_size(log.as_deref()) as i64;
+      let Some(log) = log else {
+        if missing_logs.insert(name.clone()) {
+          let danger = if session.role == "lead" {
+            "; the lead context stop threshold cannot fire"
+          } else {
+            ""
+          };
+          let detail = format!("{name} ({}): session log not found{danger}", session.role);
+          eprintln!("WARNING: {detail}");
+          store.event("session-log-missing", &detail)?;
+        }
+        continue;
+      };
+      if missing_logs.remove(name) {
+        eprintln!(
+          "supervisor: session log found for {name}: {}",
+          log.display()
+        );
+        store.event("session-log-found", &format!("{name}: {}", log.display()))?;
+      }
+      let size = file_size(Some(&log));
+      let context = context_size(Some(&log)) as i64;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.clone(), size);
       store.db.execute(
@@ -1577,16 +1822,9 @@ fn daemon(store: &Store, lead: &str) -> Result<()> {
       let quiet = timestamp - session.last_growth.unwrap_or(timestamp);
 
       match session.role.as_str() {
-        "implementer" => observe_implementer(store, &session, log.as_deref(), quiet)?,
+        "implementer" => observe_implementer(store, &session, Some(&log), quiet)?,
         "commentator" => {
-          observe_commentator(
-            store,
-            &session,
-            log.as_deref(),
-            context,
-            quiet,
-            &mut compacting,
-          )?;
+          observe_commentator(store, &session, Some(&log), context, quiet, &mut compacting)?;
         }
         "lead" => observe_lead(store, name, context)?,
         _ => {}

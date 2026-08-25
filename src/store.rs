@@ -11,7 +11,7 @@ create table if not exists config(key text primary key, value text);
 create table if not exists sessions(id integer primary key, name text not null, role text,
   pane_id text, tab_id text, external_session_id text unique, started_at real,
   context int default 0, context_max int default 0, last_growth real,
-  kicked_at real, prepopulated_at real, stopped_at real);
+  kicked_at real, prepopulated_at real, stopped_at real, log_path text);
 create table if not exists tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, state text, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
@@ -61,6 +61,11 @@ const ADD_COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     "context_end",
     "alter table calibration add column context_end int",
   ),
+  (
+    "sessions",
+    "log_path",
+    "alter table sessions add column log_path text",
+  ),
 ];
 
 pub const TASK_STATES: &[&str] = &[
@@ -98,6 +103,7 @@ pub struct Session {
   pub name: String,
   pub role: String,
   pub external_session_id: Option<String>,
+  pub log_path: Option<PathBuf>,
   pub context: i64,
   pub context_max: i64,
   pub last_growth: Option<f64>,
@@ -317,14 +323,15 @@ fn migrate_session_identity(db: &Connection) -> Result<()> {
           last_growth real,
           kicked_at real,
           prepopulated_at real,
-          stopped_at real
+          stopped_at real,
+          log_path text
         );
         insert into sessions(
           name, role, pane_id, tab_id, external_session_id, started_at, context,
-          context_max, last_growth, kicked_at, prepopulated_at, stopped_at
+          context_max, last_growth, kicked_at, prepopulated_at, stopped_at, log_path
         )
         select name, role, pane_id, tab_id, session_id, started_at, context,
-          context_max, last_growth, kicked_at, prepopulated_at, stopped_at
+          context_max, last_growth, kicked_at, prepopulated_at, stopped_at, log_path
         from sessions_legacy;
 
         alter table tasks rename to tasks_legacy;
@@ -414,6 +421,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     name: row.get("name")?,
     role: row.get("role")?,
     external_session_id: row.get("external_session_id")?,
+    log_path: row.get::<_, Option<String>>("log_path")?.map(PathBuf::from),
     context: row.get::<_, Option<i64>>("context")?.unwrap_or_default(),
     context_max: row
       .get::<_, Option<i64>>("context_max")?
