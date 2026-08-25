@@ -449,7 +449,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             "--reason", "not actionable",
         )
 
-        self.assert_failure(result, "FOREIGN KEY constraint failed")
+        self.assert_failure(result, "supervisor: no task 99")
 
     def test_disposition_requires_an_existing_fix_task(self):
         source = self.new_task()

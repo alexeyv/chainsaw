@@ -6,9 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::domain::{TaskEvent, TaskState};
-use crate::persistence::task_event;
-
 const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
@@ -18,7 +15,7 @@ create table sessions(id integer primary key, name text not null, role text,
   context int default 0, context_max int default 0, last_growth real,
   kicked_at real, prepopulated_at real, stopped_at real, log_path text);
 create table tasks(id integer primary key, text text, predicted_files int,
-  predicted_lines int, state text, session_id int references sessions(id),
+  predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
   reason text, log_offset int default 0, base_head text, predicted_file_list text,
   is_session_reuse int not null default 0, context_size_start int,
@@ -143,17 +140,6 @@ impl Store {
     Ok(())
   }
 
-  pub fn set_task_state(&self, task_id: i64, state: TaskState) -> Result<TaskEvent> {
-    let transaction = self.db.unchecked_transaction()?;
-    transaction.execute(
-      "update tasks set state=? where id=?",
-      params![state.as_str(), task_id],
-    )?;
-    let event = task_event::create(&transaction, task_id, state)?;
-    transaction.commit()?;
-    Ok(event)
-  }
-
   pub fn session(&self, id: i64) -> Result<Option<Session>> {
     self
       .db
@@ -266,9 +252,15 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
+    let task_state_columns = db.query_row(
+      "select count(*) from pragma_table_info('tasks') where name='state'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
     assert_eq!(version, 1);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
+    assert_eq!(task_state_columns, 0);
     Ok(())
   }
 

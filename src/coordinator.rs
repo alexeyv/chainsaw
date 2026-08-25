@@ -765,11 +765,13 @@ fn cmd_dispatch(
     String::new()
   };
 
-  store.db.execute(
+  let transaction = store.db.unchecked_transaction()?;
+  transaction.execute(
     "update tasks set session_id=?, is_session_reuse=? where id=?",
     params![session.id, i64::from(reuse), task_id],
   )?;
-  store.set_task_state(task_id, TaskState::Dispatched)?;
+  task_event::create(&transaction, task_id, TaskState::Dispatched)?;
+  transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
@@ -777,7 +779,9 @@ fn cmd_dispatch(
     text = task.text().trim_end()
   );
   if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
-    store.set_task_state(task_id, TaskState::Drafted)?;
+    let transaction = store.db.unchecked_transaction()?;
+    task_event::create(&transaction, task_id, TaskState::Drafted)?;
+    transaction.commit()?;
     store.event(
       "dispatch-failed",
       &format!("task {task_id} -> {implementer}: prompt never landed"),
@@ -788,11 +792,13 @@ fn cmd_dispatch(
   let offset = file_size(log.as_deref());
   let base = context_before(log.as_deref(), offset);
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-  store.db.execute(
+  let transaction = store.db.unchecked_transaction()?;
+  transaction.execute(
     "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
     params![offset as i64, head, base as i64, task_id],
   )?;
-  store.set_task_state(task_id, TaskState::InFlight)?;
+  task_event::create(&transaction, task_id, TaskState::InFlight)?;
+  transaction.commit()?;
   if reuse {
     println!("task {task_id} in flight on {implementer} (reuse, context base {base})");
   } else {
@@ -913,7 +919,9 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
     .iter()
     .any(|problem| !problem.starts_with("gate not configured"));
   if !has_hard_problem {
-    store.set_task_state(task_id, TaskState::Verified)?;
+    let transaction = store.db.unchecked_transaction()?;
+    task_event::create(&transaction, task_id, TaskState::Verified)?;
+    transaction.commit()?;
     println!(
       "task {task_id} verified: {}",
       sha.as_deref().unwrap_or_default()
@@ -1333,17 +1341,13 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
       task.state()
     );
   }
-  store.db.execute(
+  let transaction = store.db.unchecked_transaction()?;
+  transaction.execute(
     "update tasks set reason=? where id=?",
     params![reason, task_id],
   )?;
-  if task.state() == TaskState::Committed {
-    store.set_task_state(task_id, TaskState::Accepted)?;
-  } else {
-    let transaction = store.db.unchecked_transaction()?;
-    task_event::create(&transaction, task_id, TaskState::Accepted)?;
-    transaction.commit()?;
-  }
+  task_event::create(&transaction, task_id, TaskState::Accepted)?;
+  transaction.commit()?;
   store.event("accepted", &format!("task {task_id}: {reason}"))?;
   println!("task {task_id} accepted without verify: {reason}");
   Ok(())
@@ -1373,11 +1377,13 @@ fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
     bail!("supervisor: task {task_id} is not in flight");
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
-  store.db.execute(
+  let transaction = store.db.unchecked_transaction()?;
+  transaction.execute(
     "update tasks set reason=? where id=?",
     params![reason, task_id],
   )?;
-  store.set_task_state(task_id, TaskState::Failed)?;
+  task_event::create(&transaction, task_id, TaskState::Failed)?;
+  transaction.commit()?;
   store.event("failed", &format!("task {task_id}: {reason}"))?;
   let failures = failures_in_lineage(store, task_id)?;
   let plural = if failures == 1 { "" } else { "s" };
@@ -1488,9 +1494,11 @@ fn cmd_disposition(
     Verdict::Dropped => FindingVerdict::Dropped,
   };
   let transaction = store.db.unchecked_transaction()?;
-  finding::create(
+  let task =
+    task::get(&transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))?;
+  task::record_finding(
     &transaction,
-    task_id,
+    &task,
     description,
     verdict,
     verdict_reason,
@@ -1895,11 +1903,13 @@ fn observe_implementer(
     .map(|path| commits_in_log(path, task.log_offset() as u64))
     .unwrap_or_default();
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
-    store.db.execute(
+    let transaction = store.db.unchecked_transaction()?;
+    transaction.execute(
       "update tasks set commit_sha=? where id=?",
       params![sha, task.id()],
     )?;
-    store.set_task_state(task.id(), TaskState::Committed)?;
+    task_event::create(&transaction, task.id(), TaskState::Committed)?;
+    transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else if quiet > STALE_SECONDS
     && session.kicked_at.is_none()
@@ -1947,7 +1957,9 @@ fn observe_commentator(
       let sha = task.commit_sha().unwrap_or_default();
       let abbreviation = sha.get(..7).unwrap_or(sha);
       if text.contains(abbreviation) {
-        store.set_task_state(task.id(), TaskState::Ingested)?;
+        let transaction = store.db.unchecked_transaction()?;
+        task_event::create(&transaction, task.id(), TaskState::Ingested)?;
+        transaction.commit()?;
         store.event("ingested", &format!("task {}", task.id()))?;
       }
     }

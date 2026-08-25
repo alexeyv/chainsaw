@@ -35,16 +35,15 @@ pub fn create(
   let id = transaction.query_row(
     "
       insert into tasks(
-        text, predicted_files, predicted_lines, state, created_at,
-        retry_of_task_id, predicted_file_list
-      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        text, predicted_files, predicted_lines, created_at, retry_of_task_id,
+        predicted_file_list
+      ) values (?1, ?2, ?3, ?4, ?5, ?6)
       returning id
       ",
     params![
       text,
       predicted_files,
       predicted_lines,
-      TaskState::Drafted.as_str(),
       created_at,
       retry_of_task_id,
       stored_file_list,
@@ -253,7 +252,7 @@ mod tests {
 
     let stored = db.query_row(
       "
-        select text, predicted_files, predicted_lines, state, created_at,
+        select text, predicted_files, predicted_lines, created_at,
                retry_of_task_id, predicted_file_list
         from tasks where id=?
         ",
@@ -263,10 +262,9 @@ mod tests {
           row.get::<_, String>(0)?,
           row.get::<_, i64>(1)?,
           row.get::<_, i64>(2)?,
-          row.get::<_, String>(3)?,
-          row.get::<_, f64>(4)?,
-          row.get::<_, Option<i64>>(5)?,
-          row.get::<_, Option<String>>(6)?,
+          row.get::<_, f64>(3)?,
+          row.get::<_, Option<i64>>(4)?,
+          row.get::<_, Option<String>>(5)?,
         ))
       },
     )?;
@@ -292,7 +290,6 @@ mod tests {
         "materialize tasks through persistence".to_owned(),
         2,
         80,
-        "drafted".to_owned(),
         task.created_at(),
         None,
         Some("src/domain/task.rs,src/store.rs".to_owned()),
