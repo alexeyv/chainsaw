@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
+use super::task_event::TaskEvent;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskState {
   Drafted,
@@ -49,6 +51,7 @@ pub struct Task {
   is_session_reuse: bool,
   context_size_start: Option<i64>,
   context_size_end: Option<i64>,
+  events: Vec<TaskEvent>,
 }
 
 impl Task {
@@ -70,6 +73,7 @@ impl Task {
     is_session_reuse: bool,
     context_size_start: Option<i64>,
     context_size_end: Option<i64>,
+    events: Vec<TaskEvent>,
   ) -> Result<Self, TaskError> {
     require_positive("id", id)?;
     require_nonblank("text", &text)?;
@@ -124,6 +128,7 @@ impl Task {
       is_session_reuse,
       context_size_start,
       context_size_end,
+      events,
     })
   }
 
@@ -189,6 +194,10 @@ impl Task {
 
   pub fn context_size_end(&self) -> Option<i64> {
     self.context_size_end
+  }
+
+  pub fn events(&self) -> &[TaskEvent] {
+    &self.events
   }
 }
 
@@ -311,6 +320,7 @@ fn validate_predicted_files(
 #[cfg(test)]
 mod tests {
   use super::{Task, TaskError, TaskState};
+  use crate::domain::TaskEvent;
 
   #[allow(clippy::too_many_arguments)]
   fn task_with(
@@ -343,11 +353,16 @@ mod tests {
       is_session_reuse,
       context_size_start,
       context_size_end,
+      Vec::new(),
     )
   }
 
   #[test]
   fn exposes_every_field_without_mutators() {
+    let events = vec![
+      TaskEvent::new(1, TaskState::Drafted, 1_699_999_900.0).unwrap(),
+      TaskEvent::new(2, TaskState::InFlight, 1_700_000_000.0).unwrap(),
+    ];
     let task = Task::new(
       2,
       "Implement the task".to_owned(),
@@ -365,6 +380,7 @@ mod tests {
       true,
       Some(40),
       Some(75),
+      events.clone(),
     )
     .unwrap();
 
@@ -387,6 +403,7 @@ mod tests {
     assert!(task.is_session_reuse());
     assert_eq!(task.context_size_start(), Some(40));
     assert_eq!(task.context_size_end(), Some(75));
+    assert_eq!(task.events(), events.as_slice());
   }
 
   #[test]
@@ -528,6 +545,7 @@ mod tests {
       false,
       None,
       None,
+      Vec::new(),
     )
     .unwrap_err();
 
