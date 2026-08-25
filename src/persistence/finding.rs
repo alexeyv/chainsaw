@@ -4,7 +4,35 @@ use rusqlite::{Connection, Transaction, params};
 
 use crate::domain::{Finding, FindingVerdict};
 
+struct FindingRow {
+  id: i64,
+  task_id: i64,
+  description: String,
+  verdict: String,
+  verdict_reason: String,
+  fix_task_id: Option<i64>,
+  created_at: i64,
+}
+
 pub fn create(
+  transaction: &Transaction<'_>,
+  task_id: i64,
+  description: &str,
+  verdict: FindingVerdict,
+  verdict_reason: &str,
+  fix_task_id: Option<i64>,
+) -> Result<Finding> {
+  insert(
+    transaction,
+    task_id,
+    description,
+    verdict,
+    verdict_reason,
+    fix_task_id,
+  )
+}
+
+pub(super) fn insert(
   transaction: &Transaction<'_>,
   task_id: i64,
   description: &str,
@@ -44,6 +72,16 @@ pub fn create(
   Ok(finding)
 }
 
+pub(super) fn for_task(transaction: &Transaction<'_>, task_id: i64) -> Result<Vec<Finding>> {
+  let mut statement = transaction.prepare(
+    "
+      select id, task_id, description, verdict, verdict_reason, fix_task_id, created_at
+      from findings where task_id=? order by id
+      ",
+  )?;
+  load(statement.query_map([task_id], finding_row)?)
+}
+
 pub fn all(db: &Connection) -> Result<Vec<Finding>> {
   let mut statement = db.prepare(
     "
@@ -51,30 +89,36 @@ pub fn all(db: &Connection) -> Result<Vec<Finding>> {
       from findings order by id
       ",
   )?;
-  let rows = statement.query_map([], |row| {
-    Ok((
-      row.get::<_, i64>(0)?,
-      row.get::<_, i64>(1)?,
-      row.get::<_, String>(2)?,
-      row.get::<_, String>(3)?,
-      row.get::<_, String>(4)?,
-      row.get::<_, Option<i64>>(5)?,
-      row.get::<_, i64>(6)?,
-    ))
-  })?;
+  let rows = statement.query_map([], finding_row)?;
+  load(rows)
+}
+
+fn finding_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingRow> {
+  Ok(FindingRow {
+    id: row.get(0)?,
+    task_id: row.get(1)?,
+    description: row.get(2)?,
+    verdict: row.get(3)?,
+    verdict_reason: row.get(4)?,
+    fix_task_id: row.get(5)?,
+    created_at: row.get(6)?,
+  })
+}
+
+fn load(rows: impl Iterator<Item = rusqlite::Result<FindingRow>>) -> Result<Vec<Finding>> {
   rows
     .map(|row| {
-      let (id, task_id, description, verdict, verdict_reason, fix_task_id, created_at) = row?;
-      let verdict = FindingVerdict::try_from(verdict.as_str())?;
-      let created_at = DateTime::from_timestamp_millis(created_at)
+      let row = row?;
+      let verdict = FindingVerdict::try_from(row.verdict.as_str())?;
+      let created_at = DateTime::from_timestamp_millis(row.created_at)
         .context("finding created_at is outside the supported range")?;
       Finding::new(
-        id,
-        task_id,
-        description,
+        row.id,
+        row.task_id,
+        row.description,
         verdict,
-        verdict_reason,
-        fix_task_id,
+        row.verdict_reason,
+        row.fix_task_id,
         created_at,
       )
     })
