@@ -134,9 +134,7 @@ impl Store {
     let path = logs_dir.join("chainsaw-supervisor.db");
     let db = Connection::open(&path)?;
     db.busy_timeout(Duration::from_secs(30))?;
-    db.execute_batch(SCHEMA)?;
-    apply_migrations(&db)?;
-    db.execute_batch("pragma foreign_keys=on;")?;
+    initialize_schema(&db)?;
     Ok(Self {
       run_dir,
       logs_dir,
@@ -250,6 +248,13 @@ pub fn now() -> f64 {
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
     .as_secs_f64()
+}
+
+pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
+  db.execute_batch(SCHEMA)?;
+  apply_migrations(db)?;
+  db.execute_batch("pragma foreign_keys=on;")?;
+  Ok(())
 }
 
 fn apply_migrations(db: &Connection) -> Result<()> {
