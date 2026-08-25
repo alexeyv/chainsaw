@@ -12,7 +12,7 @@ use chrono::{Local, TimeZone};
 use fs2::FileExt;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::json;
 use sha1::{Digest, Sha1};
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
@@ -22,6 +22,7 @@ use crate::logs::{
   latest_assistant_text, prompt_landed,
 };
 use crate::persistence::{calibration, finding, task_event};
+use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::store::{Session, Store, TASK_STATES, Task, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
@@ -35,47 +36,31 @@ const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks, then the project's quality gate last. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, and a one-paragraph semantic delta.";
 
-const IMPLEMENTER_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--disable-slash-commands",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
-
-const COMMENTATOR_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
-
-pub fn execute(store: &Store, command: Command) -> Result<()> {
+pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
       poll_interval_ms,
-    } => daemon(store, &lead, Duration::from_millis(poll_interval_ms)),
-    Command::StartCommentator { role_prompt } => cmd_start_commentator(store, &role_prompt),
+    } => daemon(
+      store,
+      runtime,
+      &lead,
+      Duration::from_millis(poll_interval_ms),
+    ),
+    Command::StartCommentator { role_prompt } => {
+      cmd_start_commentator(store, runtime, &role_prompt)
+    }
     Command::Launch {
       name,
       fresh,
       reason,
     } => cmd_launch(
       store,
+      runtime,
       &name,
       LaunchOptions {
         role: "implementer",
-        flags: IMPLEMENTER_FLAGS,
-        split: false,
+        kind: SessionKind::Implementer,
         fresh,
         reason: reason.as_deref(),
       },
@@ -87,7 +72,7 @@ pub fn execute(store: &Store, command: Command) -> Result<()> {
       timeout,
       prepopulate,
     } => {
-      cmd_prompt(store, &name, &text, wait, timeout)?;
+      cmd_prompt(store, runtime, &name, &text, wait, timeout)?;
       if prepopulate && let Some(session) = store.latest_session_named(&name)? {
         store.db.execute(
           "update sessions set prepopulated_at=? where id=?",
@@ -111,10 +96,10 @@ pub fn execute(store: &Store, command: Command) -> Result<()> {
       ),
     },
     Command::Fail { task, reason } => cmd_fail(store, task, &reason),
-    Command::Dispatch { task, to, reuse } => cmd_dispatch(store, task, &to, reuse),
-    Command::Verify { task } => cmd_verify(store, task),
+    Command::Dispatch { task, to, reuse } => cmd_dispatch(store, runtime, task, &to, reuse),
+    Command::Verify { task } => cmd_verify(store, runtime, task),
     Command::Accept { task, reason } => cmd_accept(store, task, &reason),
-    Command::Calibrate { task } => cmd_calibrate(store, task),
+    Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
     Command::Disposition {
       description,
       verdict,
@@ -129,9 +114,9 @@ pub fn execute(store: &Store, command: Command) -> Result<()> {
         Ok(())
       }
     }
-    Command::State => cmd_state(store),
+    Command::State => cmd_state(store, runtime),
     Command::Comments { all } => cmd_comments(store, all),
-    Command::Context { name } => cmd_context(store, name.as_deref()),
+    Command::Context { name } => cmd_context(store, runtime, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
   }
@@ -139,48 +124,21 @@ pub fn execute(store: &Store, command: Command) -> Result<()> {
 
 struct LaunchOptions<'a> {
   role: &'a str,
-  flags: &'a [&'a str],
-  split: bool,
+  kind: SessionKind,
   fresh: bool,
   reason: Option<&'a str>,
 }
 
-fn run(program: &str, args: &[&str]) -> Result<Output> {
-  ProcessCommand::new(program)
-    .args(args)
-    .output()
-    .with_context(|| format!("failed to run {program}"))
-}
-
-fn herdr(args: &[&str]) -> Result<Value> {
-  let output = run("herdr", args)?;
-  if !output.status.success() {
-    bail!(
-      "herdr failed: {}",
-      String::from_utf8_lossy(&output.stderr).trim()
-    );
-  }
-  serde_json::from_slice(&output.stdout).context("herdr returned invalid JSON")
-}
-
-fn herdr_session_id(name: &str) -> Option<String> {
-  herdr(&["agent", "get", name])
-    .ok()?
-    .pointer("/result/agent/agent_session/value")?
-    .as_str()
-    .map(str::to_owned)
-}
-
-fn herdr_status(name: &str) -> Option<String> {
-  herdr(&["agent", "get", name])
-    .ok()?
-    .pointer("/result/agent/status")?
-    .as_str()
-    .map(str::to_owned)
-}
-
-fn session_log(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
-  let live_session_id = herdr_session_id(&session.name);
+fn session_log(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  session: &Session,
+) -> Result<Option<PathBuf>> {
+  let live_session_id = runtime
+    .query(&session.name)
+    .ok()
+    .flatten()
+    .map(|session| session.external_id);
   let external_session_id = if let Some(external_session_id) = live_session_id {
     if session.external_session_id.as_deref() != Some(&external_session_id) {
       store.db.execute(
@@ -227,9 +185,13 @@ fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf>
     .find(|path| path.is_file())
 }
 
-fn session_log_named(store: &Store, name: &str) -> Result<Option<PathBuf>> {
+fn session_log_named(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  name: &str,
+) -> Result<Option<PathBuf>> {
   match store.latest_session_named(name)? {
-    Some(session) => session_log(store, &session),
+    Some(session) => session_log(store, runtime, &session),
     None => Ok(None),
   }
 }
@@ -390,7 +352,12 @@ fn describe_idle(store: &Store, idle: &IdleSession) -> Result<String> {
   ))
 }
 
-fn cmd_launch(store: &Store, name: &str, options: LaunchOptions<'_>) -> Result<()> {
+fn cmd_launch(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  name: &str,
+  options: LaunchOptions<'_>,
+) -> Result<()> {
   if options.role == "implementer" {
     let pool: Vec<_> = idle_pool(store)?
       .into_iter()
@@ -422,60 +389,14 @@ fn cmd_launch(store: &Store, name: &str, options: LaunchOptions<'_>) -> Result<(
     }
   }
 
-  let workspace = env::var("HERDR_WORKSPACE_ID")
-    .map_err(|_| anyhow!("supervisor: must run inside a Herdr pane"))?;
-  let (pane_id, tab_id) = if options.split {
-    let run_dir = store.run_dir.to_string_lossy();
-    let response = herdr(&[
-      "pane",
-      "split",
-      "--current",
-      "--direction",
-      "right",
-      "--cwd",
-      &run_dir,
-      "--no-focus",
-    ])?;
-    (
-      json_string(&response, "/result/pane/pane_id")?,
-      env::var("HERDR_TAB_ID").unwrap_or_default(),
-    )
-  } else {
-    let run_dir = store.run_dir.to_string_lossy();
-    let response = herdr(&[
-      "tab",
-      "create",
-      "--workspace",
-      &workspace,
-      "--label",
-      name,
-      "--cwd",
-      &run_dir,
-      "--no-focus",
-    ])?;
-    (
-      json_string(&response, "/result/root_pane/pane_id")?,
-      json_string(&response, "/result/tab/tab_id")?,
-    )
-  };
-
-  let mut start_args = vec!["agent", "start", name, "--kind", "claude", "--pane"];
-  start_args.push(&pane_id);
-  start_args.push("--");
-  start_args.extend_from_slice(options.flags);
-  let mut started = None;
-  for attempt in 0..5 {
-    match herdr(&start_args) {
-      Ok(response) => {
-        started = Some(response);
-        break;
-      }
-      Err(error) if attempt == 4 => return Err(error),
-      Err(_) => thread::sleep(Duration::from_secs(2)),
-    }
-  }
-  let started = started.context("herdr agent did not start")?;
-  let external_session_id = json_string(&started, "/result/agent/agent_session/value")?;
+  let started = runtime.start(StartSession {
+    id: name,
+    run_dir: &store.run_dir,
+    kind: options.kind,
+  })?;
+  let external_session_id = started.external_id;
+  let pane_id = started.pane_id;
+  let tab_id = started.tab_id;
   store.db.execute(
     "update sessions set stopped_at=? where name=? and stopped_at is null",
     params![now(), name],
@@ -492,15 +413,14 @@ fn cmd_launch(store: &Store, name: &str, options: LaunchOptions<'_>) -> Result<(
   Ok(())
 }
 
-fn json_string(value: &Value, pointer: &str) -> Result<String> {
-  value
-    .pointer(pointer)
-    .and_then(Value::as_str)
-    .map(str::to_owned)
-    .with_context(|| format!("herdr response lacks {pointer}"))
-}
-
-fn cmd_prompt(store: &Store, name: &str, text: &str, wait: bool, timeout: u64) -> Result<()> {
+fn cmd_prompt(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  name: &str,
+  text: &str,
+  wait: bool,
+  timeout: u64,
+) -> Result<()> {
   let lock_path = PathBuf::from(format!("{}.prompt-lock", store.path.display()));
   let lock = OpenOptions::new()
     .create(true)
@@ -516,16 +436,16 @@ fn cmd_prompt(store: &Store, name: &str, text: &str, wait: bool, timeout: u64) -
   let prompt_id = store.db.last_insert_rowid();
 
   for attempt in 1..=PROMPT_ATTEMPTS {
-    let path_before = session_log_named(store, name)?;
+    let path_before = session_log_named(store, runtime, name)?;
     let mut offset = file_size(path_before.as_deref());
     store.db.execute(
       "update prompts set attempts=attempts+1 where id=?",
       [prompt_id],
     )?;
-    let _ = run("herdr", &["agent", "prompt", name, text]);
+    let _ = runtime.prompt(name, text);
     let deadline = now() + 15.0;
     while now() < deadline {
-      let path = session_log_named(store, name)?;
+      let path = session_log_named(store, runtime, name)?;
       if path != path_before {
         offset = 0;
       }
@@ -538,8 +458,7 @@ fn cmd_prompt(store: &Store, name: &str, text: &str, wait: bool, timeout: u64) -
         )?;
         FileExt::unlock(&lock)?;
         if wait {
-          let timeout_ms = (timeout * 1000).to_string();
-          let _ = run("herdr", &["agent", "wait", name, "--timeout", &timeout_ms]);
+          let _ = runtime.wait(name, Duration::from_secs(timeout));
           println!(
             "{}",
             latest_assistant_text(&path).unwrap_or_else(|| "(no assistant text)".to_owned())
@@ -556,15 +475,19 @@ fn cmd_prompt(store: &Store, name: &str, text: &str, wait: bool, timeout: u64) -
   bail!("supervisor: prompt to {name} never landed after {PROMPT_ATTEMPTS} attempts")
 }
 
-fn cmd_start_commentator(store: &Store, role_prompt: &Path) -> Result<()> {
+fn cmd_start_commentator(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  role_prompt: &Path,
+) -> Result<()> {
   let name = commentator_agent_name(&store.run_dir);
   cmd_launch(
     store,
+    runtime,
     &name,
     LaunchOptions {
       role: "commentator",
-      flags: COMMENTATOR_FLAGS,
-      split: true,
+      kind: SessionKind::Commentator,
       fresh: false,
       reason: None,
     },
@@ -573,6 +496,7 @@ fn cmd_start_commentator(store: &Store, role_prompt: &Path) -> Result<()> {
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
     store,
+    runtime,
     &name,
     &format!(
       "Read and follow this role prompt entirely: {}\nSession-log directory: {}\nRun directory: {}",
@@ -729,7 +653,13 @@ fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<Strin
   Ok(format!("{}\n\n", lines.join("\n")))
 }
 
-fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> Result<()> {
+fn cmd_dispatch(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+  implementer: &str,
+  reuse: bool,
+) -> Result<()> {
   let Some(task) = store.task(task_id)? else {
     bail!("supervisor: task {task_id} is not in state drafted");
   };
@@ -809,7 +739,7 @@ fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> 
     preamble,
     text = task.text.trim_end()
   );
-  if let Err(error) = cmd_prompt(store, implementer, &prompt, false, 300) {
+  if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
     store.set_task_state(task_id, TaskState::Drafted)?;
     store.event(
       "dispatch-failed",
@@ -817,7 +747,7 @@ fn cmd_dispatch(store: &Store, task_id: i64, implementer: &str, reuse: bool) -> 
     )?;
     return Err(error);
   }
-  let log = session_log(store, &session)?;
+  let log = session_log(store, runtime, &session)?;
   let offset = file_size(log.as_deref());
   let base = context_before(log.as_deref(), offset);
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
@@ -866,13 +796,13 @@ fn new_commit_for(
   Ok(None)
 }
 
-fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
+fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
   let Some(task) = store.task(task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut log = match task.session_id {
     Some(session_id) => match store.session(session_id)? {
-      Some(session) => session_log(store, &session)?,
+      Some(session) => session_log(store, runtime, &session)?,
       None => None,
     },
     None => None,
@@ -889,7 +819,7 @@ fn cmd_verify(store: &Store, task_id: i64) -> Result<()> {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
     log = match task.session_id {
       Some(session_id) => match store.session(session_id)? {
-        Some(session) => session_log(store, &session)?,
+        Some(session) => session_log(store, runtime, &session)?,
         None => None,
       },
       None => None,
@@ -1426,7 +1356,7 @@ fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   Ok(())
 }
 
-fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
+fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
   let Some(task) = store.task(task_id)? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
@@ -1457,7 +1387,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     .map(|(start, end)| end - start);
   let log = match task.session_id {
     Some(session_id) => match store.session(session_id)? {
-      Some(session) => session_log(store, &session)?,
+      Some(session) => session_log(store, runtime, &session)?,
       None => None,
     },
     None => None,
@@ -1576,7 +1506,7 @@ fn cmd_comments(store: &Store, show_all: bool) -> Result<()> {
   Ok(())
 }
 
-fn cmd_state(store: &Store) -> Result<()> {
+fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
   println!("tasks");
   for task in store.tasks()? {
     let mut statement = store
@@ -1641,7 +1571,7 @@ fn cmd_state(store: &Store) -> Result<()> {
       flags.push_str(" idle, reusable");
     }
     let quiet = (now() - session.last_growth.unwrap_or_else(now)) as i64;
-    if session_log(store, &session)?.is_some() {
+    if session_log(store, runtime, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name, session.role, session.context, session.context_max
@@ -1755,13 +1685,13 @@ fn print_time_summary(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
+fn cmd_context(store: &Store, runtime: &dyn SessionRuntime, name: Option<&str>) -> Result<()> {
   for session in store
     .sessions()?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name == name))
   {
-    let log = session_log(store, &session)?;
+    let log = session_log(store, runtime, &session)?;
     if let Some(log) = log {
       println!("{}\t{}", session.name, context_size(Some(&log)));
     } else {
@@ -1803,8 +1733,8 @@ fn cmd_stop(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn daemon_prompt(store: &Store, name: &str, text: &str) -> bool {
-  match cmd_prompt(store, name, text, false, 300) {
+fn daemon_prompt(store: &Store, runtime: &dyn SessionRuntime, name: &str, text: &str) -> bool {
+  match cmd_prompt(store, runtime, name, text, false, 300) {
     Ok(()) => true,
     Err(error) => {
       let _ = store.event("prompt-unreachable", &format!("{name}: {error}"));
@@ -1813,7 +1743,12 @@ fn daemon_prompt(store: &Store, name: &str, text: &str) -> bool {
   }
 }
 
-fn daemon(store: &Store, lead: &str, poll_interval: Duration) -> Result<()> {
+fn daemon(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  lead: &str,
+  poll_interval: Duration,
+) -> Result<()> {
   store.set_cfg("lead", lead)?;
   store.db.execute(
     "insert into sessions(name,role,started_at,last_growth)
@@ -1835,7 +1770,7 @@ fn daemon(store: &Store, lead: &str, poll_interval: Duration) -> Result<()> {
       .filter(|session| session.stopped_at.is_none())
     {
       let name = &session.name;
-      let log = session_log(store, &session)?;
+      let log = session_log(store, runtime, &session)?;
       let Some(log) = log else {
         if missing_logs.insert(name.clone()) {
           let danger = if session.role == "lead" {
@@ -1867,11 +1802,21 @@ fn daemon(store: &Store, lead: &str, poll_interval: Duration) -> Result<()> {
       let quiet = timestamp - session.last_growth.unwrap_or(timestamp);
 
       match session.role.as_str() {
-        "implementer" => observe_implementer(store, &session, Some(&log), quiet)?,
-        "commentator" => {
-          observe_commentator(store, &session, Some(&log), context, quiet, &mut compacting)?;
+        "implementer" => {
+          observe_implementer(store, runtime, &session, Some(&log), quiet)?;
         }
-        "lead" => observe_lead(store, name, context)?,
+        "commentator" => {
+          observe_commentator(
+            store,
+            runtime,
+            &session,
+            Some(&log),
+            context,
+            quiet,
+            &mut compacting,
+          )?;
+        }
+        "lead" => observe_lead(store, runtime, name, context)?,
         _ => {}
       }
     }
@@ -1882,6 +1827,7 @@ fn daemon(store: &Store, lead: &str, poll_interval: Duration) -> Result<()> {
 
 fn observe_implementer(
   store: &Store,
+  runtime: &dyn SessionRuntime,
   session: &Session,
   log: Option<&Path>,
   quiet: f64,
@@ -1904,7 +1850,11 @@ fn observe_implementer(
     store.event("committed", &format!("task {} {sha}", task.id))?;
   } else if quiet > STALE_SECONDS
     && session.kicked_at.is_none()
-    && herdr_status(&session.name)
+    && runtime
+      .query(&session.name)
+      .ok()
+      .flatten()
+      .map(|session| session.status)
       .as_deref()
       .is_some_and(|status| matches!(status, "idle" | "done"))
   {
@@ -1913,13 +1863,14 @@ fn observe_implementer(
       "update sessions set kicked_at=? where id=?",
       params![now(), session.id],
     )?;
-    daemon_prompt(store, &session.name, "continue");
+    daemon_prompt(store, runtime, &session.name, "continue");
   }
   Ok(())
 }
 
 fn observe_commentator(
   store: &Store,
+  runtime: &dyn SessionRuntime,
   session: &Session,
   log: Option<&Path>,
   context: i64,
@@ -1944,13 +1895,17 @@ fn observe_commentator(
   if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
     *compacting = true;
     store.event("compact", &format!("{} at {context}", session.name))?;
-    daemon_prompt(store, &session.name, "/compact");
+    daemon_prompt(store, runtime, &session.name, "/compact");
   } else if context < COMMENTATOR_COMPACT_TOKENS {
     *compacting = false;
   }
   if quiet > STALE_SECONDS
     && session.kicked_at.is_none()
-    && herdr_status(&session.name)
+    && runtime
+      .query(&session.name)
+      .ok()
+      .flatten()
+      .map(|session| session.status)
       .as_deref()
       .is_some_and(|status| matches!(status, "idle" | "done"))
   {
@@ -1959,17 +1914,23 @@ fn observe_commentator(
       "update sessions set kicked_at=? where id=?",
       params![now(), session.id],
     )?;
-    daemon_prompt(store, &session.name, "continue");
+    daemon_prompt(store, runtime, &session.name, "continue");
   }
   Ok(())
 }
 
-fn observe_lead(store: &Store, name: &str, context: i64) -> Result<()> {
+fn observe_lead(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  name: &str,
+  context: i64,
+) -> Result<()> {
   if context > LEAD_STOP_TOKENS && store.cfg("lead-told-stop")?.as_deref() != Some("1") {
     store.set_cfg("lead-told-stop", "1")?;
     store.event("stop-lead", &format!("context {context}"))?;
     daemon_prompt(
       store,
+      runtime,
       name,
       &format!(
         "supervisor: your context is {context} tokens, past {LEAD_STOP_TOKENS}. Stop the run per the skill's Stopping section: the human must ask them plainly whether to end the run for good, then let the in-flight implementer finish, wait for the commentator on that commit, write the continuation prompt, then stop."

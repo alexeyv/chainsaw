@@ -84,13 +84,24 @@ class TaskContractTests(SupervisorContractCase):
 class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_prompt_wait_prints_the_agent_reply(self):
         self.launch()
-        self.update_fake_herdr(reply_on_prompt="fixture reply")
+        self.update_zero_cost_dummy(reply_on_prompt="fixture reply")
 
         result = self.assert_success(
             self.cli("prompt", "worker", "hello agent", "--wait")
         )
 
         self.assertEqual(result.stdout, "fixture reply\n")
+        self.assertEqual(
+            [(operation["operation"], operation["session_id"])
+             for operation in self.runtime_operations()],
+            [
+                ("start", "worker"),
+                ("query", "worker"),
+                ("prompt", "worker"),
+                ("query", "worker"),
+                ("wait", "worker"),
+            ],
+        )
 
     def test_dispatch_delivers_task_and_contract_then_enters_flight(self):
         task = self.new_task(text="Implement normal dispatch behavior.")
@@ -434,7 +445,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         harness = self.sandbox / "harness"
         harness.mkdir()
         session_id = "lead-outside-run"
-        self.update_fake_herdr(
+        self.update_zero_cost_dummy(
             agents={"lead": {
                 "session_id": session_id,
                 "status": "idle",
@@ -493,7 +504,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
         ))
         commentator = next(
-            name for name in self.fake_herdr_state()["agents"]
+            name for name in self.zero_cost_dummy_state()["agents"]
             if name.startswith("commentator-")
         )
         self.append_text(commentator, f"Reviewed commit {sha[:10]}")

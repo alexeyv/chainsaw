@@ -3,7 +3,6 @@
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import tempfile
 import time
@@ -25,11 +24,8 @@ else:
         check=True,
     )
     SUPERVISOR_COMMAND = [str(BINARY)]
-FAKE_HERDR = Path(__file__).parent / "fixtures" / "fake_herdr.py"
-
-
 class SupervisorContractCase(unittest.TestCase):
-    """An isolated installation, Git repository, and Herdr service per test."""
+    """An isolated installation, Git repository, and session runtime per test."""
 
     maxDiff = None
 
@@ -39,23 +35,15 @@ class SupervisorContractCase(unittest.TestCase):
         self.sandbox = Path(self.temporary.name)
         self.run_dir = self.sandbox / "run"
         self.home = self.sandbox / "home"
-        self.bin_dir = self.sandbox / "bin"
-        self.fake_state = self.sandbox / "fake-herdr.json"
+        self.runtime_state_path = self.sandbox / "zero-cost-dummy.json"
         self.run_dir.mkdir()
         self.home.mkdir()
-        self.bin_dir.mkdir()
-
-        fake = self.bin_dir / "herdr"
-        shutil.copy2(FAKE_HERDR, fake)
-        fake.chmod(0o755)
 
         self.env = os.environ.copy()
         self.env.update({
             "HOME": str(self.home),
-            "PATH": str(self.bin_dir) + os.pathsep + self.env.get("PATH", ""),
-            "FAKE_HERDR_STATE": str(self.fake_state),
-            "HERDR_WORKSPACE_ID": "contract-workspace",
-            "HERDR_TAB_ID": "contract-tab",
+            "CHAINSAW_SESSION_RUNTIME": "zero-cost-dummy",
+            "CHAINSAW_ZERO_COST_DUMMY_STATE": str(self.runtime_state_path),
             "GIT_AUTHOR_NAME": "Chainsaw Tests",
             "GIT_AUTHOR_EMAIL": "chainsaw-tests@example.invalid",
             "GIT_COMMITTER_NAME": "Chainsaw Tests",
@@ -149,18 +137,22 @@ class SupervisorContractCase(unittest.TestCase):
             args.append("--reuse")
         return self.cli(*args)
 
-    def fake_herdr_state(self):
-        return json.loads(self.fake_state.read_text())
+    def zero_cost_dummy_state(self):
+        return json.loads(self.runtime_state_path.read_text())
 
-    def update_fake_herdr(self, **updates):
-        state = self.fake_herdr_state() if self.fake_state.exists() else {
+    def update_zero_cost_dummy(self, **updates):
+        state = self.zero_cost_dummy_state() if self.runtime_state_path.exists() else {
             "agents": {}, "panes": {}, "sequence": 0, "drop_prompts": 0,
+            "operations": [],
         }
         state.update(updates)
-        self.fake_state.write_text(json.dumps(state, sort_keys=True))
+        self.runtime_state_path.write_text(json.dumps(state, sort_keys=True))
+
+    def runtime_operations(self):
+        return self.zero_cost_dummy_state()["operations"]
 
     def session_log(self, name):
-        state = self.fake_herdr_state()
+        state = self.zero_cost_dummy_state()
         session_id = state["agents"][name]["session_id"]
         return self.logs_dir / f"{session_id}.jsonl"
 
