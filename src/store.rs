@@ -18,7 +18,7 @@ create table if not exists tasks(id integer primary key, text text, predicted_fi
   reason text, log_offset int default 0, base_head text, predicted_file_list text,
   is_session_reuse int not null default 0, context_size_start int,
   context_size_end int);
-create table if not exists taskEvents(task_id int, state text, at real);
+create table if not exists task_events(task_id int, state text, at real);
 create table if not exists prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table if not exists calibration(task_id int primary key, predicted_files int,
@@ -192,7 +192,7 @@ impl Store {
       params![state, task_id],
     )?;
     self.db.execute(
-      "insert into taskEvents values(?,?,?)",
+      "insert into task_events values(?,?,?)",
       params![task_id, state, timestamp],
     )?;
     Ok(())
@@ -286,22 +286,32 @@ fn apply_migrations(db: &Connection) -> Result<()> {
 }
 
 fn migrate_task_events_table(db: &Connection) -> Result<()> {
-  if !table_exists(db, "task_log")? {
+  let has_task_log = table_exists(db, "task_log")?;
+  let has_camel_case_table = table_exists(db, "taskEvents")?;
+  if !has_task_log && !has_camel_case_table {
     return Ok(());
   }
-  if table_exists(db, "taskEvents")? {
+
+  db.execute_batch("begin immediate;")?;
+  if has_task_log {
     db.execute_batch(
       "
-          begin immediate;
-          insert into taskEvents(task_id, state, at)
+          insert into task_events(task_id, state, at)
             select task_id, state, at from task_log;
           drop table task_log;
-          commit;
           ",
     )?;
-  } else {
-    db.execute("alter table task_log rename to taskEvents", [])?;
   }
+  if has_camel_case_table {
+    db.execute_batch(
+      "
+          insert into task_events(task_id, state, at)
+            select task_id, state, at from taskEvents;
+          drop table taskEvents;
+          ",
+    )?;
+  }
+  db.execute_batch("commit;")?;
   Ok(())
 }
 
@@ -521,9 +531,9 @@ mod tests {
     apply_migrations(&db).unwrap();
 
     assert!(!table_exists(&db, "task_log").unwrap());
-    assert!(table_exists(&db, "taskEvents").unwrap());
+    assert!(table_exists(&db, "task_events").unwrap());
     let rows = db
-      .prepare("select task_id, state, at from taskEvents order by at")
+      .prepare("select task_id, state, at from task_events order by at")
       .unwrap()
       .query_map([], |row| {
         Ok((

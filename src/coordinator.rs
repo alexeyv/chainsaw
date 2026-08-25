@@ -656,7 +656,7 @@ fn predecessor_unverified(store: &Store, task_id: i64) -> Result<Option<String>>
   }
   let mut statement = store
     .db
-    .prepare("select state from taskEvents where task_id=?")?;
+    .prepare("select state from task_events where task_id=?")?;
   let states = statement
     .query_map([previous.id], |row| row.get::<_, String>(0))?
     .collect::<rusqlite::Result<HashSet<_>>>()?;
@@ -1344,7 +1344,7 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   }
   let mut statement = store
     .db
-    .prepare("select state from taskEvents where task_id=?")?;
+    .prepare("select state from task_events where task_id=?")?;
   let states = statement
     .query_map([task_id], |row| row.get::<_, String>(0))?
     .collect::<rusqlite::Result<HashSet<_>>>()?;
@@ -1368,7 +1368,7 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
     store.set_task_state(task_id, "accepted")?;
   } else {
     store.db.execute(
-      "insert into taskEvents values(?,?,?)",
+      "insert into task_events values(?,?,?)",
       params![task_id, "accepted", now()],
     )?;
   }
@@ -1436,7 +1436,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let dispatched_at: Option<f64> = store
     .db
     .query_row(
-      "select at from taskEvents where task_id=? and state='dispatched'",
+      "select at from task_events where task_id=? and state='dispatched'",
       [task_id],
       |row| row.get(0),
     )
@@ -1444,7 +1444,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let committed_at: Option<f64> = store
     .db
     .query_row(
-      "select at from taskEvents where task_id=? and state='committed'",
+      "select at from task_events where task_id=? and state='committed'",
       [task_id],
       |row| row.get(0),
     )
@@ -1570,7 +1570,7 @@ fn cmd_state(store: &Store) -> Result<()> {
   for task in store.tasks()? {
     let mut statement = store
       .db
-      .prepare("select state,at from taskEvents where task_id=?")?;
+      .prepare("select state,at from task_events where task_id=?")?;
     let log = statement
       .query_map([task.id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
@@ -1695,13 +1695,13 @@ fn clock_time(timestamp: f64) -> String {
 fn print_time_summary(store: &Store) -> Result<()> {
   let first: Option<f64> = store
     .db
-    .query_row("select min(at) from taskEvents", [], |row| row.get(0))?;
+    .query_row("select min(at) from task_events", [], |row| row.get(0))?;
   let mut busy = 0.0;
   for task in store.tasks()? {
     let start: Option<f64> = store
       .db
       .query_row(
-        "select at from taskEvents where task_id=? and state='dispatched'",
+        "select at from task_events where task_id=? and state='dispatched'",
         [task.id],
         |row| row.get(0),
       )
@@ -1709,7 +1709,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
     let end: Option<f64> = store
             .db
             .query_row(
-                "select at from taskEvents where task_id=? and state in ('committed','verified','ingested','failed') order by at limit 1",
+                "select at from task_events where task_id=? and state in ('committed','verified','ingested','failed') order by at limit 1",
                 [task.id],
                 |row| row.get(0),
             )
