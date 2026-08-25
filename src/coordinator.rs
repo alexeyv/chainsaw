@@ -21,7 +21,7 @@ use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
   latest_assistant_text, prompt_landed,
 };
-use crate::persistence::task_event;
+use crate::persistence::{calibration, task_event};
 use crate::store::{Session, Store, TASK_STATES, Task, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
@@ -1477,10 +1477,19 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   }
   let base = task.context_size_start.unwrap_or_default();
   let context = (end - base).max(0);
-  store.db.execute(
-        "insert or replace into calibration(task_id,predicted_files,predicted_lines,actual_files,actual_lines,wall_seconds,context_tokens,recorded_at,context_base,context_end) values(?,?,?,?,?,?,?,?,?,?)",
-        params![task_id, task.predicted_files, task.predicted_lines, actual_files, actual_lines, wall, context, now(), base, end],
-    )?;
+  let transaction = store.db.unchecked_transaction()?;
+  calibration::create(
+    &transaction,
+    task_id,
+    task.predicted_files,
+    task.predicted_lines,
+    actual_files,
+    actual_lines,
+    wall,
+    base,
+    end,
+  )?;
+  transaction.commit()?;
   let wall_text = wall.map_or_else(|| "None".to_owned(), |wall| (wall as i64).to_string());
   let reuse = if task.is_session_reuse { ", reuse" } else { "" };
   println!(

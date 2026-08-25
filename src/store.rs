@@ -29,9 +29,13 @@ create table task_events(
   created_at int not null);
 create table prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
-create table calibration(task_id int primary key, predicted_files int,
-  predicted_lines int, actual_files int, actual_lines int, wall_seconds real,
-  context_tokens int, recorded_at real, context_base int, context_end int);
+create table calibrations(
+  id integer primary key autoincrement,
+  task_id int not null unique references tasks(id),
+  predicted_files int not null, predicted_lines int not null,
+  actual_files int not null, actual_lines int not null, wall_seconds real,
+  created_at int not null, context_size_start int not null,
+  context_size_end int not null);
 create table dispositions(id integer primary key, finding text,
   verdict text, task_id int, reason text, at real);
 create table human_waits(id integer primary key, started real, ended real);
