@@ -39,6 +39,7 @@ impl TryFrom<&str> for FindingVerdict {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Finding {
   id: i64,
+  task_id: i64,
   description: String,
   verdict: FindingVerdict,
   verdict_reason: String,
@@ -49,6 +50,7 @@ pub struct Finding {
 impl Finding {
   pub fn new(
     id: i64,
+    task_id: i64,
     description: String,
     verdict: FindingVerdict,
     verdict_reason: String,
@@ -56,6 +58,7 @@ impl Finding {
     created_at: DateTime<Utc>,
   ) -> Result<Self> {
     require_positive("id", id)?;
+    require_positive("task_id", task_id)?;
     require_nonblank("description", &description)?;
     require_nonblank("verdict_reason", &verdict_reason)?;
     if let Some(fix_task_id) = fix_task_id {
@@ -69,6 +72,7 @@ impl Finding {
 
     Ok(Self {
       id,
+      task_id,
       description,
       verdict,
       verdict_reason,
@@ -79,6 +83,10 @@ impl Finding {
 
   pub fn id(&self) -> i64 {
     self.id
+  }
+
+  pub fn task_id(&self) -> i64 {
+    self.task_id
   }
 
   pub fn description(&self) -> &str {
@@ -128,6 +136,7 @@ mod tests {
 
   fn finding_with(
     id: i64,
+    task_id: i64,
     description: &str,
     verdict: FindingVerdict,
     verdict_reason: &str,
@@ -135,6 +144,7 @@ mod tests {
   ) -> anyhow::Result<Finding> {
     Finding::new(
       id,
+      task_id,
       description.to_owned(),
       verdict,
       verdict_reason.to_owned(),
@@ -148,6 +158,7 @@ mod tests {
     let created_at = timestamp(1_700_000_000);
     let finding = Finding::new(
       3,
+      5,
       "verification can accept the wrong commit".to_owned(),
       FindingVerdict::Task,
       "the check trusts an ambiguous log entry".to_owned(),
@@ -157,6 +168,7 @@ mod tests {
     .unwrap();
 
     assert_eq!(finding.id(), 3);
+    assert_eq!(finding.task_id(), 5);
     assert_eq!(
       finding.description(),
       "verification can accept the wrong commit"
@@ -191,6 +203,7 @@ mod tests {
     for id in [i64::MIN, -1, 0] {
       let error = finding_with(
         id,
+        2,
         "a defect",
         FindingVerdict::Dropped,
         "not actionable",
@@ -202,10 +215,27 @@ mod tests {
   }
 
   #[test]
+  fn constructor_requires_a_positive_task_id() {
+    for task_id in [i64::MIN, -1, 0] {
+      let error = finding_with(
+        1,
+        task_id,
+        "a defect",
+        FindingVerdict::Dropped,
+        "not actionable",
+        None,
+      )
+      .unwrap_err();
+      assert_eq!(error.to_string(), "task_id must be positive");
+    }
+  }
+
+  #[test]
   fn constructor_requires_nonblank_text() {
     for description in ["", " ", "\n\t"] {
       let error = finding_with(
         1,
+        2,
         description,
         FindingVerdict::Dropped,
         "not actionable",
@@ -215,8 +245,15 @@ mod tests {
       assert_eq!(error.to_string(), "description cannot be blank");
     }
     for verdict_reason in ["", " ", "\n\t"] {
-      let error =
-        finding_with(1, "a defect", FindingVerdict::Dropped, verdict_reason, None).unwrap_err();
+      let error = finding_with(
+        1,
+        2,
+        "a defect",
+        FindingVerdict::Dropped,
+        verdict_reason,
+        None,
+      )
+      .unwrap_err();
       assert_eq!(error.to_string(), "verdict_reason cannot be blank");
     }
   }
@@ -226,6 +263,7 @@ mod tests {
     for fix_task_id in [i64::MIN, -1, 0] {
       let error = finding_with(
         1,
+        2,
         "a defect",
         FindingVerdict::Task,
         "worth fixing",
@@ -239,11 +277,12 @@ mod tests {
   #[test]
   fn constructor_matches_fix_tasks_to_verdicts() {
     let error =
-      finding_with(1, "a defect", FindingVerdict::Task, "worth fixing", None).unwrap_err();
+      finding_with(1, 2, "a defect", FindingVerdict::Task, "worth fixing", None).unwrap_err();
     assert_eq!(error.to_string(), "task verdict requires a fix_task_id");
 
     let error = finding_with(
       1,
+      2,
       "a defect",
       FindingVerdict::Dropped,
       "not actionable",

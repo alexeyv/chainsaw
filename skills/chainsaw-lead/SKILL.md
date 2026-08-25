@@ -125,7 +125,8 @@ measured separately (`$SUP state` shows both).
    once.
 3. While it works — the only free time in the run: verify the commentator's open
    findings against git, decide dispositions and record them
-   (`$SUP disposition <finding> --verdict task|dropped --reason ...`), gather
+   (`$SUP disposition <task-id> <finding> --verdict task|dropped
+   [--fix-task <task-id>] --reason ...`), gather
    derivations that do not depend on the in-flight commit, batch questions for the
    human, draft and pre-populate the next task.
 4. After starting the next implementer, append the calibration record for the previous

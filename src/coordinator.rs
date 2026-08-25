@@ -101,11 +101,19 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
     Command::Accept { task, reason } => cmd_accept(store, task, &reason),
     Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
     Command::Disposition {
+      task_id,
       description,
       verdict,
       fix_task_id,
       verdict_reason,
-    } => cmd_disposition(store, &description, &verdict, fix_task_id, &verdict_reason),
+    } => cmd_disposition(
+      store,
+      task_id,
+      &description,
+      &verdict,
+      fix_task_id,
+      &verdict_reason,
+    ),
     Command::Config { key, value } => {
       if let Some(value) = value {
         store.set_cfg(&key, &value)
@@ -1433,6 +1441,7 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
 
 fn cmd_disposition(
   store: &Store,
+  task_id: i64,
   description: &str,
   verdict: &Verdict,
   fix_task_id: Option<i64>,
@@ -1445,6 +1454,7 @@ fn cmd_disposition(
   let transaction = store.db.unchecked_transaction()?;
   finding::create(
     &transaction,
+    task_id,
     description,
     verdict,
     verdict_reason,
@@ -1467,12 +1477,13 @@ fn write_dispositions_view(store: &Store) -> Result<()> {
       .to_string();
     let target = finding
       .fix_task_id()
-      .map_or_else(String::new, |id| format!(" (task {id})"));
+      .map_or_else(String::new, |id| format!(" (fix task {id})"));
+    let task_id = finding.task_id();
     let verdict = finding.verdict();
     let description = finding.description();
     let verdict_reason = finding.verdict_reason();
     lines.push(format!(
-      "- {when} · {verdict}{target} · {description} — {verdict_reason}"
+      "- {when} · task {task_id} · {verdict}{target} · {description} — {verdict_reason}"
     ));
   }
   fs::write(

@@ -77,10 +77,12 @@ pub enum Command {
   Calibrate { task: i64 },
   /// Record a commentator finding's disposition.
   Disposition {
+    /// Task where the finding originated.
+    task_id: i64,
     description: String,
     #[arg(long)]
     verdict: Verdict,
-    #[arg(long = "task")]
+    #[arg(long = "fix-task")]
     fix_task_id: Option<i64>,
     #[arg(long = "reason")]
     verdict_reason: String,

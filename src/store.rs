@@ -38,6 +38,7 @@ create table calibrations(
   context_size_end int not null);
 create table findings(
   id integer primary key autoincrement,
+  task_id int not null references tasks(id),
   description text not null, verdict text not null,
   verdict_reason text not null, fix_task_id int references tasks(id),
   created_at int not null);
@@ -299,6 +300,30 @@ mod tests {
   use super::initialize_schema;
 
   static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
+
+  #[test]
+  fn creates_findings_with_both_task_foreign_keys() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+
+    initialize_schema(&db)?;
+
+    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    let task_id_required = db.query_row(
+      "select \"notnull\" from pragma_table_info('findings') where name='task_id'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    let task_foreign_keys = db.query_row(
+      "select count(*) from pragma_foreign_key_list('findings')
+       where \"table\"='tasks' and \"from\" in ('task_id', 'fix_task_id')",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(version, 1);
+    assert_eq!(task_id_required, 1);
+    assert_eq!(task_foreign_keys, 2);
+    Ok(())
+  }
 
   #[test]
   fn initializes_one_database_concurrently() -> Result<()> {
