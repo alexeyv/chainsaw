@@ -72,6 +72,27 @@ pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
+pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Task>> {
+  let rows = {
+    let mut statement = transaction.prepare(
+      "
+        select id, text, predicted_files, predicted_lines, session_id,
+               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               base_head, predicted_file_list, is_session_reuse,
+               context_size_start, context_size_end
+        from tasks order by id asc
+        ",
+    )?;
+    statement
+      .query_map([], task_row)?
+      .collect::<rusqlite::Result<Vec<_>>>()?
+  };
+  rows
+    .into_iter()
+    .map(|row| materialize(transaction, row))
+    .collect()
+}
+
 pub fn record_finding(
   transaction: &Transaction<'_>,
   task: &Task,
@@ -169,7 +190,7 @@ mod tests {
   use anyhow::Result;
   use chrono::Utc;
 
-  use super::{create, get, record_finding};
+  use super::{all, create, get, record_finding};
   use crate::domain::{FindingVerdict, TaskState};
   use crate::persistence::task_event;
   use crate::persistence::test_fixture::database;
@@ -364,6 +385,44 @@ mod tests {
       ]
     );
     assert_eq!(loaded, second_snapshot);
+    Ok(())
+  }
+
+  #[test]
+  fn reads_all_fully_materialized_tasks_in_ascending_identity_order() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    assert!(all(&transaction)?.is_empty());
+
+    let first = create(&transaction, "first", 0, 10, None, None)?;
+    task_event::create(&transaction, first.id(), TaskState::Drafted)?;
+    let first = record_finding(
+      &transaction,
+      &first,
+      "first task finding",
+      FindingVerdict::Dropped,
+      "not actionable",
+      None,
+    )?;
+    let second = create(&transaction, "second", 0, 20, None, None)?;
+    let second = record_finding(
+      &transaction,
+      &second,
+      "second task finding",
+      FindingVerdict::Dropped,
+      "already covered",
+      None,
+    )?;
+
+    let tasks = all(&transaction)?;
+    transaction.commit()?;
+
+    assert_eq!(tasks, vec![first, second]);
+    assert_eq!(tasks[0].events().len(), 2);
+    assert_eq!(tasks[0].findings().len(), 1);
+    assert_eq!(tasks[1].events().len(), 1);
+    assert_eq!(tasks[1].findings().len(), 1);
     Ok(())
   }
 

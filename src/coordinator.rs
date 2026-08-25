@@ -1538,12 +1538,15 @@ fn cmd_comments(store: &Store, show_all: bool) -> Result<()> {
 
 fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
   println!("tasks");
-  for task in store.tasks()? {
+  let transaction = store.db.unchecked_transaction()?;
+  let tasks = task::all(&transaction)?;
+  transaction.commit()?;
+  for task in tasks {
     let mut statement = store
       .db
       .prepare("select state,created_at / 1000.0 from task_events where task_id=?")?;
     let log = statement
-      .query_map([task.id], |row| {
+      .query_map([task.id()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
       })?
       .collect::<rusqlite::Result<HashMap<_, _>>>()?;
@@ -1557,21 +1560,20 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
       .collect::<Vec<_>>()
       .join(" ");
     let retry = task
-      .retry_of_task_id
+      .retry_of_task_id()
       .map_or_else(String::new, |id| format!("  retry of {id}"));
-    let reuse = if task.is_session_reuse {
+    let reuse = if task.is_session_reuse() {
       format!(
         "  reuse (context base {})",
-        task.context_size_start.unwrap_or_default()
+        task.context_size_start().unwrap_or_default()
       )
     } else {
       String::new()
     };
     let reason = task
-      .reason
-      .as_deref()
+      .reason()
       .map_or_else(String::new, |reason| format!("  reason: {reason}"));
-    let session_name = match task.session_id {
+    let session_name = match task.session_id() {
       Some(session_id) => store
         .session(session_id)?
         .map_or_else(|| "-".to_owned(), |session| session.name),
@@ -1579,10 +1581,10 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
     };
     println!(
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reuse}{reason}",
-      task.id,
-      task.state,
+      task.id(),
+      task.state(),
       session_name,
-      task.commit_sha.as_deref().map(short_sha).unwrap_or("-")
+      task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
@@ -1670,12 +1672,15 @@ fn print_time_summary(store: &Store) -> Result<()> {
     |row| row.get(0),
   )?;
   let mut busy = 0.0;
-  for task in store.tasks()? {
+  let transaction = store.db.unchecked_transaction()?;
+  let tasks = task::all(&transaction)?;
+  transaction.commit()?;
+  for task in tasks {
     let start: Option<f64> = store
       .db
       .query_row(
         "select created_at / 1000.0 from task_events where task_id=? and state='dispatched'",
-        [task.id],
+        [task.id()],
         |row| row.get(0),
       )
       .optional()?;
@@ -1683,7 +1688,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
             .db
             .query_row(
                 "select created_at / 1000.0 from task_events where task_id=? and state in ('committed','verified','ingested','failed') order by created_at limit 1",
-                [task.id],
+                [task.id()],
                 |row| row.get(0),
             )
             .optional()?;
