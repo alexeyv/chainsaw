@@ -172,14 +172,6 @@ impl Store {
     Ok(event)
   }
 
-  pub fn task(&self, id: i64) -> Result<Option<Task>> {
-    self
-      .db
-      .query_row("select * from tasks where id=?", [id], task_from_row)
-      .optional()
-      .map_err(Into::into)
-  }
-
   pub fn tasks(&self) -> Result<Vec<Task>> {
     let mut statement = self.db.prepare("select * from tasks order by id")?;
     let rows = statement.query_map([], task_from_row)?;
