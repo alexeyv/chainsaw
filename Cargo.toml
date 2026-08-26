@@ -15,6 +15,7 @@ regex = "1.11"
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 serde_json = "1.0"
 sha1 = "0.10"
+strum = { version = "0.28", features = ["derive"] }
 
 [lints.rust]
 unsafe_code = "forbid"

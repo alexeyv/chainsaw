@@ -3,6 +3,8 @@ use std::fmt;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
+use super::{require_nonblank, require_positive};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindingVerdict {
   Task,
@@ -141,20 +143,6 @@ impl Finding {
   pub fn is_resolved(&self) -> bool {
     self.verdict.is_some()
   }
-}
-
-fn require_positive(field: &'static str, value: i64) -> Result<()> {
-  if value <= 0 {
-    bail!("{field} must be positive");
-  }
-  Ok(())
-}
-
-fn require_nonblank(field: &'static str, value: &str) -> Result<()> {
-  if value.trim().is_empty() {
-    bail!("{field} cannot be blank");
-  }
-  Ok(())
 }
 
 #[cfg(test)]

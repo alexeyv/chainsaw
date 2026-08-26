@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::fmt;
 
 use anyhow::{Result, bail};
+use strum::EnumIter;
 
-use super::task_event::TaskEvent;
+use super::{require_nonblank, require_nonnegative, require_positive, task_event::TaskEvent};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
 pub enum TaskState {
   Drafted,
   Dispatched,
@@ -94,7 +95,6 @@ pub struct Task {
   predicted_file_list: Option<Vec<String>>,
   is_session_reuse: bool,
   context_size_start: Option<i64>,
-  context_size_end: Option<i64>,
   events: Vec<TaskEvent>,
 }
 
@@ -115,7 +115,6 @@ impl Task {
     predicted_file_list: Option<Vec<String>>,
     is_session_reuse: bool,
     context_size_start: Option<i64>,
-    context_size_end: Option<i64>,
     events: Vec<TaskEvent>,
   ) -> Result<Self> {
     require_positive("id", id)?;
@@ -135,7 +134,6 @@ impl Task {
     require_nonnegative("log_offset", log_offset)?;
     require_optional_nonblank("base_head", base_head.as_deref())?;
     require_optional_nonnegative("context_size_start", context_size_start)?;
-    require_optional_nonnegative("context_size_end", context_size_end)?;
     validate_events(&events)?;
     let state = events.last().expect("validated nonempty event log").state();
 
@@ -150,9 +148,6 @@ impl Task {
     }
     if is_session_reuse && session_id.is_none() {
       bail!("session reuse requires an assigned session");
-    }
-    if context_size_end.is_some() && context_size_start.is_none() {
-      bail!("context end requires a context start");
     }
     validate_predicted_files(predicted_files, predicted_file_list.as_deref())?;
 
@@ -171,7 +166,6 @@ impl Task {
       predicted_file_list,
       is_session_reuse,
       context_size_start,
-      context_size_end,
       events,
     })
   }
@@ -240,20 +234,8 @@ impl Task {
     self.context_size_start
   }
 
-  pub fn context_size_end(&self) -> Option<i64> {
-    self.context_size_end
-  }
-
   pub fn events(&self) -> &[TaskEvent] {
     &self.events
-  }
-}
-
-fn require_positive(field: &'static str, value: i64) -> Result<()> {
-  if value <= 0 {
-    bail!("{field} must be positive");
-  } else {
-    Ok(())
   }
 }
 
@@ -264,26 +246,10 @@ fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<
   }
 }
 
-fn require_nonnegative(field: &'static str, value: i64) -> Result<()> {
-  if value < 0 {
-    bail!("{field} cannot be negative");
-  } else {
-    Ok(())
-  }
-}
-
 fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<()> {
   match value {
     Some(value) => require_nonnegative(field, value),
     None => Ok(()),
-  }
-}
-
-fn require_nonblank(field: &'static str, value: &str) -> Result<()> {
-  if value.trim().is_empty() {
-    bail!("{field} cannot be blank");
-  } else {
-    Ok(())
   }
 }
 
@@ -353,6 +319,7 @@ fn validate_events(events: &[TaskEvent]) -> Result<()> {
 mod tests {
   use anyhow::Result;
   use chrono::{DateTime, Utc};
+  use strum::IntoEnumIterator;
 
   use super::{Task, TaskState};
   use crate::domain::TaskEvent;
@@ -379,15 +346,6 @@ mod tests {
 
   #[test]
   fn lifecycle_transition_table_is_explicit() {
-    let states = [
-      TaskState::Drafted,
-      TaskState::Dispatched,
-      TaskState::InFlight,
-      TaskState::Committed,
-      TaskState::Verified,
-      TaskState::Accepted,
-      TaskState::Failed,
-    ];
     let allowed = [
       (TaskState::Drafted, TaskState::Dispatched),
       (TaskState::Dispatched, TaskState::Drafted),
@@ -402,8 +360,8 @@ mod tests {
       (TaskState::Committed, TaskState::Accepted),
     ];
 
-    for current in states {
-      for next in states {
+    for current in TaskState::iter() {
+      for next in TaskState::iter() {
         assert_eq!(
           current.can_transition_to(next),
           allowed.contains(&(current, next)),
@@ -425,7 +383,6 @@ mod tests {
     file_list: Option<Vec<&str>>,
     is_session_reuse: bool,
     context_size_start: Option<i64>,
-    context_size_end: Option<i64>,
   ) -> Result<Task> {
     let states = match state {
       TaskState::Drafted => vec![TaskState::Drafted],
@@ -476,7 +433,6 @@ mod tests {
       file_list.map(|files| files.into_iter().map(str::to_owned).collect()),
       is_session_reuse,
       context_size_start,
-      context_size_end,
       states
         .into_iter()
         .enumerate()
@@ -508,7 +464,6 @@ mod tests {
       None,
       false,
       None,
-      None,
       events,
     )
   }
@@ -535,7 +490,6 @@ mod tests {
       Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]),
       true,
       Some(40),
-      Some(75),
       events.clone(),
     )
     .unwrap();
@@ -558,7 +512,6 @@ mod tests {
     );
     assert!(task.is_session_reuse());
     assert_eq!(task.context_size_start(), Some(40));
-    assert_eq!(task.context_size_end(), Some(75));
     assert_eq!(task.events(), events.as_slice());
   }
 
@@ -574,7 +527,6 @@ mod tests {
       None,
       None,
       false,
-      None,
       None,
     )
     .unwrap_err();
@@ -595,7 +547,6 @@ mod tests {
       None,
       false,
       None,
-      None,
     )
     .unwrap_err();
     let negative = task_with(
@@ -608,7 +559,6 @@ mod tests {
       None,
       None,
       false,
-      None,
       None,
     )
     .unwrap_err();
@@ -630,7 +580,6 @@ mod tests {
       None,
       false,
       None,
-      None,
     )
     .unwrap_err();
 
@@ -650,7 +599,6 @@ mod tests {
       None,
       false,
       None,
-      None,
     )
     .unwrap_err();
 
@@ -669,7 +617,6 @@ mod tests {
       None,
       None,
       false,
-      None,
       None,
     )
     .unwrap_err();
@@ -694,7 +641,6 @@ mod tests {
       None,
       false,
       None,
-      None,
       vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
     )
     .unwrap_err();
@@ -714,7 +660,6 @@ mod tests {
       None,
       Some(vec!["a.rs", "b.rs"]),
       false,
-      None,
       None,
     )
     .unwrap_err();
@@ -738,7 +683,6 @@ mod tests {
       Some(vec![" "]),
       false,
       None,
-      None,
     )
     .unwrap_err();
     let duplicate = task_with(
@@ -751,7 +695,6 @@ mod tests {
       None,
       Some(vec!["a.rs", "a.rs"]),
       false,
-      None,
       None,
     )
     .unwrap_err();
@@ -776,7 +719,6 @@ mod tests {
       None,
       true,
       None,
-      None,
     )
     .unwrap_err();
 
@@ -784,26 +726,6 @@ mod tests {
       error.to_string(),
       "session reuse requires an assigned session"
     );
-  }
-
-  #[test]
-  fn context_end_requires_a_start() {
-    let error = task_with(
-      1,
-      "task",
-      0,
-      TaskState::Drafted,
-      None,
-      None,
-      None,
-      None,
-      false,
-      None,
-      Some(50),
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "context end requires a context start");
   }
 
   #[test]

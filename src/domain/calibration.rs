@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
+use super::{require_nonnegative, require_positive};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
   id: i64,
@@ -97,20 +99,6 @@ impl Calibration {
   pub fn context_size_end(&self) -> i64 {
     self.context_size_end
   }
-}
-
-fn require_positive(field: &'static str, value: i64) -> Result<()> {
-  if value <= 0 {
-    bail!("{field} must be positive");
-  }
-  Ok(())
-}
-
-fn require_nonnegative(field: &'static str, value: i64) -> Result<()> {
-  if value < 0 {
-    bail!("{field} cannot be negative");
-  }
-  Ok(())
 }
 
 #[cfg(test)]

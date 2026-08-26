@@ -145,6 +145,17 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "is not in flight")
 
+    def test_fail_requires_a_nonempty_reason(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.cli("fail", str(task), "--reason", "  ")
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(result, "supervisor: fail requires a non-empty --reason")
+        self.assertIn(f"{task} in_flight", state.stdout)
+
 
 class VerificationContractTests(SupervisorContractCase):
     def test_valid_commit_with_gate_last_is_verified(self):

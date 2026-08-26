@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
+use super::require_positive;
+
 /// Informational chronological context that requires no response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observation {
@@ -47,13 +49,6 @@ impl Observation {
   pub fn created_at(&self) -> DateTime<Utc> {
     self.created_at
   }
-}
-
-fn require_positive(field: &'static str, value: i64) -> Result<()> {
-  if value <= 0 {
-    bail!("{field} must be positive");
-  }
-  Ok(())
 }
 
 #[cfg(test)]

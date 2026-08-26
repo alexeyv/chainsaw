@@ -14,6 +14,7 @@ use regex::Regex;
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha1::{Digest, Sha1};
+use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Task, TaskState};
@@ -23,7 +24,7 @@ use crate::logs::{
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::store::{Session, Store, TASK_STATES, now};
+use crate::store::{Session, Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
@@ -1303,18 +1304,6 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   if reason.trim().is_empty() {
     bail!("supervisor: accept requires a non-empty --reason");
   }
-  let mut statement = store
-    .db
-    .prepare("select state from task_events where task_id=?")?;
-  let states = statement
-    .query_map([task_id], |row| row.get::<_, String>(0))?
-    .collect::<rusqlite::Result<HashSet<_>>>()?;
-  if states.contains("verified") {
-    bail!("supervisor: task {task_id} is already verified");
-  }
-  if states.contains("accepted") {
-    bail!("supervisor: task {task_id} is already accepted");
-  }
   if task.state() != TaskState::Committed || task.commit_sha().is_none() {
     bail!(
       "supervisor: task {task_id} is {}, not a committed unverified task",
@@ -1346,6 +1335,9 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
 
 fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   let task = task_snapshot(store, task_id)?;
+  if reason.trim().is_empty() {
+    bail!("supervisor: fail requires a non-empty --reason");
+  }
   if !task
     .as_ref()
     .is_some_and(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
@@ -1479,12 +1471,11 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
   if after_observation < 0 {
     bail!("supervisor: --after-observation must be nonnegative");
   }
+  let transaction = store.db.unchecked_transaction()?;
   if let Some(task_id) = task_id {
-    let transaction = store.db.unchecked_transaction()?;
     require_task(&transaction, task_id)?;
-    transaction.commit()?;
   }
-  let observations = observation::after(&store.db, after_observation, task_id)?;
+  let observations = observation::after(&transaction, after_observation, task_id)?;
   let observation_cursor = observations
     .last()
     .map_or(after_observation, |observation| observation.id());
@@ -1499,7 +1490,7 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
-  let findings = finding::unresolved(&store.db, task_id)?
+  let findings = finding::unresolved(&transaction, task_id)?
     .into_iter()
     .map(|finding| {
       json!({
@@ -1510,6 +1501,7 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
+  transaction.commit()?;
   println!(
     "{}",
     json!({
@@ -1546,7 +1538,8 @@ fn cmd_resolve(
 }
 
 fn cmd_resolutions(store: &Store) -> Result<()> {
-  let resolutions = finding::resolved(&store.db)?
+  let transaction = store.db.unchecked_transaction()?;
+  let resolutions = finding::resolved(&transaction)?
     .into_iter()
     .map(|finding| {
       json!({
@@ -1560,6 +1553,7 @@ fn cmd_resolutions(store: &Store) -> Result<()> {
       })
     })
     .collect::<Vec<_>>();
+  transaction.commit()?;
   println!("{}", json!({"resolutions": resolutions}));
   Ok(())
 }
@@ -1591,11 +1585,10 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
       })?
       .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-    let mut timeline = TASK_STATES
-      .iter()
+    let mut timeline = TaskState::iter()
       .filter_map(|state| {
         log
-          .get(*state)
+          .get(state.as_str())
           .map(|timestamp| format!("{state}@{}", clock_time(*timestamp)))
       })
       .collect::<Vec<_>>();

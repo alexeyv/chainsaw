@@ -19,7 +19,6 @@ struct TaskRow {
   predicted_file_list: Option<Vec<String>>,
   is_session_reuse: bool,
   context_size_start: Option<i64>,
-  context_size_end: Option<i64>,
 }
 
 pub fn create(
@@ -61,7 +60,7 @@ pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
         select id, text, predicted_files, predicted_lines, session_id,
                commit_sha, created_at, retry_of_task_id, reason, log_offset,
                base_head, predicted_file_list, is_session_reuse,
-               context_size_start, context_size_end
+               context_size_start
         from tasks where id=?
         ",
       [id],
@@ -78,7 +77,7 @@ pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Task>> {
         select id, text, predicted_files, predicted_lines, session_id,
                commit_sha, created_at, retry_of_task_id, reason, log_offset,
                base_head, predicted_file_list, is_session_reuse,
-               context_size_start, context_size_end
+               context_size_start
         from tasks order by id asc
         ",
     )?;
@@ -99,7 +98,7 @@ pub fn tasks_for_session(transaction: &Transaction<'_>, session_id: i64) -> Resu
         select id, text, predicted_files, predicted_lines, session_id,
                commit_sha, created_at, retry_of_task_id, reason, log_offset,
                base_head, predicted_file_list, is_session_reuse,
-               context_size_start, context_size_end
+               context_size_start
         from tasks where session_id=? order by id asc
         ",
     )?;
@@ -120,7 +119,7 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
         select id, text, predicted_files, predicted_lines, session_id,
                commit_sha, created_at, retry_of_task_id, reason, log_offset,
                base_head, predicted_file_list, is_session_reuse,
-               context_size_start, context_size_end
+               context_size_start
         from tasks where id < ? order by id desc limit 1
         ",
       [id],
@@ -236,7 +235,6 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     predicted_file_list,
     is_session_reuse: row.get::<_, i64>("is_session_reuse")? != 0,
     context_size_start: row.get("context_size_start")?,
-    context_size_end: row.get("context_size_end")?,
   })
 }
 
@@ -257,7 +255,6 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.predicted_file_list,
     row.is_session_reuse,
     row.context_size_start,
-    row.context_size_end,
     events,
   )
 }

@@ -18,8 +18,7 @@ create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
   reason text, log_offset int default 0, base_head text, predicted_file_list text,
-  is_session_reuse int not null default 0, context_size_start int,
-  context_size_end int);
+  is_session_reuse int not null default 0, context_size_start int);
 create table task_events(
   id integer primary key autoincrement,
   task_id int not null references tasks(id), state text,
@@ -49,16 +48,6 @@ create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
 pragma user_version=1;
 "#;
-
-pub const TASK_STATES: &[&str] = &[
-  "drafted",
-  "dispatched",
-  "in_flight",
-  "committed",
-  "verified",
-  "accepted",
-  "failed",
-];
 
 #[derive(Clone, Debug)]
 pub struct Session {

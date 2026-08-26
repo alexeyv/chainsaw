@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::domain::{Finding, FindingVerdict};
 
@@ -83,15 +83,15 @@ pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Finding>> {
   row.map(materialize).transpose()
 }
 
-pub fn unresolved(db: &Connection, task_id: Option<i64>) -> Result<Vec<Finding>> {
+pub fn unresolved(transaction: &Transaction<'_>, task_id: Option<i64>) -> Result<Vec<Finding>> {
   let sql = format!("{SELECT} where verdict is null and (?1 is null or task_id=?1) order by id");
-  let mut statement = db.prepare(&sql)?;
+  let mut statement = transaction.prepare(&sql)?;
   load(statement.query_map([task_id], finding_row)?)
 }
 
-pub fn resolved(db: &Connection) -> Result<Vec<Finding>> {
+pub fn resolved(transaction: &Transaction<'_>) -> Result<Vec<Finding>> {
   let sql = format!("{SELECT} where verdict is not null order by resolved_at, id");
-  let mut statement = db.prepare(&sql)?;
+  let mut statement = transaction.prepare(&sql)?;
   load(statement.query_map([], finding_row)?)
 }
 
@@ -167,13 +167,13 @@ mod tests {
     let transaction = db.transaction()?;
     let first = register(&transaction, 5, "first defect")?;
     let second = register(&transaction, 6, "second defect")?;
-    transaction.commit()?;
 
     assert_eq!(first.id(), 1);
     assert_eq!(second.id(), 2);
     assert!(!first.is_resolved());
-    assert_eq!(unresolved(&db, None)?, vec![first.clone(), second]);
-    assert_eq!(unresolved(&db, Some(5))?, vec![first]);
+    assert_eq!(unresolved(&transaction, None)?, vec![first.clone(), second]);
+    assert_eq!(unresolved(&transaction, Some(5))?, vec![first]);
+    transaction.commit()?;
     Ok(())
   }
 
@@ -186,7 +186,9 @@ mod tests {
     register(&transaction, 5, "temporary defect")?;
     transaction.rollback()?;
 
-    assert!(unresolved(&db, None)?.is_empty());
+    let transaction = db.transaction()?;
+    assert!(unresolved(&transaction, None)?.is_empty());
+    transaction.commit()?;
     Ok(())
   }
 
@@ -205,13 +207,13 @@ mod tests {
       "fix it",
       Some(6),
     )?;
-    transaction.commit()?;
 
     assert!(resolution.is_resolved());
     assert_eq!(resolution.verdict(), Some(FindingVerdict::Task));
-    assert_eq!(unresolved(&db, None)?, Vec::new());
-    assert_eq!(resolved(&db)?, vec![resolution.clone()]);
-    assert_eq!(resolved(&db)?, vec![resolution.clone()]);
+    assert_eq!(unresolved(&transaction, None)?, Vec::new());
+    assert_eq!(resolved(&transaction)?, vec![resolution.clone()]);
+    assert_eq!(resolved(&transaction)?, vec![resolution.clone()]);
+    transaction.commit()?;
 
     let transaction = db.transaction()?;
     let stored = get(&transaction, resolution.id())?.expect("stored finding");
