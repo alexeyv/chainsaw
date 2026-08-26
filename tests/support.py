@@ -245,9 +245,11 @@ class SupervisorContractCase(unittest.TestCase):
         self.record_commit("worker", sha)
         return task_id, sha
 
-    def start_daemon(self, lead="lead"):
+    def start_daemon(self, lead="lead", session_id=None):
+        session_id = session_id or f"session-{lead}"
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
-                   "daemon", "--lead", lead, "--poll-interval-ms", "10"]
+                   "daemon", "--lead", lead, "--session-id", session_id,
+                   "--poll-interval-ms", "10"]
         process = subprocess.Popen(
             command,
             text=True,

@@ -3,7 +3,9 @@ use std::fmt;
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
-use super::{Calibration, Finding, FindingVerdict, Observation, Task, TaskEvent, TaskState};
+use super::{
+  Calibration, Finding, FindingVerdict, Observation, Role, Session, Task, TaskEvent, TaskState,
+};
 
 pub fn created_at() -> DateTime<Utc> {
   DateTime::from_timestamp(1_700_000_000, 0).unwrap()
@@ -330,6 +332,92 @@ pub fn format_tasks(tasks: &[Task]) -> String {
   tasks
     .iter()
     .map(format_task)
+    .collect::<Vec<_>>()
+    .join("\n\n")
+}
+
+/// Every `Session::new` argument, so a case can override exactly one of them.
+pub struct SessionSpec {
+  pub id: i64,
+  pub name: &'static str,
+  pub role: Role,
+  pub external_session_id: &'static str,
+  pub launched_head: Option<&'static str>,
+  pub started_at: DateTime<Utc>,
+  pub stopped_at: Option<DateTime<Utc>>,
+  pub context: i64,
+  pub context_max: i64,
+  pub last_growth: DateTime<Utc>,
+  pub kicked_at: Option<DateTime<Utc>>,
+}
+
+/// A live implementer that has just been launched and read nothing yet.
+pub fn launched_implementer() -> SessionSpec {
+  SessionSpec {
+    id: 7,
+    name: "implementer-1",
+    role: Role::Implementer,
+    external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e",
+    launched_head: Some("base123"),
+    started_at: created_at(),
+    stopped_at: None,
+    context: 0,
+    context_max: 0,
+    last_growth: created_at(),
+    kicked_at: None,
+  }
+}
+
+/// A live implementer that has been polled: context read, transcript grown.
+pub fn working_implementer() -> SessionSpec {
+  SessionSpec {
+    context: 4_000,
+    context_max: 5_000,
+    last_growth: timestamp(1_700_000_600),
+    ..launched_implementer()
+  }
+}
+
+pub fn build_session(spec: SessionSpec) -> Result<Session> {
+  Session::new(
+    spec.id,
+    spec.name.to_owned(),
+    spec.role,
+    spec.external_session_id.to_owned(),
+    spec.launched_head.map(str::to_owned),
+    spec.started_at,
+    spec.stopped_at,
+    spec.context,
+    spec.context_max,
+    spec.last_growth,
+    spec.kicked_at,
+  )
+}
+
+pub fn format_session(session: &Session) -> String {
+  format!(
+    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}",
+    session.id(),
+    session.name(),
+    session.role(),
+    session.external_session_id(),
+    format_option_text(session.launched_head()),
+    format_time(session.started_at()),
+    format_option(session.stopped_at().map(format_time)),
+    session.context(),
+    session.context_max(),
+    format_time(session.last_growth()),
+    format_option(session.kicked_at().map(format_time)),
+    session.is_live(),
+    session.can_take_task(),
+    session.can_be_kicked(),
+  )
+}
+
+pub fn format_sessions(sessions: &[Session]) -> String {
+  sessions
+    .iter()
+    .map(format_session)
     .collect::<Vec<_>>()
     .join("\n\n")
 }

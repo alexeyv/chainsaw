@@ -10,10 +10,12 @@ const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
-create table sessions(id integer primary key, name text not null, role text,
-  pane_id text, tab_id text, external_session_id text unique, started_at real,
-  context int default 0, context_max int default 0, last_growth real,
-  kicked_at real, stopped_at real, log_path text, launched_head text);
+create table sessions(
+  id integer primary key, name text not null, role text not null,
+  external_session_id text not null unique, launched_head text,
+  started_at int not null, stopped_at int,
+  context int not null default 0, context_max int not null default 0,
+  last_growth int not null, kicked_at int);
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
@@ -48,21 +50,6 @@ create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
 pragma user_version=1;
 "#;
-
-#[derive(Clone, Debug)]
-pub struct Session {
-  pub id: i64,
-  pub name: String,
-  pub role: String,
-  pub external_session_id: Option<String>,
-  pub log_path: Option<PathBuf>,
-  pub context: i64,
-  pub context_max: i64,
-  pub last_growth: Option<f64>,
-  pub kicked_at: Option<f64>,
-  pub launched_head: Option<String>,
-  pub stopped_at: Option<f64>,
-}
 
 pub struct Store {
   pub run_dir: PathBuf,
@@ -146,36 +133,6 @@ impl Store {
     )?;
     Ok(())
   }
-
-  pub fn session(&self, id: i64) -> Result<Option<Session>> {
-    self
-      .db
-      .query_row("select * from sessions where id=?", [id], session_from_row)
-      .optional()
-      .map_err(Into::into)
-  }
-
-  pub fn latest_session_named(&self, name: &str) -> Result<Option<Session>> {
-    self
-      .db
-      .query_row(
-        "select * from sessions where name=? order by started_at desc, id desc limit 1",
-        [name],
-        session_from_row,
-      )
-      .optional()
-      .map_err(Into::into)
-  }
-
-  pub fn sessions(&self) -> Result<Vec<Session>> {
-    let mut statement = self
-      .db
-      .prepare("select * from sessions order by started_at")?;
-    let rows = statement.query_map([], session_from_row)?;
-    rows
-      .collect::<rusqlite::Result<Vec<_>>>()
-      .map_err(Into::into)
-  }
 }
 
 pub fn now() -> f64 {
@@ -208,24 +165,6 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
   transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
   Ok(())
-}
-
-fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
-  Ok(Session {
-    id: row.get("id")?,
-    name: row.get("name")?,
-    role: row.get("role")?,
-    external_session_id: row.get("external_session_id")?,
-    log_path: row.get::<_, Option<String>>("log_path")?.map(PathBuf::from),
-    context: row.get::<_, Option<i64>>("context")?.unwrap_or_default(),
-    context_max: row
-      .get::<_, Option<i64>>("context_max")?
-      .unwrap_or_default(),
-    last_growth: row.get("last_growth")?,
-    kicked_at: row.get("kicked_at")?,
-    launched_head: row.get("launched_head")?,
-    stopped_at: row.get("stopped_at")?,
-  })
 }
 
 #[cfg(test)]

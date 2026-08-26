@@ -17,8 +17,12 @@ pub struct Cli {
 pub enum Command {
   /// Run the background coordinator.
   Daemon {
+    /// The lead's agent name.
     #[arg(long)]
     lead: String,
+    /// The lead's own Claude Code session id, which names its transcript.
+    #[arg(long)]
+    session_id: String,
     #[arg(long, default_value_t = 5_000, hide = true)]
     poll_interval_ms: u64,
   },

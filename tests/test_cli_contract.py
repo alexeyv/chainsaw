@@ -104,6 +104,22 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
             ],
         )
 
+    def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
+        task = self.new_task()
+        self.assert_success(self.cli(
+            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
+        ))
+        commentator = next(
+            name for name in self.zero_cost_dummy_state()["agents"]
+            if name.startswith("commentator-")
+        )
+
+        result = self.dispatch(task, commentator)
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(result, "is the commentator, not an implementer")
+        self.assertIn(f"{task} drafted", state.stdout)
+
     def test_dispatch_delivers_task_and_contract_then_enters_flight(self):
         task = self.new_task(text="Implement normal dispatch behavior.")
         self.launch()
@@ -625,7 +641,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             }},
         }) + "\n")
 
-        daemon = self.start_daemon()
+        daemon = self.start_daemon(session_id=session_id)
         self.wait_for_state("context     123")
         context = self.assert_success(self.cli("context", "lead"))
         self.assert_success(self.cli("stop"))

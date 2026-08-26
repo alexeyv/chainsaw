@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use fs2::FileExt;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
@@ -17,14 +17,14 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{FindingVerdict, Task, TaskState};
+use crate::domain::{FindingVerdict, Role, Session, Task, TaskState};
 use crate::logs::{
   commits_in_log, context_before, context_peak, context_size, file_size, latest_assistant_text,
   prompt_landed,
 };
-use crate::persistence::{calibration, commentary_delivery, finding, observation, task};
+use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::store::{Session, Store, now};
+use crate::store::{Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
@@ -41,11 +41,13 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
   match command {
     Command::Daemon {
       lead,
+      session_id,
       poll_interval_ms,
     } => daemon(
       store,
       runtime,
       &lead,
+      &session_id,
       Duration::from_millis(poll_interval_ms),
     ),
     Command::StartCommentator { role_prompt } => {
@@ -60,7 +62,7 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       runtime,
       &name,
       LaunchOptions {
-        role: "implementer",
+        role: Role::Implementer,
         kind: SessionKind::Implementer,
         fresh,
         reason: reason.as_deref(),
@@ -97,8 +99,8 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       task,
       force,
       reason,
-    } => cmd_accept(store, runtime, task, force, reason.as_deref()),
-    Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
+    } => cmd_accept(store, task, force, reason.as_deref()),
+    Command::Calibrate { task } => cmd_calibrate(store, task),
     Command::Observe { task, text } => cmd_observe(store, task, &text),
     Command::Finding { task, description } => cmd_finding(store, task, &description),
     Command::Poll {
@@ -120,68 +122,36 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         Ok(())
       }
     }
-    Command::State => cmd_state(store, runtime),
+    Command::State => cmd_state(store),
     Command::LogsDir => {
       println!("{}", store.logs_dir.display());
       Ok(())
     }
-    Command::Context { name } => cmd_context(store, runtime, name.as_deref()),
+    Command::Context { name } => cmd_context(store, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
   }
 }
 
 struct LaunchOptions<'a> {
-  role: &'a str,
+  role: Role,
   kind: SessionKind,
   fresh: bool,
   reason: Option<&'a str>,
 }
 
-fn session_log(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  session: &Session,
-) -> Result<Option<PathBuf>> {
-  let live_session_id = runtime
-    .query(&session.name)
-    .ok()
-    .flatten()
-    .map(|session| session.external_id);
-  let external_session_id = if let Some(external_session_id) = live_session_id {
-    if session.external_session_id.as_deref() != Some(&external_session_id) {
-      store.db.execute(
-        "update sessions set external_session_id=?,log_path=NULL where id=?",
-        params![external_session_id, session.id],
-      )?;
-    }
-    Some(external_session_id)
-  } else {
-    session.external_session_id.clone()
-  };
-  let Some(external_session_id) = external_session_id else {
-    return Ok(None);
-  };
-  let expected = store.logs_dir.join(format!("{external_session_id}.jsonl"));
-  let cached = if session.external_session_id.as_deref() == Some(&external_session_id) {
-    session.log_path.as_deref()
-  } else {
-    None
-  };
-  let path = if expected.is_file() {
+/// The session's transcript: beside the database when Claude Code agrees about
+/// the project directory, otherwise wherever it was found under the projects
+/// directory. None until the transcript exists.
+fn session_log(store: &Store, session: &Session) -> Option<PathBuf> {
+  let expected = store
+    .logs_dir
+    .join(format!("{}.jsonl", session.external_session_id()));
+  if expected.is_file() {
     Some(expected)
-  } else if cached.is_some_and(Path::is_file) {
-    cached.map(Path::to_path_buf)
   } else {
-    find_session_log(store, &external_session_id)
-  };
-  if let Some(path) = &path {
-    store.db.execute(
-      "update sessions set log_path=? where id=?",
-      params![path.to_string_lossy(), session.id],
-    )?;
+    find_session_log(store, session.external_session_id())
   }
-  Ok(path)
 }
 
 fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf> {
@@ -194,15 +164,37 @@ fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf>
     .find(|path| path.is_file())
 }
 
-fn session_log_named(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  name: &str,
-) -> Result<Option<PathBuf>> {
-  match store.latest_session_named(name)? {
-    Some(session) => session_log(store, runtime, &session),
-    None => Ok(None),
-  }
+fn session_log_named(store: &Store, name: &str) -> Result<Option<PathBuf>> {
+  Ok(latest_session_named(store, name)?.and_then(|session| session_log(store, &session)))
+}
+
+fn session_snapshot(store: &Store, id: i64) -> Result<Option<Session>> {
+  let transaction = store.db.unchecked_transaction()?;
+  let found = session::get(&transaction, id)?;
+  transaction.commit()?;
+  Ok(found)
+}
+
+fn latest_session_named(store: &Store, name: &str) -> Result<Option<Session>> {
+  let transaction = store.db.unchecked_transaction()?;
+  let found = session::latest_named(&transaction, name)?;
+  transaction.commit()?;
+  Ok(found)
+}
+
+fn session_snapshots(store: &Store) -> Result<Vec<Session>> {
+  let transaction = store.db.unchecked_transaction()?;
+  let sessions = session::all(&transaction)?;
+  transaction.commit()?;
+  Ok(sessions)
+}
+
+fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
+  Ok(match id {
+    Some(id) => session_snapshot(store, id)?
+      .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
+    None => "-".to_owned(),
+  })
 }
 
 fn git(store: &Store, args: &[&str]) -> Result<Output> {
@@ -280,10 +272,10 @@ fn authored_files(store: &Store, session_id: i64) -> Result<Vec<String>> {
 }
 
 fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
-  if session.stopped_at.is_some() {
+  if !session.is_live() {
     return Ok(Some("session is stopped".to_owned()));
   }
-  let tasks = task_snapshots_for_session(store, session.id)?;
+  let tasks = task_snapshots_for_session(store, session.id())?;
   if tasks
     .iter()
     .any(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
@@ -303,10 +295,10 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
     )));
   }
   let context_limit = store.cfg_i64("reuse-max-context", REUSE_MAX_CONTEXT);
-  if session.context > context_limit {
+  if session.context() > context_limit {
     return Ok(Some(format!(
       "context {} is over reuse-max-context {context_limit}",
-      session.context
+      session.context()
     )));
   }
   let since = last.and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned));
@@ -329,18 +321,17 @@ struct IdleSession {
 
 fn idle_pool(store: &Store) -> Result<Vec<IdleSession>> {
   let mut pool = Vec::new();
-  for session in store
-    .sessions()?
+  for session in session_snapshots(store)?
     .into_iter()
-    .filter(|session| session.role == "implementer")
+    .filter(|session| session.role() == Role::Implementer)
   {
     if reuse_verdict(store, &session)?.is_some() {
       continue;
     }
-    let since = last_seen_commit(store, session.id)?;
+    let since = last_seen_commit(store, session.id())?;
     pool.push(IdleSession {
       stale: staleness(store, since.as_deref())?,
-      files: authored_files(store, session.id)?,
+      files: authored_files(store, session.id())?,
       session,
     });
   }
@@ -349,10 +340,12 @@ fn idle_pool(store: &Store) -> Result<Vec<IdleSession>> {
 
 fn describe_idle(store: &Store, idle: &IdleSession) -> Result<String> {
   let session = &idle.session;
-  if last_task_on(store, session.id)?.is_none() {
+  if last_task_on(store, session.id())?.is_none() {
     return Ok(format!(
       "{} is idle at context {} and has never taken a task — dispatch <task-id> --to {}",
-      session.name, session.context, session.name
+      session.name(),
+      session.context(),
+      session.name()
     ));
   }
   let (commits, files, lines) = idle.stale;
@@ -363,7 +356,9 @@ fn describe_idle(store: &Store, idle: &IdleSession) -> Result<String> {
   };
   Ok(format!(
     "{} is idle at context {}, tree moved {lines} lines/{files} files/{commits} commits since its last turn, authored {authored} — dispatch <task-id> --to {} --reuse",
-    session.name, session.context, session.name
+    session.name(),
+    session.context(),
+    session.name()
   ))
 }
 
@@ -373,10 +368,10 @@ fn cmd_launch(
   name: &str,
   options: LaunchOptions<'_>,
 ) -> Result<()> {
-  if options.role == "implementer" {
+  if options.role == Role::Implementer {
     let pool: Vec<_> = idle_pool(store)?
       .into_iter()
-      .filter(|idle| idle.session.name != name)
+      .filter(|idle| idle.session.name() != name)
       .collect();
     if !pool.is_empty() && !options.fresh {
       eprintln!("supervisor: launch {name} refused — an idle implementer can take the next task:");
@@ -396,7 +391,7 @@ fn cmd_launch(
       } else {
         pool
           .iter()
-          .map(|item| item.session.name.as_str())
+          .map(|item| item.session.name())
           .collect::<Vec<_>>()
           .join(", ")
       };
@@ -413,14 +408,16 @@ fn cmd_launch(
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
   let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
-  store.db.execute(
-    "update sessions set stopped_at=? where name=? and stopped_at is null",
-    params![now(), name],
+  let transaction = store.db.unchecked_transaction()?;
+  session::stop_named(&transaction, name)?;
+  session::create(
+    &transaction,
+    name,
+    options.role,
+    &external_session_id,
+    launched_head.as_deref(),
   )?;
-  store.db.execute(
-        "insert into sessions(name,role,pane_id,tab_id,external_session_id,started_at,last_growth,launched_head) values(?,?,?,?,?,?,?,?)",
-        params![name, options.role, pane_id, tab_id, external_session_id, now(), now(), launched_head],
-  )?;
+  transaction.commit()?;
   store.event("launch", name)?;
   println!(
     "{}",
@@ -452,7 +449,10 @@ fn cmd_prompt(
   let prompt_id = store.db.last_insert_rowid();
 
   for attempt in 1..=PROMPT_ATTEMPTS {
-    let path_before = session_log_named(store, runtime, name)?;
+    // Polling the runtime gives it a turn to deliver what a busy session has
+    // queued; the landing check below then reads what actually arrived.
+    let _ = runtime.query(name);
+    let path_before = session_log_named(store, name)?;
     let mut offset = file_size(path_before.as_deref());
     store.db.execute(
       "update prompts set attempts=attempts+1 where id=?",
@@ -461,7 +461,8 @@ fn cmd_prompt(
     let _ = runtime.prompt(name, text);
     let deadline = now() + 15.0;
     while now() < deadline {
-      let path = session_log_named(store, runtime, name)?;
+      let _ = runtime.query(name);
+      let path = session_log_named(store, name)?;
       if path != path_before {
         offset = 0;
       }
@@ -502,7 +503,7 @@ fn cmd_start_commentator(
     runtime,
     &name,
     LaunchOptions {
-      role: "commentator",
+      role: Role::Commentator,
       kind: SessionKind::Commentator,
       fresh: false,
       reason: None,
@@ -606,7 +607,7 @@ fn cmd_task_new(
 }
 
 fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<String> {
-  let Some(since) = last_seen_commit(store, session.id)? else {
+  let Some(since) = last_seen_commit(store, session.id())? else {
     return Ok(String::new());
   };
   let (commits, _, _) = staleness(store, Some(&since))?;
@@ -680,22 +681,25 @@ fn cmd_dispatch(
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
   transaction.commit()?;
   if let Some(flying) = flying {
-    let session_name = match flying.session_id() {
-      Some(session_id) => store
-        .session(session_id)?
-        .map_or_else(|| "-".to_owned(), |session| session.name),
-      None => "-".to_owned(),
-    };
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
-      session_name,
+      session_name(store, flying.session_id())?,
       flying.id()
     );
   }
-  let Some(session) = store.latest_session_named(implementer)? else {
+  let Some(session) = latest_session_named(store, implementer)? else {
     bail!("supervisor: no session {implementer}; launch it first");
   };
-  let prior = last_task_on(store, session.id)?;
+  if !session.can_take_task() {
+    if session.is_live() {
+      bail!(
+        "supervisor: {implementer} is the {}, not an implementer; only implementers take tasks",
+        session.role()
+      );
+    }
+    bail!("supervisor: {implementer} is stopped; launch it again first");
+  }
+  let prior = last_task_on(store, session.id())?;
   if let Some(prior) = &prior
     && !reuse
   {
@@ -739,13 +743,13 @@ fn cmd_dispatch(
   task::dispatch(
     &transaction,
     task_id,
-    session.id,
+    session.id(),
     reuse,
     dispatch_reason.as_deref(),
   )?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
-  let log = session_log(store, runtime, &session)?;
+  let log = session_log(store, &session);
   let offset = file_size(log.as_deref());
   let base = context_before(log.as_deref(), offset);
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
@@ -763,7 +767,7 @@ fn cmd_dispatch(
 /// The session may have read the tree before its task arrived; name what moved
 /// since it started so it rereads that first. Empty when nothing has.
 fn files_changed_since_launch(store: &Store, session: &Session) -> Result<String> {
-  let Some(head) = session.launched_head.as_deref() else {
+  let Some(head) = session.launched_head() else {
     return Ok(String::new());
   };
   let files = git_stdout(store, &["diff", "--name-only", &format!("{head}..HEAD")])?;
@@ -806,13 +810,7 @@ fn new_commit_for(
 
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
-fn cmd_accept(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  task_id: i64,
-  force: bool,
-  reason: Option<&str>,
-) -> Result<()> {
+fn cmd_accept(store: &Store, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
   if task_snapshot(store, task_id)?.is_none() {
     bail!("supervisor: no task {task_id}");
   }
@@ -822,7 +820,7 @@ fn cmd_accept(
     (false, Some(_)) => {
       bail!("supervisor: --reason only applies with --force; accept without it runs the checks")
     }
-    (false, None) => accept_through_the_gate(store, runtime, task_id),
+    (false, None) => accept_through_the_gate(store, task_id),
   }
 }
 
@@ -847,17 +845,13 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
   Ok(())
 }
 
-fn accept_through_the_gate(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  task_id: i64,
-) -> Result<()> {
+fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut log = match task.session_id() {
-    Some(session_id) => match store.session(session_id)? {
-      Some(session) => session_log(store, runtime, &session)?,
+    Some(session_id) => match session_snapshot(store, session_id)? {
+      Some(session) => session_log(store, &session),
       None => None,
     },
     None => None,
@@ -873,8 +867,8 @@ fn accept_through_the_gate(
   if sha.is_none() && head_advanced_cleanly(store, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
     log = match task.session_id() {
-      Some(session_id) => match store.session(session_id)? {
-        Some(session) => session_log(store, runtime, &session)?,
+      Some(session_id) => match session_snapshot(store, session_id)? {
+        Some(session) => session_log(store, &session),
         None => None,
       },
       None => None,
@@ -995,7 +989,7 @@ fn cmd_abort(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   Ok(())
 }
 
-fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
+fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
@@ -1027,8 +1021,8 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
     .zip(committed_at)
     .map(|(start, end)| end - start);
   let log = match task.session_id() {
-    Some(session_id) => match store.session(session_id)? {
-      Some(session) => session_log(store, runtime, &session)?,
+    Some(session_id) => match session_snapshot(store, session_id)? {
+      Some(session) => session_log(store, &session),
       None => None,
     },
     None => None,
@@ -1044,9 +1038,7 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
   if end == 0
     && let Some(session_id) = task.session_id()
   {
-    end = store
-      .session(session_id)?
-      .map_or(0, |session| session.context_max);
+    end = session_snapshot(store, session_id)?.map_or(0, |session| session.context_max());
   }
   let base = task.context_size_start().unwrap_or_default();
   let context = (end - base).max(0);
@@ -1192,7 +1184,7 @@ fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result
   task::get(transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))
 }
 
-fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
+fn cmd_state(store: &Store) -> Result<()> {
   println!("tasks");
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
@@ -1243,47 +1235,46 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
     let reason = task
       .reason()
       .map_or_else(String::new, |reason| format!("  reason: {reason}"));
-    let session_name = match task.session_id() {
-      Some(session_id) => store
-        .session(session_id)?
-        .map_or_else(|| "-".to_owned(), |session| session.name),
-      None => "-".to_owned(),
-    };
     println!(
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reuse}{reason}",
       task.id(),
       task.state(),
-      session_name,
+      session_name(store, task.session_id())?,
       task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
-  for session in store.sessions()? {
+  for session in session_snapshots(store)? {
     let mut flags = String::new();
-    if session.role == "implementer" && session.context > IMPLEMENTER_LIMIT_TOKENS {
+    let implementer = session.role() == Role::Implementer;
+    if implementer && session.context() > IMPLEMENTER_LIMIT_TOKENS {
       flags.push_str(" OVER-LIMIT");
     }
-    if session.role == "implementer"
-      && last_task_on(store, session.id)?.is_some()
+    if implementer
+      && last_task_on(store, session.id())?.is_some()
       && reuse_verdict(store, &session)?.is_none()
     {
       flags.push_str(" idle, reusable");
     }
-    let quiet = (now() - session.last_growth.unwrap_or_else(now)) as i64;
-    if session_log(store, runtime, &session)?.is_some() {
+    let quiet = session.quiet_seconds(Utc::now());
+    if session_log(store, &session).is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
-        session.name, session.role, session.context, session.context_max
+        session.name(),
+        session.role(),
+        session.context(),
+        session.context_max()
       );
     } else {
-      let danger = if session.role == "lead" {
+      let danger = if session.role() == Role::Lead {
         "; lead stop threshold disabled"
       } else {
         ""
       };
       println!(
         "  {:<16} {:<12} context UNAVAILABLE (session log not found{danger}) quiet {quiet}s{flags}",
-        session.name, session.role
+        session.name(),
+        session.role()
       );
     }
   }
@@ -1380,17 +1371,15 @@ fn print_time_summary(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn cmd_context(store: &Store, runtime: &dyn SessionRuntime, name: Option<&str>) -> Result<()> {
-  for session in store
-    .sessions()?
+fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
+  for session in session_snapshots(store)?
     .into_iter()
-    .filter(|session| name.is_none_or(|name| session.name == name))
+    .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    let log = session_log(store, runtime, &session)?;
-    if let Some(log) = log {
-      println!("{}\t{}", session.name, context_size(Some(&log)));
+    if let Some(log) = session_log(store, &session) {
+      println!("{}\t{}", session.name(), context_size(Some(&log)));
     } else {
-      println!("{}\tUNAVAILABLE (session log not found)", session.name);
+      println!("{}\tUNAVAILABLE (session log not found)", session.name());
     }
   }
   Ok(())
@@ -1442,38 +1431,31 @@ fn daemon(
   store: &Store,
   runtime: &dyn SessionRuntime,
   lead: &str,
+  lead_session_id: &str,
   poll_interval: Duration,
 ) -> Result<()> {
   store.set_cfg("lead", lead)?;
-  store.db.execute(
-    "insert into sessions(name,role,started_at,last_growth)
-         select ?,?,?,? where not exists(
-           select 1 from sessions where name=? and role='lead' and stopped_at is null
-         )",
-    params![lead, "lead", now(), now(), lead],
-  )?;
+  register_lead(store, lead, lead_session_id)?;
   store.set_cfg("stopped", "0")?;
   store.event("daemon-start", &format!("pid {}", std::process::id()))?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut missing_logs = HashSet::new();
   let mut compacting = false;
   while store.cfg("stopped")?.as_deref() != Some("1") {
-    let timestamp = now();
-    for session in store
-      .sessions()?
+    let timestamp = Utc::now();
+    for session in session_snapshots(store)?
       .into_iter()
-      .filter(|session| session.stopped_at.is_none())
+      .filter(Session::is_live)
     {
-      let name = &session.name;
-      let log = session_log(store, runtime, &session)?;
-      let Some(log) = log else {
-        if missing_logs.insert(name.clone()) {
-          let danger = if session.role == "lead" {
+      let name = session.name();
+      let Some(log) = session_log(store, &session) else {
+        if missing_logs.insert(name.to_owned()) {
+          let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"
           } else {
             ""
           };
-          let detail = format!("{name} ({}): session log not found{danger}", session.role);
+          let detail = format!("{name} ({}): session log not found{danger}", session.role());
           eprintln!("WARNING: {detail}");
           store.event("session-log-missing", &detail)?;
         }
@@ -1489,18 +1471,17 @@ fn daemon(
       let size = file_size(Some(&log));
       let context = context_size(Some(&log)) as i64;
       let grew = sizes.get(name).copied() != Some(size);
-      sizes.insert(name.clone(), size);
-      store.db.execute(
-                "update sessions set context=?, context_max=max(context_max,?), last_growth=case when ? then ? else last_growth end, kicked_at=case when ? then null else kicked_at end where id=?",
-                params![context, context, grew, timestamp, grew, session.id],
-            )?;
-      let quiet = timestamp - session.last_growth.unwrap_or(timestamp);
+      sizes.insert(name.to_owned(), size);
+      let transaction = store.db.unchecked_transaction()?;
+      session::record_reading(&transaction, session.id(), context, grew, timestamp)?;
+      transaction.commit()?;
+      let quiet = session.quiet_seconds(timestamp) as f64;
 
-      match session.role.as_str() {
-        "implementer" => {
+      match session.role() {
+        Role::Implementer => {
           observe_implementer(store, runtime, &session, Some(&log), quiet)?;
         }
-        "commentator" => {
+        Role::Commentator => {
           observe_commentator(
             store,
             runtime,
@@ -1511,13 +1492,57 @@ fn daemon(
             &mut compacting,
           )?;
         }
-        "lead" => observe_lead(store, runtime, name, context)?,
-        _ => {}
+        Role::Lead => observe_lead(store, runtime, name, context)?,
       }
     }
     thread::sleep(poll_interval);
   }
   store.event("daemon-exit", "")
+}
+
+/// The lead is started by the human, so the daemon registers it from what the
+/// lead says about itself. The same session id keeps its row across daemon
+/// restarts; a different one is a new incarnation and stops the old row.
+fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
+  let transaction = store.db.unchecked_transaction()?;
+  let current = session::latest_named(&transaction, lead)?;
+  if !current.is_some_and(|session| {
+    session.is_live()
+      && session.role() == Role::Lead
+      && session.external_session_id() == lead_session_id
+  }) {
+    session::stop_named(&transaction, lead)?;
+    session::create(&transaction, lead, Role::Lead, lead_session_id, None)?;
+  }
+  transaction.commit()?;
+  Ok(())
+}
+
+/// Nudge a session that has gone quiet while its runtime reports it idle. The
+/// kick is latched on the session so it happens once per stall.
+fn kick_if_stalled(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  session: &Session,
+  quiet: f64,
+) -> Result<()> {
+  if quiet > STALE_SECONDS
+    && session.can_be_kicked()
+    && runtime
+      .query(session.name())
+      .ok()
+      .flatten()
+      .map(|session| session.status)
+      .as_deref()
+      .is_some_and(|status| matches!(status, "idle" | "done"))
+  {
+    store.event("kick", session.name())?;
+    let transaction = store.db.unchecked_transaction()?;
+    session::record_kick(&transaction, session.id())?;
+    transaction.commit()?;
+    daemon_prompt(store, runtime, session.name(), "continue");
+  }
+  Ok(())
 }
 
 fn observe_implementer(
@@ -1527,7 +1552,7 @@ fn observe_implementer(
   log: Option<&Path>,
   quiet: f64,
 ) -> Result<()> {
-  let task = task_snapshots_for_session(store, session.id)?
+  let task = task_snapshots_for_session(store, session.id())?
     .into_iter()
     .rev()
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
@@ -1542,22 +1567,8 @@ fn observe_implementer(
     task::record_commit(&transaction, task.id(), &sha, None)?;
     transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
-  } else if quiet > STALE_SECONDS
-    && session.kicked_at.is_none()
-    && runtime
-      .query(&session.name)
-      .ok()
-      .flatten()
-      .map(|session| session.status)
-      .as_deref()
-      .is_some_and(|status| matches!(status, "idle" | "done"))
-  {
-    store.event("kick", &session.name)?;
-    store.db.execute(
-      "update sessions set kicked_at=? where id=?",
-      params![now(), session.id],
-    )?;
-    daemon_prompt(store, runtime, &session.name, "continue");
+  } else {
+    kick_if_stalled(store, runtime, session, quiet)?;
   }
   Ok(())
 }
@@ -1601,29 +1612,12 @@ fn observe_commentator(
   }
   if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
     *compacting = true;
-    store.event("compact", &format!("{} at {context}", session.name))?;
-    daemon_prompt(store, runtime, &session.name, "/compact");
+    store.event("compact", &format!("{} at {context}", session.name()))?;
+    daemon_prompt(store, runtime, session.name(), "/compact");
   } else if context < COMMENTATOR_COMPACT_TOKENS {
     *compacting = false;
   }
-  if quiet > STALE_SECONDS
-    && session.kicked_at.is_none()
-    && runtime
-      .query(&session.name)
-      .ok()
-      .flatten()
-      .map(|session| session.status)
-      .as_deref()
-      .is_some_and(|status| matches!(status, "idle" | "done"))
-  {
-    store.event("kick", &session.name)?;
-    store.db.execute(
-      "update sessions set kicked_at=? where id=?",
-      params![now(), session.id],
-    )?;
-    daemon_prompt(store, runtime, &session.name, "continue");
-  }
-  Ok(())
+  kick_if_stalled(store, runtime, session, quiet)
 }
 
 fn observe_lead(
