@@ -71,17 +71,30 @@ pub struct Store {
   pub db: Connection,
 }
 
+/// Claude Code names a project directory after the session's cwd, replacing
+/// separators with dashes and nothing else. Dots survive.
+fn project_directory_name(canonical_run_dir: &Path) -> String {
+  canonical_run_dir.to_string_lossy().replace('/', "-")
+}
+
+/// Where Claude Code keeps a session's transcripts. The supervisor's own database
+/// lives here too, so a run's state sits beside the logs it is derived from.
+pub fn logs_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
+  let home = env::var_os("HOME").context("HOME is not set")?;
+  Ok(
+    PathBuf::from(home)
+      .join(".claude")
+      .join("projects")
+      .join(project_directory_name(canonical_run_dir)),
+  )
+}
+
 impl Store {
   pub fn open(run_dir: &Path) -> Result<Self> {
     let run_dir = run_dir
       .canonicalize()
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
-    let home = env::var_os("HOME").context("HOME is not set")?;
-    let munged = run_dir.to_string_lossy().replace(['/', '.'], "-");
-    let logs_dir = PathBuf::from(home)
-      .join(".claude")
-      .join("projects")
-      .join(munged);
+    let logs_dir = logs_dir_for(&run_dir)?;
     fs::create_dir_all(&logs_dir)?;
     let path = logs_dir.join("chainsaw-supervisor.db");
     let db = Connection::open(&path)?;
@@ -226,9 +239,31 @@ mod tests {
   use anyhow::Result;
   use rusqlite::Connection;
 
-  use super::initialize_schema;
+  use super::{initialize_schema, project_directory_name};
 
   static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
+
+  mod project_directory_name {
+    use std::path::Path;
+
+    use super::project_directory_name;
+
+    #[test]
+    fn should_work() {
+      assert_eq!(
+        project_directory_name(Path::new("/Users/a/src/chainsaw")),
+        "-Users-a-src-chainsaw"
+      );
+    }
+
+    #[test]
+    fn should_keep_dots_when_the_run_directory_is_dotted() {
+      assert_eq!(
+        project_directory_name(Path::new("/Users/a/src/ui.wt/refactor")),
+        "-Users-a-src-ui.wt-refactor"
+      );
+    }
+  }
 
   #[test]
   fn creates_communication_storage_with_foreign_keys() -> Result<()> {

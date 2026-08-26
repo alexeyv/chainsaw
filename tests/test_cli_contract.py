@@ -7,6 +7,7 @@ CHAINSAW_SUPERVISOR_COMMAND.
 
 import json
 import threading
+from pathlib import Path
 
 from tests.support import SupervisorContractCase
 
@@ -693,6 +694,42 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn("a human wait is open", open_state.stdout)
         self.assertNotIn("a human wait is open", closed_state.stdout)
+
+
+class DottedRunDirectoryContractTests(SupervisorContractCase):
+    """Claude Code munges only path separators, so a dotted run directory keeps its dot."""
+
+    run_dir_name = "run.wt"
+
+    def test_commentator_is_pointed_at_the_directory_claude_code_actually_writes(self):
+        self.assert_success(self.cli(
+            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
+        ))
+
+        prompt = next(
+            operation["text"] for operation in self.runtime_operations()
+            if operation["operation"] == "prompt"
+            and operation["session_id"].startswith("commentator-")
+        )
+        prefix = "Session-log directory: "
+        announced = next(
+            line.removeprefix(prefix)
+            for line in prompt.splitlines() if line.startswith(prefix)
+        )
+
+        self.assertTrue(
+            announced.endswith("-run.wt"),
+            f"the run directory's dot was munged away: {announced}",
+        )
+        self.assertTrue(Path(announced).is_dir(), announced)
+
+    def test_supervisor_state_is_stored_beside_the_transcripts(self):
+        self.assert_success(self.cli("launch", "worker"))
+
+        self.assertTrue(
+            (self.logs_dir / "chainsaw-supervisor.db").is_file(),
+            f"no database under {self.logs_dir}",
+        )
 
 
 if __name__ == "__main__":

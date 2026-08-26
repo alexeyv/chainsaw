@@ -10,6 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
+use crate::store;
+
 const IMPLEMENTER_FLAGS: &[&str] = &[
   "--model",
   "opus",
@@ -286,20 +288,13 @@ impl ZeroCostDummy {
   }
 
   fn logs_dir(run_dir: &Path) -> Result<PathBuf> {
-    let home = env::var_os("HOME").context("HOME is not set")?;
     let run_dir = run_dir.canonicalize().with_context(|| {
       format!(
         "cannot resolve dummy session run directory {}",
         run_dir.display()
       )
     })?;
-    let munged = run_dir.to_string_lossy().replace(['/', '.'], "-");
-    Ok(
-      PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(munged),
-    )
+    store::logs_dir_for(&run_dir)
   }
 
   fn append_log(path: &Path, entry: &Value) -> Result<()> {

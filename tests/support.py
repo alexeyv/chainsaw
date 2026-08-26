@@ -29,11 +29,14 @@ class SupervisorContractCase(unittest.TestCase):
 
     maxDiff = None
 
+    #: Basename of the run directory, so a case can exercise an awkward one.
+    run_dir_name = "run"
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="chainsaw-contract-")
         self.addCleanup(self.temporary.cleanup)
         self.sandbox = Path(self.temporary.name)
-        self.run_dir = self.sandbox / "run"
+        self.run_dir = self.sandbox / self.run_dir_name
         self.home = self.sandbox / "home"
         self.runtime_state_path = self.sandbox / "zero-cost-dummy.json"
         self.run_dir.mkdir()
@@ -62,7 +65,7 @@ class SupervisorContractCase(unittest.TestCase):
         return self.logs_dir_for(self.run_dir)
 
     def logs_dir_for(self, run_dir):
-        munged = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
+        munged = os.path.realpath(run_dir).replace("/", "-")
         return self.home / ".claude" / "projects" / munged
 
     def cli(self, *args, input_text=None, timeout=30):
