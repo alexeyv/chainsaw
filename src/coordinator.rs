@@ -719,8 +719,10 @@ fn cmd_dispatch(
   } else if session.prepopulated_at.is_some() {
     let transaction = store.db.unchecked_transaction()?;
     let since = task::all(&transaction)?.into_iter().rev().find(|task| {
-      matches!(task.state(), TaskState::Committed | TaskState::Accepted)
-        && task.commit_sha().is_some()
+      matches!(
+        task.state(),
+        TaskState::CommittedUnverified | TaskState::Accepted
+      ) && task.commit_sha().is_some()
     });
     transaction.commit()?;
     if let Some(sha) = since.and_then(|task| task.commit_sha().map(str::to_owned)) {
@@ -1285,7 +1287,7 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   if reason.trim().is_empty() {
     bail!("supervisor: accept requires a non-empty --reason");
   }
-  if task.state() != TaskState::Committed || task.commit_sha().is_none() {
+  if task.state() != TaskState::CommittedUnverified || task.commit_sha().is_none() {
     bail!(
       "supervisor: task {task_id} is {}, not a committed unverified task",
       task.state()
@@ -1368,7 +1370,7 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
     .db
     .query_row(
       "select created_at / 1000.0 from task_events
-       where task_id=? and state='committed' order by id desc limit 1",
+       where task_id=? and state='committed_unverified' order by id desc limit 1",
       [task_id],
       |row| row.get(0),
     )
@@ -1700,7 +1702,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
     let end: Option<f64> = store
             .db
             .query_row(
-                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed','verified','failed') order by id limit 1",
+                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed_unverified','accepted','aborted') order by id limit 1",
                 [task.id()],
                 |row| row.get(0),
             )
@@ -1927,8 +1929,10 @@ fn observe_commentator(
   let transaction = store.db.unchecked_transaction()?;
   let mut pending = Vec::new();
   for task in task::all(&transaction)? {
-    if matches!(task.state(), TaskState::Committed | TaskState::Accepted)
-      && task.commit_sha().is_some()
+    if matches!(
+      task.state(),
+      TaskState::CommittedUnverified | TaskState::Accepted
+    ) && task.commit_sha().is_some()
       && commentary_delivery::delivered_at(&transaction, task.id())?.is_none()
     {
       pending.push(task);

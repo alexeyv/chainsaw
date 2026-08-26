@@ -76,7 +76,7 @@ mod tests {
 
   #[test]
   fn a_reason_is_optional_on_every_transition() {
-    let event = TaskEvent::new(1, TaskState::Committed, None, timestamp(1)).unwrap();
+    let event = TaskEvent::new(1, TaskState::CommittedUnverified, None, timestamp(1)).unwrap();
 
     assert_eq!(event.reason(), None);
   }

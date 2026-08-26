@@ -390,7 +390,7 @@ class ReuseContractTests(SupervisorContractCase):
     def test_a_committed_predecessor_releases_the_next_dispatch(self):
         self.prepare_committed_task()
         daemon = self.start_daemon()
-        self.wait_for_state("1 committed")
+        self.wait_for_state("1 committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
 
@@ -403,14 +403,14 @@ class ReuseContractTests(SupervisorContractCase):
         state = self.assert_success(self.cli("state"))
 
         self.assert_success(result)
-        self.assertIn("1 committed", state.stdout)
+        self.assertIn("1 committed_unverified", state.stdout)
         self.assertIn(f"{second} in_flight", state.stdout)
         self.assertIn("task 2 in flight on replacement", result.stdout)
 
     def test_accepting_with_a_reason_skips_the_gate_and_records_the_override(self):
         task, _ = self.prepare_committed_task()
         daemon = self.start_daemon()
-        self.wait_for_state("1 committed")
+        self.wait_for_state("1 committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
 
@@ -693,7 +693,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         task, sha = self.prepare_committed_task()
 
         daemon = self.start_daemon()
-        state = self.wait_for_state("1 committed")
+        state = self.wait_for_state("1 committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
 

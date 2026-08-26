@@ -175,7 +175,7 @@ pub fn record_commit(
   advance(
     transaction,
     id,
-    TaskState::Committed,
+    TaskState::CommittedUnverified,
     reason,
     |transaction| {
       transaction.execute(
@@ -593,7 +593,7 @@ mod tests {
     assert_eq!(accepted.reason(), None);
 
     let accepted = record_commit(&transaction, accepted.id(), "accepted123", None)?;
-    assert_eq!(accepted.state(), TaskState::Committed);
+    assert_eq!(accepted.state(), TaskState::CommittedUnverified);
     assert_eq!(accepted.commit_sha(), Some("accepted123"));
     let accepted = accept(&transaction, accepted.id(), "gate passed")?;
     assert_eq!(accepted.state(), TaskState::Accepted);
@@ -624,7 +624,7 @@ mod tests {
     let again = record_commit(&transaction, task.id(), "second456", None)?;
     transaction.commit()?;
 
-    assert_eq!(first.state(), TaskState::Committed);
+    assert_eq!(first.state(), TaskState::CommittedUnverified);
     assert_eq!(again, first);
     assert_eq!(again.commit_sha(), Some("first123"));
     assert_eq!(again.events().len(), 3);
@@ -700,7 +700,7 @@ mod tests {
 
     assert_eq!(
       error.to_string(),
-      "task 1 cannot advance from aborted to committed"
+      "task 1 cannot advance from aborted to committed_unverified"
     );
     assert_eq!(unchanged.state(), TaskState::Aborted);
     assert_eq!(unchanged.commit_sha(), None);

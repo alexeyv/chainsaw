@@ -90,9 +90,9 @@ continuation prompts, and handoffs.
 A task moves forward through five states and can stop at `aborted` from any of them.
 There are no backward edges.
 
-    drafted -> dispatched -> in_flight -> committed -> accepted
-       |            |             |            |
-       +------------+-------------+------------+----------> aborted
+    drafted -> dispatched -> in_flight -> committed_unverified -> accepted
+       |            |             |                  |
+       +------------+-------------+------------------+---------------> aborted
 
 Each transition has its own verb, because each one carries its own arguments. Every
 transition records an optional reason against that step, which `state` shows. Moving a
@@ -114,18 +114,21 @@ but a retry.
 offset, the HEAD the implementer started from, and its starting context size. The
 supervisor sets this itself, immediately after dispatch. You never advance a task here.
 
-**committed** — the daemon has seen a commit in that session's log that exists in git
-and descends from the task's base HEAD. The supervisor sets this. It means a commit
-landed; it does not mean the implementer has stopped working. This is the state that
-releases the next dispatch. The moment a task is `committed`, dispatch the next one to
+**committed_unverified** — the daemon has seen a commit in that session's log that
+exists in git and descends from the task's base HEAD. The supervisor sets this. It means
+a commit landed; it does not mean the implementer has stopped working. This is the state
+that releases the next dispatch: the moment a task reaches it, dispatch the next one to
 the pre-warmed session — do not wait for the session to go idle, and do not wait for the
-commit to be judged.
+commit to be judged. The name is also the reminder. A task sitting in
+`committed_unverified` in `state` is work you have not judged yet, and it stays there,
+visibly, until you do.
 
 **accepted** — terminal, and the only successful ending. `$SUP verify <task-id>` runs
 the mechanical gate — the commit is in git, carries no attribution trailer, the tree is
 clean, and the project's quality gate ran last in the log — and accepts the task only if
 it passes, recording `gate passed at <sha>` as the reason. It prints the problems and
-fails otherwise, leaving the task `committed`. `$SUP accept <task-id> --reason "..."`
+fails otherwise, leaving the task `committed_unverified`. `$SUP accept <task-id>
+--reason "..."`
 skips the gate and accepts on your justification instead. The reason is what tells
 anyone reading `state` how the task was accepted.
 
@@ -190,13 +193,14 @@ measured separately (`$SUP state` shows both).
 
    Choose against the in-flight implementer's predicted file set: anything it will
    rewrite is read after its commit; large files by line range.
-2. The moment the previous task reaches `committed`, dispatch the next one — do not
-   wait for its session to fall idle and do not wait to judge its commit. Judging is a
-   separate step you take when convenient: `$SUP verify <task-id>` runs the gate, and
-   `$SUP accept <task-id> --reason "..."` overrides it. Neither one gates this dispatch.
-   Dispatch with `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated
-   fresh session, or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle
-   earlier one
+2. The moment the previous task reaches `committed_unverified`, get the next one
+   moving — do not wait for its session to fall idle and do not wait to judge its
+   commit. Dispatch first, then come back and judge the previous task: `$SUP verify
+   <task-id>` runs the gate, and `$SUP accept <task-id> --reason "..."` overrides it.
+   Neither one gates this dispatch, and nothing forces you to run either; the task's own
+   state name is what tells you it is still outstanding. Dispatch with
+   `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated fresh session,
+   or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle earlier one
    (`--to` is a choice, not ceremony; without `--reuse` the supervisor refuses a session
    that already took a task). Either sends the task verbatim and then the implementer's
    contract. A pre-populated session gets "these files changed since your reading

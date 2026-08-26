@@ -16,7 +16,7 @@ pub enum TaskState {
   Drafted,
   Dispatched,
   InFlight,
-  Committed,
+  CommittedUnverified,
   Accepted,
   Aborted,
 }
@@ -27,7 +27,7 @@ impl TaskState {
       Self::Drafted => "drafted",
       Self::Dispatched => "dispatched",
       Self::InFlight => "in_flight",
-      Self::Committed => "committed",
+      Self::CommittedUnverified => "committed_unverified",
       Self::Accepted => "accepted",
       Self::Aborted => "aborted",
     }
@@ -48,7 +48,7 @@ impl TaskState {
   }
 
   fn requires_commit(self) -> bool {
-    matches!(self, Self::Committed | Self::Accepted)
+    matches!(self, Self::CommittedUnverified | Self::Accepted)
   }
 }
 
@@ -60,7 +60,7 @@ impl TryFrom<&str> for TaskState {
       "drafted" => Ok(Self::Drafted),
       "dispatched" => Ok(Self::Dispatched),
       "in_flight" => Ok(Self::InFlight),
-      "committed" => Ok(Self::Committed),
+      "committed_unverified" => Ok(Self::CommittedUnverified),
       "accepted" => Ok(Self::Accepted),
       "aborted" => Ok(Self::Aborted),
       value => bail!("unknown task state {value:?}"),
@@ -306,7 +306,7 @@ mod tests {
       (TaskState::Drafted, "drafted"),
       (TaskState::Dispatched, "dispatched"),
       (TaskState::InFlight, "in_flight"),
-      (TaskState::Committed, "committed"),
+      (TaskState::CommittedUnverified, "committed_unverified"),
       (TaskState::Accepted, "accepted"),
       (TaskState::Aborted, "aborted"),
     ] {
@@ -320,18 +320,18 @@ mod tests {
     let allowed = [
       (TaskState::Drafted, TaskState::Dispatched),
       (TaskState::Drafted, TaskState::InFlight),
-      (TaskState::Drafted, TaskState::Committed),
+      (TaskState::Drafted, TaskState::CommittedUnverified),
       (TaskState::Drafted, TaskState::Accepted),
       (TaskState::Drafted, TaskState::Aborted),
       (TaskState::Dispatched, TaskState::InFlight),
-      (TaskState::Dispatched, TaskState::Committed),
+      (TaskState::Dispatched, TaskState::CommittedUnverified),
       (TaskState::Dispatched, TaskState::Accepted),
       (TaskState::Dispatched, TaskState::Aborted),
-      (TaskState::InFlight, TaskState::Committed),
+      (TaskState::InFlight, TaskState::CommittedUnverified),
       (TaskState::InFlight, TaskState::Accepted),
       (TaskState::InFlight, TaskState::Aborted),
-      (TaskState::Committed, TaskState::Accepted),
-      (TaskState::Committed, TaskState::Aborted),
+      (TaskState::CommittedUnverified, TaskState::Accepted),
+      (TaskState::CommittedUnverified, TaskState::Aborted),
     ];
 
     for current in TaskState::iter() {
@@ -384,17 +384,17 @@ mod tests {
         TaskState::Dispatched,
         TaskState::InFlight,
       ],
-      TaskState::Committed => vec![
+      TaskState::CommittedUnverified => vec![
         TaskState::Drafted,
         TaskState::Dispatched,
         TaskState::InFlight,
-        TaskState::Committed,
+        TaskState::CommittedUnverified,
       ],
       TaskState::Accepted => vec![
         TaskState::Drafted,
         TaskState::Dispatched,
         TaskState::InFlight,
-        TaskState::Committed,
+        TaskState::CommittedUnverified,
         TaskState::Accepted,
       ],
       TaskState::Aborted => vec![
@@ -586,7 +586,7 @@ mod tests {
       1,
       "task",
       0,
-      TaskState::Committed,
+      TaskState::CommittedUnverified,
       Some(2),
       None,
       None,
@@ -596,7 +596,10 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error.to_string(), "Committed task requires a commit");
+    assert_eq!(
+      error.to_string(),
+      "CommittedUnverified task requires a commit"
+    );
   }
 
   #[test]
