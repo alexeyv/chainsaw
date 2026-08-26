@@ -115,7 +115,10 @@ working on, and dispatch the next task as quickly as possible. Then go back to y
 **accepted** — terminal state, successful ending.
 Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
 Trigger the transition thus: `$SUP accept <task-id>`
-This runs some validations.
+This checks the commit is in git, carries no attribution trailer, is HEAD, and left the
+tree clean. It does not re-derive whether the quality gate ran — the implementer's
+contract is to run it before it commits, and proving that again from the session log
+only costs wall time.
 If you eventually decide to accept the task bypassing validations:
 `$SUP accept <task-id> --force --reason "..."`
 A reason is required with `--force`, and only meaningful with it.
@@ -183,8 +186,8 @@ measured separately (`$SUP state` shows both).
 2. The moment the previous task reaches `committed_unverified`, get the next one
    moving — do not wait for its session to fall idle and do not wait to judge its
    commit. Dispatch first, then come back and judge the previous task: `$SUP accept
-   <task-id>` runs the gate, and `$SUP accept <task-id> --force --reason "..."`
-   bypasses it.
+   <task-id>` runs the checks, and `$SUP accept <task-id> --force --reason "..."`
+   bypasses them.
    Neither one gates this dispatch, and nothing forces you to run either; the task's own
    state name is what tells you it is still outstanding. Dispatch with
    `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated fresh session,

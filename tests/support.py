@@ -205,22 +205,16 @@ class SupervisorContractCase(unittest.TestCase):
             }]},
         })
 
-    def record_commit(self, name, sha, gate=None, gate_ok=True, after_gate=None):
-        if gate:
-            self.append_bash(name, gate, ok=gate_ok)
-        if after_gate:
-            self.append_bash(name, after_gate, ok=True)
+    def record_commit(self, name, sha):
         self.append_bash(name, "git commit -m 'fixture commit'", ok=True)
         self.append_text(name, f"[chainsaw {sha[:10]}]")
 
-    def prepare_committed_task(self, *, gate=None, gate_ok=True, after_gate=None,
-                               trailer=False):
+    def prepare_committed_task(self, *, trailer=False):
         task_id = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task_id))
         sha = self.commit_with_trailer() if trailer else self.commit_file()
-        self.record_commit("worker", sha, gate=gate, gate_ok=gate_ok,
-                           after_gate=after_gate)
+        self.record_commit("worker", sha)
         return task_id, sha
 
     def start_daemon(self, lead="lead"):

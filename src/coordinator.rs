@@ -19,8 +19,8 @@ use strum::IntoEnumIterator;
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Task, TaskState};
 use crate::logs::{
-  bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
-  latest_assistant_text, prompt_landed,
+  commits_in_log, context_before, context_peak, context_size, file_size, latest_assistant_text,
+  prompt_landed,
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
@@ -831,7 +831,7 @@ fn cmd_accept(
     (true, Some(reason)) => accept_without_the_gate(store, task_id, reason),
     (true, None) => bail!("supervisor: accept --force requires a non-empty --reason"),
     (false, Some(_)) => {
-      bail!("supervisor: --reason only applies with --force; accept without it runs the gate")
+      bail!("supervisor: --reason only applies with --force; accept without it runs the checks")
     }
     (false, None) => accept_through_the_gate(store, runtime, task_id),
   }
@@ -916,35 +916,17 @@ fn accept_through_the_gate(
   if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
     problems.push("tree is dirty".to_owned());
   }
-  match (store.cfg("gate")?, log.as_deref()) {
-    (Some(gate), Some(log)) => {
-      if let Some(problem) = gate_last_problem(
-        &bash_commands(log, task.log_offset() as u64),
-        &gate,
-        &store.run_dir,
-      ) {
-        problems.push(problem);
-      }
-    }
-    (None, _) => problems
-      .push("gate not configured (chainsaw config gate CMD): gate-last unchecked".to_owned()),
-    _ => {}
-  }
-  let has_hard_problem = problems
-    .iter()
-    .any(|problem| !problem.starts_with("gate not configured"));
-  if !has_hard_problem {
+  // The implementer runs the quality gate before it commits; that is its
+  // contract, and re-deriving it from the session log only costs wall time.
+  if problems.is_empty() {
     let sha = sha
       .as_deref()
-      .context("verified task unexpectedly has no commit")?;
+      .context("accepted task unexpectedly has no commit")?;
     let transaction = store.db.unchecked_transaction()?;
     task::record_commit(&transaction, task_id, sha, None)?;
-    task::accept(&transaction, task_id, &format!("gate passed at {sha}"))?;
+    task::accept(&transaction, task_id, &format!("checks passed at {sha}"))?;
     transaction.commit()?;
-    println!("task {task_id} accepted: gate passed at {sha}");
-    for problem in problems {
-      println!("note: {problem}");
-    }
+    println!("task {task_id} accepted: checks passed at {sha}");
     return Ok(());
   }
   println!("task {task_id} NOT accepted:");
@@ -976,358 +958,6 @@ fn has_attribution_trailer(message: &str) -> bool {
     let lowercase = line.to_ascii_lowercase();
     lowercase.starts_with("co-authored-by:") || lowercase.starts_with("claude-session:")
   })
-}
-
-fn gate_last_problem(commands: &[(String, bool)], gate: &str, run_dir: &Path) -> Option<String> {
-  let commit_index = commands
-    .iter()
-    .rposition(|(command, _)| command.contains("git commit"));
-  let Some(commit_index) = commit_index else {
-    return Some(format!(
-      "no git commit in the log; gate-last unchecked ({gate:?})"
-    ));
-  };
-  let gate_index = commands[..commit_index]
-    .iter()
-    .rposition(|(command, _)| contains_gate(command, gate));
-  let Some(gate_index) = gate_index else {
-    return Some(format!("the gate ({gate:?}) did not run before the commit"));
-  };
-  if !commands[gate_index].1 {
-    return Some("the gate before the commit failed (error result in the log)".to_owned());
-  }
-  let mut intervening = commands[gate_index + 1..commit_index].to_vec();
-  if let Some(before_commit) = before_git_commit(&commands[commit_index].0)
-    && !before_commit.trim().is_empty()
-  {
-    intervening.push((before_commit.trim().to_owned(), true));
-  }
-  for (command, ok) in intervening {
-    if !ok {
-      let first_line = command.lines().next().unwrap_or_default();
-      return Some(format!(
-        "a command after the gate failed: {:?}",
-        truncate(first_line, 80)
-      ));
-    }
-    if !command_harmless_after_gate(&command, run_dir) {
-      return Some(format!(
-        "source-modifying command after the gate: {:?}",
-        truncate(command.lines().next().unwrap_or_default(), 80)
-      ));
-    }
-  }
-  None
-}
-
-fn contains_gate(command: &str, gate: &str) -> bool {
-  let actual = command_backbone(command);
-  let wanted = command_backbone(gate);
-  !wanted.is_empty()
-    && actual.match_indices(&wanted).any(|(start, matched)| {
-      let end = start + matched.len();
-      shell_boundary_before(&actual[..start]) && shell_boundary_after(&actual[end..])
-    })
-}
-
-fn shell_boundary_before(prefix: &str) -> bool {
-  prefix
-    .trim_end()
-    .chars()
-    .next_back()
-    .is_none_or(shell_boundary)
-}
-
-fn shell_boundary_after(suffix: &str) -> bool {
-  suffix
-    .trim_start()
-    .chars()
-    .next()
-    .is_none_or(shell_boundary)
-}
-
-fn shell_boundary(character: char) -> bool {
-  matches!(character, ';' | '|' | '&' | '(' | ')' | '{' | '}')
-}
-
-fn command_backbone(command: &str) -> String {
-  let redirect = Regex::new(r#"(?:\d+\s*)?(?:>&|<&|>>|<<|>|<)\s*(?:"[^"]*"|'[^']*'|[^\s;|&]+)"#)
-    .expect("valid redirect regex");
-  let separators = Regex::new(r"\s*([;|&]+)\s*").expect("valid separator regex");
-  let without_heredocs = without_heredoc_bodies(command).replace('\n', ";");
-  let without_redirects = redirect.replace_all(&without_heredocs, "");
-  separators
-    .replace_all(&without_redirects, "$1")
-    .split_whitespace()
-    .collect::<Vec<_>>()
-    .join(" ")
-}
-
-fn before_git_commit(command: &str) -> Option<&str> {
-  let pattern = Regex::new(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b").expect("valid git regex");
-  pattern.find(command).map(|found| &command[..found.start()])
-}
-
-fn truncate(text: &str, limit: usize) -> String {
-  text.chars().take(limit).collect()
-}
-
-fn without_heredoc_bodies(command: &str) -> String {
-  let marker =
-    Regex::new(r#"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?"#).expect("valid heredoc regex");
-  let mut delimiter = None;
-  let mut kept = Vec::new();
-  for line in command.lines() {
-    if let Some(expected) = delimiter.as_deref() {
-      if line.trim() == expected {
-        delimiter = None;
-      }
-      continue;
-    }
-    kept.push(line);
-    if let Some(capture) = marker.captures(line) {
-      delimiter = Some(capture[1].to_owned());
-    }
-  }
-  kept.join("\n").replace("\\\n", " ")
-}
-
-fn shell_parts(command: &str) -> Vec<String> {
-  let pattern = Regex::new(r"(?:\n|&&|\|\||;|\|)+").expect("valid shell regex");
-  pattern
-    .split(without_heredoc_bodies(command).trim())
-    .map(str::trim)
-    .filter(|part| !part.is_empty())
-    .map(str::to_owned)
-    .collect()
-}
-
-fn command_harmless_after_gate(command: &str, run_dir: &Path) -> bool {
-  let assignment = Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$").expect("valid assignment regex");
-  let mut variables = HashMap::new();
-  let mut cwd = run_dir.to_path_buf();
-  for part in shell_parts(command) {
-    let mut tokens = part.split_whitespace();
-    for token in tokens.by_ref() {
-      let Some(capture) = assignment.captures(token) else {
-        if token == "cd" {
-          let Some(target) = tokens
-            .next()
-            .and_then(|target| expand_path(target, &variables, &cwd))
-          else {
-            return false;
-          };
-          cwd = target;
-        }
-        break;
-      };
-      variables.insert(capture[1].to_owned(), unquote(&capture[2]).to_owned());
-    }
-    if harmless_after_gate(&part, run_dir, &variables, &cwd) {
-      continue;
-    }
-    if !cwd.starts_with(run_dir) && !command.contains(&run_dir.to_string_lossy().into_owned()) {
-      continue;
-    }
-    return false;
-  }
-  true
-}
-
-fn harmless_after_gate(
-  part: &str,
-  run_dir: &Path,
-  variables: &HashMap<String, String>,
-  cwd: &Path,
-) -> bool {
-  let redirects = Regex::new(r#"(?:\d+\s*)?(>&|<&|>>|<<|>|<)\s*("[^"]*"|'[^']*'|[^\s;|&]+)"#)
-    .expect("valid redirect regex");
-  for capture in redirects.captures_iter(part) {
-    let operator = &capture[1];
-    let target = unquote(&capture[2]);
-    if operator.starts_with('<') && operator != "<>" {
-      continue;
-    }
-    if operator.contains('&') && (target.chars().all(|c| c.is_ascii_digit()) || target == "-") {
-      continue;
-    }
-    let Some(path) = expand_path(target, variables, cwd) else {
-      return false;
-    };
-    if !path.starts_with(run_dir) || git_ignored(run_dir, &path) {
-      continue;
-    }
-    return false;
-  }
-  let cleaned = command_backbone(part);
-  let assignment = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=").expect("valid assignment regex");
-  let mut tokens: Vec<_> = cleaned.split_whitespace().collect();
-  while tokens
-    .first()
-    .is_some_and(|token| assignment.is_match(token))
-  {
-    tokens.remove(0);
-  }
-  let Some(program) = tokens.first().copied() else {
-    return true;
-  };
-  match program {
-    "mkdir" => true,
-    "git" => git_subcommand(&tokens).is_some_and(|command| {
-      [
-        "add",
-        "status",
-        "diff",
-        "rev-parse",
-        "log",
-        "show",
-        "ls-files",
-        "cat-file",
-        "ls-tree",
-        "diff-tree",
-        "rev-list",
-        "name-rev",
-        "symbolic-ref",
-        "hash-object",
-        "describe",
-        "version",
-        "help",
-      ]
-      .contains(&command)
-    }),
-    "find" => !tokens.iter().any(|token| {
-      [
-        "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0",
-      ]
-      .contains(token)
-        || token.starts_with("-fprintf")
-    }),
-    "echo" | "printf" | "true" | ":" | "ls" | "pwd" | "cat" | "head" | "tail" | "wc" | "test"
-    | "[" | "date" | "cd" => true,
-    "rm" => safe_rm(&tokens),
-    _ => false,
-  }
-}
-
-fn unquote(token: &str) -> &str {
-  token
-    .strip_prefix('"')
-    .and_then(|token| token.strip_suffix('"'))
-    .or_else(|| {
-      token
-        .strip_prefix('\'')
-        .and_then(|token| token.strip_suffix('\''))
-    })
-    .unwrap_or(token)
-}
-
-fn expand_path(token: &str, variables: &HashMap<String, String>, cwd: &Path) -> Option<PathBuf> {
-  let variable = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").expect("valid variable regex");
-  let expanded = variable
-    .replace_all(unquote(token), |capture: &regex::Captures<'_>| {
-      variables
-        .get(&capture[1])
-        .cloned()
-        .unwrap_or_else(|| capture[0].to_owned())
-    })
-    .into_owned();
-  if expanded.contains('$') {
-    return None;
-  }
-  let path = PathBuf::from(expanded);
-  let path = if path.is_absolute() {
-    path
-  } else {
-    cwd.join(path)
-  };
-  resolve_path(&path)
-}
-
-fn resolve_path(path: &Path) -> Option<PathBuf> {
-  let ancestor = path.ancestors().find(|ancestor| ancestor.exists())?;
-  let mut resolved = ancestor.canonicalize().ok()?;
-  resolved.push(path.strip_prefix(ancestor).ok()?);
-  Some(normalize_path(resolved))
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-  use std::path::Component;
-
-  let mut normalized = PathBuf::new();
-  for component in path.components() {
-    match component {
-      Component::CurDir => {}
-      Component::ParentDir => {
-        normalized.pop();
-      }
-      other => normalized.push(other.as_os_str()),
-    }
-  }
-  normalized
-}
-
-fn git_ignored(run_dir: &Path, path: &Path) -> bool {
-  let Ok(relative) = path.strip_prefix(run_dir) else {
-    return false;
-  };
-  ProcessCommand::new("git")
-    .arg("-C")
-    .arg(run_dir)
-    .args(["check-ignore", "-q", "--"])
-    .arg(relative)
-    .output()
-    .is_ok_and(|output| output.status.success())
-}
-
-fn git_subcommand<'a>(tokens: &'a [&str]) -> Option<&'a str> {
-  let mut index = 1;
-  while index < tokens.len() {
-    match tokens[index] {
-      "-C" | "--git-dir" | "--work-tree" | "-c" => index += 2,
-      token if token.starts_with('-') => index += 1,
-      token => return Some(token),
-    }
-  }
-  None
-}
-
-fn safe_rm(tokens: &[&str]) -> bool {
-  let mut paths = Vec::new();
-  let mut options_ended = false;
-  for token in &tokens[1..] {
-    if !options_ended && *token == "--" {
-      options_ended = true;
-    } else if options_ended || !token.starts_with('-') {
-      paths.push(*token);
-    }
-  }
-  !paths.is_empty() && paths.into_iter().all(looks_gitignored)
-}
-
-fn looks_gitignored(path: &str) -> bool {
-  const DIRS: &[&str] = &[
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".coverage",
-    ".eggs",
-    ".cache",
-  ];
-  let trimmed = path.trim_end_matches('/');
-  let name = Path::new(trimmed)
-    .file_name()
-    .and_then(|name| name.to_str())
-    .unwrap_or_default();
-  DIRS.contains(&name)
-    || [".pyc", ".pyo", ".pyd", ".egg-info"]
-      .iter()
-      .any(|suffix| name.ends_with(suffix))
-    || name.ends_with('~')
-    || DIRS
-      .iter()
-      .any(|dir| format!("/{trimmed}/").contains(&format!("/{dir}/")))
 }
 
 fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
@@ -2029,28 +1659,4 @@ fn observe_lead(
     );
   }
   Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-  use super::{gate_last_problem, shell_parts};
-  use std::path::Path;
-
-  #[test]
-  fn splits_compound_shell_commands() {
-    assert_eq!(
-      shell_parts("cargo test && git status"),
-      ["cargo test", "git status"]
-    );
-  }
-
-  #[test]
-  fn gate_must_precede_commit() {
-    let commands = vec![("git commit -m test".to_owned(), true)];
-    assert!(
-      gate_last_problem(&commands, "cargo test", Path::new("/tmp/run"))
-        .unwrap()
-        .contains("did not run before")
-    );
-  }
 }

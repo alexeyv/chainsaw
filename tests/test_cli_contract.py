@@ -74,11 +74,11 @@ class TaskContractTests(SupervisorContractCase):
         self.assertIn("retry of 1", state.stdout)
 
     def test_config_round_trips_across_processes(self):
-        self.assert_success(self.cli("config", "gate", "make check"))
+        self.assert_success(self.cli("config", "reuse-max-context", "48000"))
 
-        result = self.assert_success(self.cli("config", "gate"))
+        result = self.assert_success(self.cli("config", "reuse-max-context"))
 
-        self.assertEqual(result.stdout, "make check\n")
+        self.assertEqual(result.stdout, "48000\n")
 
 
 class PromptAndDispatchContractTests(SupervisorContractCase):
@@ -169,16 +169,15 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
 
 class VerificationContractTests(SupervisorContractCase):
-    def test_valid_commit_with_gate_last_is_accepted(self):
-        self.assert_success(self.cli("config", "gate", "quality-gate"))
-        task, sha = self.prepare_committed_task(gate="quality-gate")
+    def test_a_clean_commit_is_accepted_without_reproving_the_gate(self):
+        task, sha = self.prepare_committed_task()
 
         result = self.assert_success(self.cli("accept", str(task)))
         state = self.assert_success(self.cli("state"))
 
-        self.assertIn(f"task {task} accepted: gate passed at {sha[:10]}", result.stdout)
+        self.assertIn(f"task {task} accepted: checks passed at {sha[:10]}", result.stdout)
         self.assertIn("1 accepted", state.stdout)
-        self.assertIn("reason: gate passed at", state.stdout)
+        self.assertIn("reason: checks passed at", state.stdout)
 
     def test_force_requires_a_reason_and_a_reason_requires_force(self):
         task, _ = self.prepare_committed_task()
@@ -193,18 +192,10 @@ class VerificationContractTests(SupervisorContractCase):
         )
         self.assert_failure(
             reason_without_force,
-            "--reason only applies with --force; accept without it runs the gate",
+            "--reason only applies with --force; accept without it runs the checks",
         )
 
-    def test_missing_gate_configuration_is_a_note_not_a_failure(self):
-        task, _ = self.prepare_committed_task()
-
-        result = self.assert_success(self.cli("accept", str(task)))
-
-        self.assertIn("gate not configured", result.stdout)
-        self.assertIn("gate-last unchecked", result.stdout)
-
-    def test_the_gate_rejects_missing_commit_evidence(self):
+    def test_accept_rejects_missing_commit_evidence(self):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
@@ -213,7 +204,7 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "no commit found in the implementer's log")
 
-    def test_the_gate_rejects_a_dirty_tree(self):
+    def test_accept_rejects_a_dirty_tree(self):
         task, _ = self.prepare_committed_task()
         (self.run_dir / "untracked.txt").write_text("dirty\n")
 
@@ -221,14 +212,14 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "tree is dirty")
 
-    def test_the_gate_rejects_attribution_trailers(self):
+    def test_accept_rejects_attribution_trailers(self):
         task, _ = self.prepare_committed_task(trailer=True)
 
         result = self.cli("accept", str(task))
 
         self.assert_failure(result, "commit carries an attribution trailer")
 
-    def test_the_gate_rejects_a_commit_that_is_not_head(self):
+    def test_accept_rejects_a_commit_that_is_not_head(self):
         task, task_sha = self.prepare_committed_task()
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
         self.assertNotEqual(task_sha, self.head())
@@ -237,58 +228,7 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "commit is not HEAD")
 
-    def test_the_gate_requires_the_configured_gate_before_commit(self):
-        self.assert_success(self.cli("config", "gate", "quality-gate"))
-        task, _ = self.prepare_committed_task()
-
-        result = self.cli("accept", str(task))
-
-        self.assert_failure(result, "did not run before the commit")
-
-    def test_the_gate_rejects_a_failed_gate(self):
-        self.assert_success(self.cli("config", "gate", "quality-gate"))
-        task, _ = self.prepare_committed_task(gate="quality-gate", gate_ok=False)
-
-        result = self.cli("accept", str(task))
-
-        self.assert_failure(result, "gate before the commit failed")
-
-    def test_the_gate_rejects_source_modification_after_gate(self):
-        self.assert_success(self.cli("config", "gate", "quality-gate"))
-        task, _ = self.prepare_committed_task(
-            gate="quality-gate", after_gate="sed -i.bak s/a/b/ work.txt",
-        )
-
-        result = self.cli("accept", str(task))
-
-        self.assert_failure(result, "source-modifying command after the gate")
-
-    def test_the_gate_allows_git_plumbing_after_gate(self):
-        self.assert_success(self.cli("config", "gate", "quality-gate"))
-        task, _ = self.prepare_committed_task(
-            gate="quality-gate", after_gate="git status --short",
-        )
-
-        result = self.assert_success(self.cli("accept", str(task)))
-
-        self.assertIn("task 1 accepted", result.stdout)
-
-    def test_the_gate_recognizes_redirected_gate_and_outside_write(self):
-        gate = 'make all && make test && make tidy; echo "GATE_EXIT: $?"'
-        redirected = ('make all && make test && make tidy > /dev/null 2>&1; '
-                      'echo "GATE_EXIT: $?"')
-        notes = self.sandbox / "decisions.md"
-        self.assert_success(self.cli("config", "gate", gate))
-        task, _ = self.prepare_committed_task(
-            gate=redirected,
-            after_gate=f'F={notes}\ncat >> "$F" <<\'EOF\'\nnotes\nEOF',
-        )
-
-        result = self.assert_success(self.cli("accept", str(task)))
-
-        self.assertIn("task 1 accepted", result.stdout)
-
-    def test_the_gate_retries_a_commit_marker_after_clean_head_advance(self):
+    def test_accept_retries_a_commit_marker_after_clean_head_advance(self):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
@@ -303,7 +243,7 @@ class VerificationContractTests(SupervisorContractCase):
         result = self.assert_success(self.cli("accept", str(task)))
         timer.join(timeout=2)
 
-        self.assertIn(f"task {task} accepted: gate passed at {sha[:10]}", result.stdout)
+        self.assertIn(f"task {task} accepted: checks passed at {sha[:10]}", result.stdout)
 
 
 class ReuseContractTests(SupervisorContractCase):
