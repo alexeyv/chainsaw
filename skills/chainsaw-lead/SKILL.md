@@ -85,11 +85,60 @@ notes. Carry both the exact observation cursor and the full unresolved map (stab
 finding number, source task, description, and current judgment) through `/compact`,
 continuation prompts, and handoffs.
 
+## Task lifecycle
+
+A task moves forward through five states and can stop at `aborted` from any of them.
+There are no backward edges.
+
+    drafted -> dispatched -> in_flight -> committed -> accepted
+       |            |             |            |
+       +------------+-------------+------------+----------> aborted
+
+`$SUP advance <task-id> <state> [flags]` moves a task forward, and every transition
+takes an optional `--reason` that is recorded against that step and shown by `state`.
+Advancing to the state a task already occupies is a no-op that succeeds, so a retry is
+always safe. Advancing to an earlier state fails. `accepted` and `aborted` are terminal.
+
+**drafted** — the task exists and its text is frozen. `$SUP task new` creates it.
+Nothing has been sent to an implementer. This is the only state in which the work can
+still be reshaped, and you reshape it by drafting a different task, not by editing this
+one.
+
+**dispatched** — the task prompt has landed in an implementer's session log, confirmed
+by the supervisor against the log itself, and the session is bound to the task. You
+cause this: `$SUP advance <task-id> dispatched --to implementer-<n> [--reuse]`. If the
+prompt never lands the task stays `drafted`, so a failed send costs you nothing but a
+retry.
+
+**in_flight** — the supervisor has recorded the measurement baseline: the session's log
+offset, the HEAD the implementer started from, and its starting context size. The
+supervisor sets this itself, immediately after dispatch. You never advance a task here.
+
+**committed** — the daemon has seen a commit in that session's log that exists in git
+and descends from the task's base HEAD. The supervisor sets this. It means a commit
+landed; it does not mean the implementer has stopped working. This is the state that
+releases the next dispatch. The moment a task is `committed`, dispatch the next one to
+the pre-warmed session — do not wait for the session to go idle, and do not wait for the
+commit to be judged.
+
+**accepted** — terminal, and the only successful ending. `$SUP advance <task-id>
+accepted` runs the mechanical gate — the commit is in git, carries no attribution
+trailer, the tree is clean, and the project's quality gate ran last in the log — and
+advances the task only if it passes, recording `gate passed at <sha>` as the reason. It
+prints the problems and fails otherwise, leaving the task `committed`. Adding
+`--reason "..."` skips the gate and accepts on your justification instead; the reason is
+what tells anyone reading `state` how the task was accepted.
+
+**aborted** — terminal, reachable from every other state. The task will not produce an
+accepted commit. `$SUP abort <task-id> --reason "..."`. Use it when the implementer
+failed to deliver, and equally when a commit landed that you have reverted rather than
+kept — a landed commit does not oblige you to accept it. Aborts are counted along the
+retry lineage; three on the same task escalates to the human.
+
 ## Writing a task
 
-Draft the next task while the current implementer works; dispatch only after the
-previous commit has landed and been verified, reconciling the draft against the actual
-tree.
+Draft the next task while the current implementer works; dispatch as soon as the
+previous commit has landed, reconciling the draft against the actual tree.
 
 1. Size it for one implementer: one coherent change committable without exploring
    beyond the named files. Denominate it in files, functions, contracts, extent — never
@@ -141,21 +190,21 @@ measured separately (`$SUP state` shows both).
 
    Choose against the in-flight implementer's predicted file set: anything it will
    rewrite is read after its commit; large files by line range.
-2. When the previous commit has landed, verify it — landed, no attribution trailers,
-   tree clean, quality gate last in the log: `$SUP verify <task-id>`
-   does the mechanical part. Dispatch refuses until that previous task is
-   verified. If you judged a verify failure a false positive, `$SUP accept
-   <task-id> --reason "..."` records it in `state` (not silent, not the default
-   path). Then dispatch:
-   `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated fresh session,
-   or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle earlier one
+2. The moment the previous task reaches `committed`, dispatch the next one — do not
+   wait for its session to fall idle and do not wait to judge its commit. Judging is a
+   separate step you take when convenient: `$SUP advance <task-id> accepted` runs the
+   gate, and `$SUP advance <task-id> accepted --reason "..."` overrides it. Neither one
+   gates this dispatch. Dispatch with
+   `$SUP advance <task-id> dispatched --to implementer-<n>` for the pre-populated fresh
+   session, or `$SUP advance <task-id> dispatched --to implementer-<k> --reuse` for the
+   idle earlier one
    (`--to` is a choice, not ceremony; without `--reuse` the supervisor refuses a session
    that already took a task). Either sends the task verbatim and then the implementer's
    contract. A pre-populated session gets "these files changed since your reading
    turn: [...]" first; a reused one gets the commits that landed since its own last turn
    and the files they touched *outside* the task's file set — nothing about the files it
    is about to edit (rationale at step 6). `--reuse` refuses, measured not judged, when
-   that session is in flight, its last task failed, its context is over
+   that session is in flight, its last task aborted, its context is over
    `reuse-max-context` (60k), or the tree moved more than `reuse-max-stale-lines` (200
    changed lines) since its last turn — its memory is then wrong, not merely old; launch
    fresh instead. The implementer's contract:
@@ -205,13 +254,13 @@ measured separately (`$SUP state` shows both).
    of the run that wrote this: it follows from the context economics, not from a
    finding that exercised it.)
 7. When an implementer reports failure (gate never green, cannot finish):
-   `$SUP fail <task-id> --reason "<its reason>"` records it and checks the
+   `$SUP abort <task-id> --reason "<its reason>"` records it and checks the
    tree is clean. Read the reason, adjust the task, and retry with a fresh implementer
-   (`$SUP task new --retry-of <task-id>`). The supervisor counts failures across the
+   (`$SUP task new --retry-of <task-id>`). The supervisor counts aborts across the
    retries; at three it tells you to escalate to the human.
 8. Continuation (default off) is the same mechanism as reuse: when the next task
-   is a direct continuation on the same files, `dispatch <task-id> --to` the same
-   implementer `--reuse`; the supervisor's measured context and staleness decide, never
+   is a direct continuation on the same files, `advance <task-id> dispatched --to` the
+   same implementer `--reuse`; the supervisor's measured context and staleness decide, never
    the implementer's own estimate. A task that needs a clean head always gets a fresh
    one.
 9. A human-flagged trivial edit (trigger word `trivial:`) you do yourself — edit,
@@ -224,7 +273,7 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task.
 "Stop" means end the run for good. Ask once — "end the run for good?" — and take
 the answer; never infer it. Then, in order:
 
-1. Let the in-flight implementer finish; verify its commit.
+1. Let the in-flight implementer finish; run the gate on its commit.
 2. Wait for the commentator on that commit.
 3. Write the continuation prompt to the run directory: HEAD, the gate command and
    exact numbers, done/next derived from git not remembered, the exact observation

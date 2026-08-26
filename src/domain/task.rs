@@ -4,17 +4,21 @@ use std::fmt;
 use anyhow::{Result, bail};
 use strum::EnumIter;
 
-use super::{require_nonblank, require_nonnegative, require_positive, task_event::TaskEvent};
+use super::{
+  require_nonblank, require_nonnegative, require_optional_nonblank, require_optional_nonnegative,
+  require_optional_positive, require_positive, task_event::TaskEvent,
+};
 
-#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
+/// The task lifecycle: a linear progression that can stop at `Aborted` from any
+/// state. Declaration order is the progression order; `Ord` depends on it.
+#[derive(Clone, Copy, Debug, EnumIter, Eq, Ord, PartialEq, PartialOrd)]
 pub enum TaskState {
   Drafted,
   Dispatched,
   InFlight,
   Committed,
-  Verified,
   Accepted,
-  Failed,
+  Aborted,
 }
 
 impl TaskState {
@@ -24,35 +28,27 @@ impl TaskState {
       Self::Dispatched => "dispatched",
       Self::InFlight => "in_flight",
       Self::Committed => "committed",
-      Self::Verified => "verified",
       Self::Accepted => "accepted",
-      Self::Failed => "failed",
+      Self::Aborted => "aborted",
     }
   }
 
+  /// A task only moves forward, and only from a state that is not terminal.
+  /// `Aborted` sorts last, so it is reachable from every non-terminal state.
   pub fn can_transition_to(self, next: Self) -> bool {
-    match self {
-      Self::Drafted => next == Self::Dispatched,
-      Self::Dispatched => matches!(
-        next,
-        Self::Drafted | Self::InFlight | Self::Committed | Self::Verified | Self::Failed
-      ),
-      Self::InFlight => matches!(next, Self::Committed | Self::Verified | Self::Failed),
-      Self::Committed => matches!(next, Self::Verified | Self::Accepted),
-      Self::Verified | Self::Accepted | Self::Failed => false,
-    }
+    !self.is_terminal() && next > self
+  }
+
+  pub fn is_terminal(self) -> bool {
+    matches!(self, Self::Accepted | Self::Aborted)
   }
 
   fn requires_session(self) -> bool {
-    self != Self::Drafted
+    !matches!(self, Self::Drafted | Self::Aborted)
   }
 
   fn requires_commit(self) -> bool {
-    matches!(self, Self::Committed | Self::Verified | Self::Accepted)
-  }
-
-  fn requires_reason(self) -> bool {
-    matches!(self, Self::Accepted | Self::Failed)
+    matches!(self, Self::Committed | Self::Accepted)
   }
 }
 
@@ -65,9 +61,8 @@ impl TryFrom<&str> for TaskState {
       "dispatched" => Ok(Self::Dispatched),
       "in_flight" => Ok(Self::InFlight),
       "committed" => Ok(Self::Committed),
-      "verified" => Ok(Self::Verified),
       "accepted" => Ok(Self::Accepted),
-      "failed" => Ok(Self::Failed),
+      "aborted" => Ok(Self::Aborted),
       value => bail!("unknown task state {value:?}"),
     }
   }
@@ -89,7 +84,6 @@ pub struct Task {
   commit_sha: Option<String>,
   created_at: f64,
   retry_of_task_id: Option<i64>,
-  reason: Option<String>,
   log_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
@@ -109,7 +103,6 @@ impl Task {
     commit_sha: Option<String>,
     created_at: f64,
     retry_of_task_id: Option<i64>,
-    reason: Option<String>,
     log_offset: i64,
     base_head: Option<String>,
     predicted_file_list: Option<Vec<String>>,
@@ -130,7 +123,6 @@ impl Task {
     if retry_of_task_id == Some(id) {
       bail!("a task cannot retry itself");
     }
-    require_optional_nonblank("reason", reason.as_deref())?;
     require_nonnegative("log_offset", log_offset)?;
     require_optional_nonblank("base_head", base_head.as_deref())?;
     require_optional_nonnegative("context_size_start", context_size_start)?;
@@ -142,9 +134,6 @@ impl Task {
     }
     if state.requires_commit() && commit_sha.is_none() {
       bail!("{state:?} task requires a commit");
-    }
-    if state.requires_reason() && reason.is_none() {
-      bail!("{state:?} task requires a reason");
     }
     if is_session_reuse && session_id.is_none() {
       bail!("session reuse requires an assigned session");
@@ -160,7 +149,6 @@ impl Task {
       commit_sha,
       created_at,
       retry_of_task_id,
-      reason,
       log_offset,
       base_head,
       predicted_file_list,
@@ -210,8 +198,13 @@ impl Task {
     self.retry_of_task_id
   }
 
+  /// The reason recorded with the transition into the current state, if any.
   pub fn reason(&self) -> Option<&str> {
-    self.reason.as_deref()
+    self
+      .events
+      .last()
+      .expect("task event log is never empty")
+      .reason()
   }
 
   pub fn log_offset(&self) -> i64 {
@@ -236,27 +229,6 @@ impl Task {
 
   pub fn events(&self) -> &[TaskEvent] {
     &self.events
-  }
-}
-
-fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<()> {
-  match value {
-    Some(value) => require_positive(field, value),
-    None => Ok(()),
-  }
-}
-
-fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<()> {
-  match value {
-    Some(value) => require_nonnegative(field, value),
-    None => Ok(()),
-  }
-}
-
-fn require_optional_nonblank(field: &'static str, value: Option<&str>) -> Result<()> {
-  match value {
-    Some(value) => require_nonblank(field, value),
-    None => Ok(()),
   }
 }
 
@@ -335,9 +307,8 @@ mod tests {
       (TaskState::Dispatched, "dispatched"),
       (TaskState::InFlight, "in_flight"),
       (TaskState::Committed, "committed"),
-      (TaskState::Verified, "verified"),
       (TaskState::Accepted, "accepted"),
-      (TaskState::Failed, "failed"),
+      (TaskState::Aborted, "aborted"),
     ] {
       assert_eq!(state.to_string(), state.as_str());
       assert_eq!(state.to_string(), name);
@@ -345,19 +316,22 @@ mod tests {
   }
 
   #[test]
-  fn lifecycle_transition_table_is_explicit() {
+  fn the_lifecycle_only_moves_forward_and_ends_at_a_terminal_state() {
     let allowed = [
       (TaskState::Drafted, TaskState::Dispatched),
-      (TaskState::Dispatched, TaskState::Drafted),
+      (TaskState::Drafted, TaskState::InFlight),
+      (TaskState::Drafted, TaskState::Committed),
+      (TaskState::Drafted, TaskState::Accepted),
+      (TaskState::Drafted, TaskState::Aborted),
       (TaskState::Dispatched, TaskState::InFlight),
       (TaskState::Dispatched, TaskState::Committed),
-      (TaskState::Dispatched, TaskState::Verified),
-      (TaskState::Dispatched, TaskState::Failed),
+      (TaskState::Dispatched, TaskState::Accepted),
+      (TaskState::Dispatched, TaskState::Aborted),
       (TaskState::InFlight, TaskState::Committed),
-      (TaskState::InFlight, TaskState::Verified),
-      (TaskState::InFlight, TaskState::Failed),
-      (TaskState::Committed, TaskState::Verified),
+      (TaskState::InFlight, TaskState::Accepted),
+      (TaskState::InFlight, TaskState::Aborted),
       (TaskState::Committed, TaskState::Accepted),
+      (TaskState::Committed, TaskState::Aborted),
     ];
 
     for current in TaskState::iter() {
@@ -369,6 +343,24 @@ mod tests {
         );
       }
     }
+  }
+
+  #[test]
+  fn every_nonterminal_state_can_abort_and_no_state_can_leave_a_terminal_one() {
+    for state in TaskState::iter() {
+      assert_eq!(
+        state.can_transition_to(TaskState::Aborted),
+        !state.is_terminal(),
+        "abort reachability wrong for {state}"
+      );
+      assert!(
+        !state.can_transition_to(state),
+        "{state} advances to itself"
+      );
+    }
+
+    assert!(TaskState::Accepted.is_terminal());
+    assert!(TaskState::Aborted.is_terminal());
   }
 
   #[allow(clippy::too_many_arguments)]
@@ -398,12 +390,6 @@ mod tests {
         TaskState::InFlight,
         TaskState::Committed,
       ],
-      TaskState::Verified => vec![
-        TaskState::Drafted,
-        TaskState::Dispatched,
-        TaskState::InFlight,
-        TaskState::Verified,
-      ],
       TaskState::Accepted => vec![
         TaskState::Drafted,
         TaskState::Dispatched,
@@ -411,13 +397,14 @@ mod tests {
         TaskState::Committed,
         TaskState::Accepted,
       ],
-      TaskState::Failed => vec![
+      TaskState::Aborted => vec![
         TaskState::Drafted,
         TaskState::Dispatched,
         TaskState::InFlight,
-        TaskState::Failed,
+        TaskState::Aborted,
       ],
     };
+    let last = states.len() - 1;
     Task::new(
       id,
       text.to_owned(),
@@ -427,7 +414,6 @@ mod tests {
       commit_sha.map(str::to_owned),
       1_700_000_000.0,
       None,
-      reason.map(str::to_owned),
       100,
       Some("abc123".to_owned()),
       file_list.map(|files| files.into_iter().map(str::to_owned).collect()),
@@ -440,6 +426,10 @@ mod tests {
           TaskEvent::new(
             index as i64 + 1,
             state,
+            (index == last)
+              .then_some(reason)
+              .flatten()
+              .map(str::to_owned),
             timestamp(1_700_000_000 + index as i64),
           )
           .unwrap()
@@ -458,7 +448,6 @@ mod tests {
       None,
       1_700_000_000.0,
       None,
-      None,
       0,
       None,
       None,
@@ -471,9 +460,15 @@ mod tests {
   #[test]
   fn exposes_every_field_without_mutators() {
     let events = vec![
-      TaskEvent::new(1, TaskState::Drafted, timestamp(1_699_999_900)).unwrap(),
-      TaskEvent::new(2, TaskState::Dispatched, timestamp(1_699_999_950)).unwrap(),
-      TaskEvent::new(3, TaskState::InFlight, timestamp(1_700_000_000)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(1_699_999_900)).unwrap(),
+      TaskEvent::new(2, TaskState::Dispatched, None, timestamp(1_699_999_950)).unwrap(),
+      TaskEvent::new(
+        3,
+        TaskState::InFlight,
+        Some("retrying".to_owned()),
+        timestamp(1_700_000_000),
+      )
+      .unwrap(),
     ];
     let task = Task::new(
       2,
@@ -484,7 +479,6 @@ mod tests {
       None,
       1_700_000_000.0,
       Some(1),
-      Some("retrying".to_owned()),
       100,
       Some("abc123".to_owned()),
       Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]),
@@ -592,7 +586,7 @@ mod tests {
       1,
       "task",
       0,
-      TaskState::Verified,
+      TaskState::Committed,
       Some(2),
       None,
       None,
@@ -602,26 +596,28 @@ mod tests {
     )
     .unwrap_err();
 
-    assert_eq!(error.to_string(), "Verified task requires a commit");
+    assert_eq!(error.to_string(), "Committed task requires a commit");
   }
 
   #[test]
-  fn failed_and_accepted_states_require_a_reason() {
-    let error = task_with(
+  fn a_task_aborted_before_it_committed_needs_no_commit() -> Result<()> {
+    let task = task_with(
       1,
       "task",
       0,
-      TaskState::Failed,
+      TaskState::Aborted,
       Some(2),
       None,
-      None,
+      Some("implementer stalled"),
       None,
       false,
       None,
-    )
-    .unwrap_err();
+    )?;
 
-    assert_eq!(error.to_string(), "Failed task requires a reason");
+    assert_eq!(task.state(), TaskState::Aborted);
+    assert_eq!(task.commit_sha(), None);
+    assert_eq!(task.reason(), Some("implementer stalled"));
+    Ok(())
   }
 
   #[test]
@@ -635,13 +631,12 @@ mod tests {
       None,
       1.0,
       Some(1),
-      None,
       0,
       None,
       None,
       false,
       None,
-      vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
+      vec![TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap()],
     )
     .unwrap_err();
 
@@ -738,7 +733,7 @@ mod tests {
   #[test]
   fn lifecycle_starts_drafted() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Dispatched, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Dispatched, None, timestamp(1)).unwrap(),
     ])
     .unwrap_err();
 
@@ -748,8 +743,8 @@ mod tests {
   #[test]
   fn event_ids_are_unique_within_a_task() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
-      TaskEvent::new(1, TaskState::Drafted, timestamp(2)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(2)).unwrap(),
     ])
     .unwrap_err();
 
@@ -759,8 +754,8 @@ mod tests {
   #[test]
   fn backward_clock_steps_do_not_change_event_order() -> Result<()> {
     let task = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, timestamp(2)).unwrap(),
-      TaskEvent::new(2, TaskState::Dispatched, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(2)).unwrap(),
+      TaskEvent::new(2, TaskState::Dispatched, None, timestamp(1)).unwrap(),
     ])?;
 
     assert_eq!(task.events()[0].id(), 1);
@@ -772,8 +767,8 @@ mod tests {
   #[test]
   fn events_must_be_in_increasing_identity_order() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(2, TaskState::Drafted, timestamp(1)).unwrap(),
-      TaskEvent::new(1, TaskState::Dispatched, timestamp(2)).unwrap(),
+      TaskEvent::new(2, TaskState::Drafted, None, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Dispatched, None, timestamp(2)).unwrap(),
     ])
     .unwrap_err();
 
@@ -784,16 +779,50 @@ mod tests {
   }
 
   #[test]
-  fn event_history_rejects_illegal_lifecycle_transitions() {
+  fn event_history_rejects_a_backward_transition() {
     let error = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
-      TaskEvent::new(2, TaskState::Failed, timestamp(2)).unwrap(),
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
+      TaskEvent::new(2, TaskState::InFlight, None, timestamp(2)).unwrap(),
+      TaskEvent::new(3, TaskState::Dispatched, None, timestamp(3)).unwrap(),
     ])
     .unwrap_err();
 
     assert_eq!(
       error.to_string(),
-      "task cannot transition from drafted to failed"
+      "task cannot transition from in_flight to dispatched"
     );
+  }
+
+  #[test]
+  fn event_history_rejects_anything_after_a_terminal_state() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
+      TaskEvent::new(2, TaskState::Aborted, None, timestamp(2)).unwrap(),
+      TaskEvent::new(3, TaskState::Accepted, None, timestamp(3)).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "task cannot transition from aborted to accepted"
+    );
+  }
+
+  #[test]
+  fn a_task_may_abort_straight_from_drafted() -> Result<()> {
+    let task = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
+      TaskEvent::new(
+        2,
+        TaskState::Aborted,
+        Some("withdrawn".to_owned()),
+        timestamp(2),
+      )
+      .unwrap(),
+    ])?;
+
+    assert_eq!(task.state(), TaskState::Aborted);
+    assert_eq!(task.reason(), Some("withdrawn"));
+    Ok(())
   }
 }

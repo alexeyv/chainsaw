@@ -32,3 +32,24 @@ fn require_nonblank(field: &'static str, value: &str) -> Result<()> {
   }
   Ok(())
 }
+
+fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<()> {
+  match value {
+    Some(value) => require_positive(field, value),
+    None => Ok(()),
+  }
+}
+
+fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<()> {
+  match value {
+    Some(value) => require_nonnegative(field, value),
+    None => Ok(()),
+  }
+}
+
+fn require_optional_nonblank(field: &'static str, value: Option<&str>) -> Result<()> {
+  match value {
+    Some(value) => require_nonblank(field, value),
+    None => Ok(()),
+  }
+}

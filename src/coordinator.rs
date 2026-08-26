@@ -16,7 +16,7 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
-use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
+use crate::cli::{AdvanceState, Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Task, TaskState};
 use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
@@ -96,10 +96,22 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         files.as_deref(),
       ),
     },
-    Command::Fail { task, reason } => cmd_fail(store, task, &reason),
-    Command::Dispatch { task, to, reuse } => cmd_dispatch(store, runtime, task, &to, reuse),
-    Command::Verify { task } => cmd_verify(store, runtime, task),
-    Command::Accept { task, reason } => cmd_accept(store, task, &reason),
+    Command::Abort { task, reason } => cmd_abort(store, task, &reason),
+    Command::Advance {
+      task,
+      state,
+      to,
+      reuse,
+      reason,
+    } => cmd_advance(
+      store,
+      runtime,
+      task,
+      state,
+      to.as_deref(),
+      reuse,
+      reason.as_deref(),
+    ),
     Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
     Command::Observe { task, text } => cmd_observe(store, task, &text),
     Command::Finding { task, description } => cmd_finding(store, task, &description),
@@ -293,10 +305,10 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
     .rev()
     .find(|task| task.state() != TaskState::Drafted);
   if let Some(task) = &last
-    && task.state() == TaskState::Failed
+    && task.state() == TaskState::Aborted
   {
     return Ok(Some(format!(
-      "its last task ({}) failed; a retry gets a fresh head",
+      "its last task ({}) aborted; a retry gets a fresh head",
       task.id()
     )));
   }
@@ -563,9 +575,9 @@ fn cmd_task_new(
     bail!("supervisor: task text on stdin is empty");
   }
   if let Some(retry_of_task_id) = retry_of_task_id
-    && task_snapshot(store, retry_of_task_id)?.is_none_or(|task| task.state() != TaskState::Failed)
+    && task_snapshot(store, retry_of_task_id)?.is_none_or(|task| task.state() != TaskState::Aborted)
   {
-    bail!("supervisor: --retry-of {retry_of_task_id} is not a failed task");
+    bail!("supervisor: --retry-of {retry_of_task_id} is not an aborted task");
   }
   let file_list: Vec<_> = files
     .unwrap_or_default()
@@ -600,35 +612,6 @@ fn cmd_task_new(
   transaction.commit()?;
   println!("{}", task.id());
   Ok(())
-}
-
-fn predecessor_unverified(store: &Store, task_id: i64) -> Result<Option<String>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let previous = task::predecessor(&transaction, task_id)?;
-  transaction.commit()?;
-  let Some(previous) = previous else {
-    return Ok(None);
-  };
-  if matches!(
-    previous.state(),
-    TaskState::Drafted | TaskState::Dispatched | TaskState::InFlight | TaskState::Failed
-  ) {
-    return Ok(None);
-  }
-  if previous
-    .events()
-    .iter()
-    .any(|event| matches!(event.state(), TaskState::Verified | TaskState::Accepted))
-  {
-    return Ok(None);
-  }
-  Ok(Some(format!(
-    "task {} is {} but never verified; run verify {}, or accept {} --reason ... if the failure is a false positive",
-    previous.id(),
-    previous.state(),
-    previous.id(),
-    previous.id()
-  )))
 }
 
 fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<String> {
@@ -686,6 +669,32 @@ fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<Strin
   Ok(format!("{}\n\n", lines.join("\n")))
 }
 
+/// Route an `advance` to the transition that state names. Advancing to
+/// `accepted` runs the mechanical gate unless the caller supplied a reason, in
+/// which case the reason is the justification and the gate is skipped.
+fn cmd_advance(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+  state: AdvanceState,
+  to: Option<&str>,
+  reuse: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  match state {
+    AdvanceState::Dispatched => {
+      let Some(to) = to else {
+        bail!("supervisor: advance to dispatched requires --to <implementer>");
+      };
+      cmd_dispatch(store, runtime, task_id, to, reuse)
+    }
+    AdvanceState::Accepted => match reason {
+      Some(reason) => cmd_accept(store, task_id, reason),
+      None => cmd_verify(store, runtime, task_id),
+    },
+  }
+}
+
 fn cmd_dispatch(
   store: &Store,
   runtime: &dyn SessionRuntime,
@@ -717,9 +726,6 @@ fn cmd_dispatch(
       flying.id()
     );
   }
-  if let Some(problem) = predecessor_unverified(store, task_id)? {
-    bail!("supervisor: {problem}");
-  }
   let Some(session) = store.latest_session_named(implementer)? else {
     bail!("supervisor: no session {implementer}; launch it first");
   };
@@ -745,10 +751,8 @@ fn cmd_dispatch(
   } else if session.prepopulated_at.is_some() {
     let transaction = store.db.unchecked_transaction()?;
     let since = task::all(&transaction)?.into_iter().rev().find(|task| {
-      matches!(
-        task.state(),
-        TaskState::Committed | TaskState::Verified | TaskState::Accepted
-      ) && task.commit_sha().is_some()
+      matches!(task.state(), TaskState::Committed | TaskState::Accepted)
+        && task.commit_sha().is_some()
     });
     transaction.commit()?;
     if let Some(sha) = since.and_then(|task| task.commit_sha().map(str::to_owned)) {
@@ -764,25 +768,31 @@ fn cmd_dispatch(
     String::new()
   };
 
-  let transaction = store.db.unchecked_transaction()?;
-  task::dispatch(&transaction, task_id, session.id, reuse)?;
-  transaction.commit()?;
-  store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
     preamble,
     text = task.text().trim_end()
   );
+  // The task is only dispatched once the prompt has landed in the session log,
+  // so a send that never lands leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
-    let transaction = store.db.unchecked_transaction()?;
-    task::redraft(&transaction, task_id)?;
-    transaction.commit()?;
     store.event(
       "dispatch-failed",
       &format!("task {task_id} -> {implementer}: prompt never landed"),
     )?;
     return Err(error);
   }
+  let dispatch_reason = reuse.then(|| format!("reuse of {implementer}"));
+  let transaction = store.db.unchecked_transaction()?;
+  task::dispatch(
+    &transaction,
+    task_id,
+    session.id,
+    reuse,
+    dispatch_reason.as_deref(),
+  )?;
+  transaction.commit()?;
+  store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let log = session_log(store, runtime, &session)?;
   let offset = file_size(log.as_deref());
   let base = context_before(log.as_deref(), offset);
@@ -906,15 +916,16 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
       .as_deref()
       .context("verified task unexpectedly has no commit")?;
     let transaction = store.db.unchecked_transaction()?;
-    task::verify(&transaction, task_id, sha)?;
+    task::record_commit(&transaction, task_id, sha, None)?;
+    task::accept(&transaction, task_id, &format!("gate passed at {sha}"))?;
     transaction.commit()?;
-    println!("task {task_id} verified: {sha}");
+    println!("task {task_id} accepted: gate passed at {sha}");
     for problem in problems {
       println!("note: {problem}");
     }
     return Ok(());
   }
-  println!("task {task_id} NOT verified:");
+  println!("task {task_id} NOT accepted:");
   for problem in problems {
     println!(" - {problem}");
   }
@@ -1314,7 +1325,7 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   task::accept(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("accepted", &format!("task {task_id}: {reason}"))?;
-  println!("task {task_id} accepted without verify: {reason}");
+  println!("task {task_id} accepted without the gate: {reason}");
   Ok(())
 }
 
@@ -1322,7 +1333,7 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
   let mut failures = 0;
   let mut current = task_snapshot(store, task_id)?;
   while let Some(task) = current {
-    if task.state() == TaskState::Failed {
+    if task.state() == TaskState::Aborted {
       failures += 1;
     }
     current = match task.retry_of_task_id() {
@@ -1333,29 +1344,29 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
   Ok(failures)
 }
 
-fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
+fn cmd_abort(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
-    bail!("supervisor: fail requires a non-empty --reason");
+    bail!("supervisor: abort requires a non-empty --reason");
   }
-  if !matches!(task.state(), TaskState::Dispatched | TaskState::InFlight) {
-    bail!("supervisor: task {task_id} is not in flight");
+  if task.state().is_terminal() {
+    bail!("supervisor: task {task_id} is already {}", task.state());
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
   let transaction = store.db.unchecked_transaction()?;
-  task::fail(&transaction, task_id, reason)?;
+  task::abort(&transaction, task_id, reason)?;
   transaction.commit()?;
-  store.event("failed", &format!("task {task_id}: {reason}"))?;
+  store.event("aborted", &format!("task {task_id}: {reason}"))?;
   let failures = failures_in_lineage(store, task_id)?;
   let plural = if failures == 1 { "" } else { "s" };
-  println!("task {task_id} failed ({failures} failure{plural} on this task): {reason}");
+  println!("task {task_id} aborted ({failures} abort{plural} on this task): {reason}");
   if !dirty.is_empty() {
     println!("WARNING: tree is dirty — the implementer did not leave it clean:\n{dirty}");
   }
   if failures >= 3 {
-    println!("three failures on the same task: escalate to the human");
+    println!("three aborts on the same task: escalate to the human");
   } else {
     println!(
       "adjust the task and retry with a fresh implementer: task new --retry-of {task_id} < task.md"
@@ -1911,7 +1922,7 @@ fn observe_implementer(
     .unwrap_or_default();
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.db.unchecked_transaction()?;
-    task::record_commit(&transaction, task.id(), &sha)?;
+    task::record_commit(&transaction, task.id(), &sha, None)?;
     transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else if quiet > STALE_SECONDS
@@ -1946,10 +1957,8 @@ fn observe_commentator(
   let transaction = store.db.unchecked_transaction()?;
   let mut pending = Vec::new();
   for task in task::all(&transaction)? {
-    if matches!(
-      task.state(),
-      TaskState::Verified | TaskState::Committed | TaskState::Accepted
-    ) && task.commit_sha().is_some()
+    if matches!(task.state(), TaskState::Committed | TaskState::Accepted)
+      && task.commit_sha().is_some()
       && commentary_delivery::delivered_at(&transaction, task.id())?.is_none()
     {
       pending.push(task);

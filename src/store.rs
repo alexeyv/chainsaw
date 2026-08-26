@@ -17,12 +17,12 @@ create table sessions(id integer primary key, name text not null, role text,
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
-  reason text, log_offset int default 0, base_head text, predicted_file_list text,
+  log_offset int default 0, base_head text, predicted_file_list text,
   is_session_reuse int not null default 0, context_size_start int);
 create table task_events(
   id integer primary key autoincrement,
-  task_id int not null references tasks(id), state text,
-  created_at int not null);
+  task_id int not null references tasks(id), state text not null,
+  reason text, created_at int not null);
 create table commentary_deliveries(
   task_id int primary key references tasks(id), delivered_at int not null);
 create table prompts(id integer primary key, session text, text text,

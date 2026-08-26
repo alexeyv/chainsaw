@@ -8,18 +8,24 @@ pub(super) fn create(
   transaction: &Transaction<'_>,
   task_id: i64,
   state: TaskState,
+  reason: Option<&str>,
 ) -> Result<TaskEvent> {
   let created_at = Utc::now();
   let id = transaction.query_row(
     "
-      insert into task_events(task_id, state, created_at)
-      values (?1, ?2, ?3)
+      insert into task_events(task_id, state, reason, created_at)
+      values (?1, ?2, ?3, ?4)
       returning id
       ",
-    params![task_id, state.as_str(), created_at.timestamp_millis()],
+    params![
+      task_id,
+      state.as_str(),
+      reason,
+      created_at.timestamp_millis()
+    ],
     |row| row.get(0),
   )?;
-  let event = TaskEvent::new(id, state, created_at)?;
+  let event = TaskEvent::new(id, state, reason.map(str::to_owned), created_at)?;
   Ok(event)
 }
 
@@ -45,29 +51,32 @@ mod tests {
 
     let before = Utc::now();
     let transaction = db.transaction()?;
-    let event = create(&transaction, 7, TaskState::InFlight)?;
+    let event = create(&transaction, 7, TaskState::InFlight, Some("reuse"))?;
     transaction.commit()?;
     let after = Utc::now();
 
     let stored = db.query_row(
-      "select task_id, state, created_at from task_events where id=?",
+      "select task_id, state, reason, created_at from task_events where id=?",
       [event.id()],
       |row| {
         Ok((
           row.get::<_, i64>(0)?,
           row.get::<_, String>(1)?,
-          row.get::<_, i64>(2)?,
+          row.get::<_, Option<String>>(2)?,
+          row.get::<_, i64>(3)?,
         ))
       },
     )?;
     assert_eq!(event.state(), TaskState::InFlight);
     assert!(event.created_at() >= before);
     assert!(event.created_at() <= after);
+    assert_eq!(event.reason(), Some("reuse"));
     assert_eq!(
       stored,
       (
         7,
         "in_flight".to_owned(),
+        Some("reuse".to_owned()),
         event.created_at().timestamp_millis()
       )
     );
@@ -80,8 +89,8 @@ mod tests {
     create_task(&db, 7)?;
 
     let transaction = db.transaction()?;
-    let first = create(&transaction, 7, TaskState::Drafted)?;
-    let second = create(&transaction, 7, TaskState::Dispatched)?;
+    let first = create(&transaction, 7, TaskState::Drafted, None)?;
+    let second = create(&transaction, 7, TaskState::Dispatched, None)?;
     transaction.commit()?;
 
     assert_eq!(first.id(), 1);
@@ -95,7 +104,7 @@ mod tests {
     create_task(&db, 7)?;
 
     let transaction = db.transaction()?;
-    create(&transaction, 7, TaskState::Drafted)?;
+    create(&transaction, 7, TaskState::Drafted, None)?;
     transaction.rollback()?;
 
     let count = db.query_row("select count(*) from task_events", [], |row| {
@@ -110,7 +119,7 @@ mod tests {
     let mut db = database();
 
     let transaction = db.transaction()?;
-    let error = create(&transaction, 7, TaskState::Drafted).unwrap_err();
+    let error = create(&transaction, 7, TaskState::Drafted, None).unwrap_err();
     transaction.rollback()?;
 
     let count = db.query_row("select count(*) from task_events", [], |row| {

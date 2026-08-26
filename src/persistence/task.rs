@@ -13,7 +13,6 @@ struct TaskRow {
   commit_sha: Option<String>,
   created_at: f64,
   retry_of_task_id: Option<i64>,
-  reason: Option<String>,
   log_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
@@ -49,7 +48,7 @@ pub fn create(
     ],
     |row| row.get(0),
   )?;
-  super::task_event::create(transaction, id, TaskState::Drafted)?;
+  super::task_event::create(transaction, id, TaskState::Drafted, None)?;
   get(transaction, id)?.with_context(|| format!("created task {id} is missing"))
 }
 
@@ -58,7 +57,7 @@ pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
     .query_row(
       "
         select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               commit_sha, created_at, retry_of_task_id, log_offset,
                base_head, predicted_file_list, is_session_reuse,
                context_size_start
         from tasks where id=?
@@ -75,7 +74,7 @@ pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Task>> {
     let mut statement = transaction.prepare(
       "
         select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               commit_sha, created_at, retry_of_task_id, log_offset,
                base_head, predicted_file_list, is_session_reuse,
                context_size_start
         from tasks order by id asc
@@ -96,7 +95,7 @@ pub fn tasks_for_session(transaction: &Transaction<'_>, session_id: i64) -> Resu
     let mut statement = transaction.prepare(
       "
         select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               commit_sha, created_at, retry_of_task_id, log_offset,
                base_head, predicted_file_list, is_session_reuse,
                context_size_start
         from tasks where session_id=? order by id asc
@@ -117,7 +116,7 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
     .query_row(
       "
         select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, reason, log_offset,
+               commit_sha, created_at, retry_of_task_id, log_offset,
                base_head, predicted_file_list, is_session_reuse,
                context_size_start
         from tasks where id < ? order by id desc limit 1
@@ -134,18 +133,21 @@ pub fn dispatch(
   id: i64,
   session_id: i64,
   reuse: bool,
+  reason: Option<&str>,
 ) -> Result<Task> {
-  transition(transaction, id, TaskState::Dispatched, |transaction| {
-    transaction.execute(
-      "update tasks set session_id=?, is_session_reuse=? where id=?",
-      params![session_id, i64::from(reuse), id],
-    )?;
-    Ok(())
-  })
-}
-
-pub fn redraft(transaction: &Transaction<'_>, id: i64) -> Result<Task> {
-  transition(transaction, id, TaskState::Drafted, |_| Ok(()))
+  advance(
+    transaction,
+    id,
+    TaskState::Dispatched,
+    reason,
+    |transaction| {
+      transaction.execute(
+        "update tasks set session_id=?, is_session_reuse=? where id=?",
+        params![session_id, i64::from(reuse), id],
+      )?;
+      Ok(())
+    },
+  )
 }
 
 pub fn take_flight(
@@ -155,7 +157,7 @@ pub fn take_flight(
   base_head: &str,
   context_size_start: i64,
 ) -> Result<Task> {
-  transition(transaction, id, TaskState::InFlight, |transaction| {
+  advance(transaction, id, TaskState::InFlight, None, |transaction| {
     transaction.execute(
       "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
       params![log_offset, base_head, context_size_start, id],
@@ -164,55 +166,65 @@ pub fn take_flight(
   })
 }
 
-pub fn verify(transaction: &Transaction<'_>, id: i64, commit_sha: &str) -> Result<Task> {
-  transition(transaction, id, TaskState::Verified, |transaction| {
-    transaction.execute(
-      "update tasks set commit_sha=? where id=?",
-      params![commit_sha, id],
-    )?;
-    Ok(())
-  })
+pub fn record_commit(
+  transaction: &Transaction<'_>,
+  id: i64,
+  commit_sha: &str,
+  reason: Option<&str>,
+) -> Result<Task> {
+  advance(
+    transaction,
+    id,
+    TaskState::Committed,
+    reason,
+    |transaction| {
+      transaction.execute(
+        "update tasks set commit_sha=? where id=?",
+        params![commit_sha, id],
+      )?;
+      Ok(())
+    },
+  )
 }
 
 pub fn accept(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
-  transition(transaction, id, TaskState::Accepted, |transaction| {
-    transaction.execute("update tasks set reason=? where id=?", params![reason, id])?;
+  advance(transaction, id, TaskState::Accepted, Some(reason), |_| {
     Ok(())
   })
 }
 
-pub fn fail(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
-  transition(transaction, id, TaskState::Failed, |transaction| {
-    transaction.execute("update tasks set reason=? where id=?", params![reason, id])?;
-    Ok(())
-  })
+pub fn abort(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
+  advance(
+    transaction,
+    id,
+    TaskState::Aborted,
+    Some(reason),
+    |_| Ok(()),
+  )
 }
 
-pub fn record_commit(transaction: &Transaction<'_>, id: i64, commit_sha: &str) -> Result<Task> {
-  transition(transaction, id, TaskState::Committed, |transaction| {
-    transaction.execute(
-      "update tasks set commit_sha=? where id=?",
-      params![commit_sha, id],
-    )?;
-    Ok(())
-  })
-}
-
-fn transition(
+/// Move a task forward to `next`, recording an optional reason for the move.
+/// Advancing to the state a task already occupies is a no-op that succeeds, so
+/// callers that re-observe the same fact do not have to guard against it.
+pub fn advance(
   transaction: &Transaction<'_>,
   id: i64,
   next: TaskState,
+  reason: Option<&str>,
   mutate: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<Task> {
   let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
+  if current.state() == next {
+    return Ok(current);
+  }
   if !current.state().can_transition_to(next) {
     bail!(
-      "task {id} cannot transition from {} to {next}",
+      "task {id} cannot advance from {} to {next}",
       current.state()
     );
   }
   mutate(transaction)?;
-  super::task_event::create(transaction, id, next)?;
+  super::task_event::create(transaction, id, next, reason)?;
   get(transaction, id)?.with_context(|| format!("task {id} disappeared while becoming {next}"))
 }
 
@@ -229,7 +241,6 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     commit_sha: row.get("commit_sha")?,
     created_at: row.get("created_at")?,
     retry_of_task_id: row.get("retry_of_task_id")?,
-    reason: row.get("reason")?,
     log_offset: row.get::<_, Option<i64>>("log_offset")?.unwrap_or_default(),
     base_head: row.get("base_head")?,
     predicted_file_list,
@@ -249,7 +260,6 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.commit_sha,
     row.created_at,
     row.retry_of_task_id,
-    row.reason,
     row.log_offset,
     row.base_head,
     row.predicted_file_list,
@@ -262,7 +272,7 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
 fn load_events(transaction: &Transaction<'_>, task_id: i64) -> Result<Vec<TaskEvent>> {
   let mut statement = transaction.prepare(
     "
-      select id, state, created_at
+      select id, state, reason, created_at
       from task_events where task_id=? order by id
       ",
   )?;
@@ -270,16 +280,17 @@ fn load_events(transaction: &Transaction<'_>, task_id: i64) -> Result<Vec<TaskEv
     Ok((
       row.get::<_, i64>(0)?,
       row.get::<_, String>(1)?,
-      row.get::<_, i64>(2)?,
+      row.get::<_, Option<String>>(2)?,
+      row.get::<_, i64>(3)?,
     ))
   })?;
   rows
     .map(|row| {
-      let (id, state, created_at) = row?;
+      let (id, state, reason, created_at) = row?;
       let state = TaskState::try_from(state.as_str())?;
       let created_at = DateTime::from_timestamp_millis(created_at)
         .context("task event created_at is outside the supported range")?;
-      TaskEvent::new(id, state, created_at)
+      TaskEvent::new(id, state, reason, created_at)
     })
     .collect()
 }
@@ -290,8 +301,8 @@ mod tests {
   use chrono::Utc;
 
   use super::{
-    accept, all, create, dispatch, fail, get, predecessor, record_commit, redraft, take_flight,
-    tasks_for_session, verify,
+    abort, accept, all, create, dispatch, get, predecessor, record_commit, take_flight,
+    tasks_for_session,
   };
   use crate::domain::TaskState;
   use crate::persistence::task_event;
@@ -449,7 +460,7 @@ mod tests {
 
     let transaction = db.transaction()?;
     let original = create(&transaction, "inspect snapshots", 0, 20, None, None)?;
-    let dispatched = dispatch(&transaction, original.id(), 7, false)?;
+    let dispatched = dispatch(&transaction, original.id(), 7, false, None)?;
     let second_event = dispatched.events().last().expect("dispatch event");
     transaction.execute(
       "update task_events set created_at=? where id=?",
@@ -486,7 +497,7 @@ mod tests {
     assert!(all(&transaction)?.is_empty());
 
     let first = create(&transaction, "first", 0, 10, None, None)?;
-    let first = dispatch(&transaction, first.id(), 7, false)?;
+    let first = dispatch(&transaction, first.id(), 7, false, None)?;
     let second = create(&transaction, "second", 0, 20, None, None)?;
 
     let tasks = all(&transaction)?;
@@ -519,7 +530,7 @@ mod tests {
       [first.id(), second.id()],
     )?;
     transaction.execute("update tasks set session_id=8 where id=?", [other.id()])?;
-    task_event::create(&transaction, second.id(), TaskState::Dispatched)?;
+    task_event::create(&transaction, second.id(), TaskState::Dispatched, None)?;
     let first = get(&transaction, first.id())?.expect("first target task");
     let second = get(&transaction, second.id())?.expect("second target task");
 
@@ -547,7 +558,7 @@ mod tests {
     let second = create(&transaction, "second", 0, 20, None, None)?;
     let third = create(&transaction, "third", 0, 30, None, None)?;
     transaction.execute("update tasks set session_id=7 where id=?", [second.id()])?;
-    task_event::create(&transaction, second.id(), TaskState::Dispatched)?;
+    task_event::create(&transaction, second.id(), TaskState::Dispatched, None)?;
     let second = get(&transaction, second.id())?.expect("second task");
 
     assert_eq!(predecessor(&transaction, first.id())?, None);
@@ -567,40 +578,82 @@ mod tests {
     )?;
 
     let transaction = db.transaction()?;
-    let verified = create(&transaction, "verify me", 0, 10, None, None)?;
-    let verified = dispatch(&transaction, verified.id(), 7, true)?;
-    assert_eq!(verified.state(), TaskState::Dispatched);
-    assert_eq!(verified.session_id(), Some(7));
-    assert!(verified.is_session_reuse());
-
-    let verified = redraft(&transaction, verified.id())?;
-    assert_eq!(verified.state(), TaskState::Drafted);
-    let verified = dispatch(&transaction, verified.id(), 7, true)?;
-    let verified = take_flight(&transaction, verified.id(), 42, "base123", 900)?;
-    assert_eq!(verified.state(), TaskState::InFlight);
-    assert_eq!(verified.log_offset(), 42);
-    assert_eq!(verified.base_head(), Some("base123"));
-    assert_eq!(verified.context_size_start(), Some(900));
-
-    let verified = verify(&transaction, verified.id(), "verified123")?;
-    assert_eq!(verified.state(), TaskState::Verified);
-    assert_eq!(verified.commit_sha(), Some("verified123"));
-    assert_eq!(verified.events().len(), 6);
-
     let accepted = create(&transaction, "accept me", 0, 10, None, None)?;
-    let accepted = dispatch(&transaction, accepted.id(), 7, false)?;
-    let accepted = record_commit(&transaction, accepted.id(), "accepted123")?;
+    let accepted = dispatch(&transaction, accepted.id(), 7, true, Some("reuse"))?;
+    assert_eq!(accepted.state(), TaskState::Dispatched);
+    assert_eq!(accepted.session_id(), Some(7));
+    assert!(accepted.is_session_reuse());
+    assert_eq!(accepted.reason(), Some("reuse"));
+
+    let accepted = take_flight(&transaction, accepted.id(), 42, "base123", 900)?;
+    assert_eq!(accepted.state(), TaskState::InFlight);
+    assert_eq!(accepted.log_offset(), 42);
+    assert_eq!(accepted.base_head(), Some("base123"));
+    assert_eq!(accepted.context_size_start(), Some(900));
+    assert_eq!(accepted.reason(), None);
+
+    let accepted = record_commit(&transaction, accepted.id(), "accepted123", None)?;
     assert_eq!(accepted.state(), TaskState::Committed);
     assert_eq!(accepted.commit_sha(), Some("accepted123"));
-    let accepted = accept(&transaction, accepted.id(), "manual review")?;
+    let accepted = accept(&transaction, accepted.id(), "gate passed")?;
     assert_eq!(accepted.state(), TaskState::Accepted);
-    assert_eq!(accepted.reason(), Some("manual review"));
-    let failed = create(&transaction, "fail me", 0, 10, None, None)?;
-    let failed = dispatch(&transaction, failed.id(), 7, false)?;
-    let failed = fail(&transaction, failed.id(), "implementation stalled")?;
-    assert_eq!(failed.state(), TaskState::Failed);
-    assert_eq!(failed.reason(), Some("implementation stalled"));
+    assert_eq!(accepted.reason(), Some("gate passed"));
+    assert_eq!(accepted.events().len(), 5);
+
+    let aborted = create(&transaction, "abort me", 0, 10, None, None)?;
+    let aborted = dispatch(&transaction, aborted.id(), 7, false, None)?;
+    let aborted = abort(&transaction, aborted.id(), "implementation stalled")?;
+    assert_eq!(aborted.state(), TaskState::Aborted);
+    assert_eq!(aborted.reason(), Some("implementation stalled"));
     transaction.commit()?;
+    Ok(())
+  }
+
+  #[test]
+  fn advancing_to_the_current_state_is_a_noop() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
+
+    let transaction = db.transaction()?;
+    let task = create(&transaction, "commit once", 0, 10, None, None)?;
+    let task = dispatch(&transaction, task.id(), 7, false, None)?;
+    let first = record_commit(&transaction, task.id(), "first123", None)?;
+    let again = record_commit(&transaction, task.id(), "second456", None)?;
+    transaction.commit()?;
+
+    assert_eq!(first.state(), TaskState::Committed);
+    assert_eq!(again, first);
+    assert_eq!(again.commit_sha(), Some("first123"));
+    assert_eq!(again.events().len(), 3);
+    Ok(())
+  }
+
+  #[test]
+  fn a_task_can_abort_from_every_state_it_reaches() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
+
+    let transaction = db.transaction()?;
+    let drafted = create(&transaction, "abort while drafted", 0, 10, None, None)?;
+    let drafted = abort(&transaction, drafted.id(), "spec withdrawn")?;
+
+    let committed = create(&transaction, "abort after commit", 0, 10, None, None)?;
+    let committed = dispatch(&transaction, committed.id(), 7, false, None)?;
+    let committed = record_commit(&transaction, committed.id(), "landed123", None)?;
+    let committed = abort(&transaction, committed.id(), "reverted, gate never ran")?;
+    transaction.commit()?;
+
+    assert_eq!(drafted.state(), TaskState::Aborted);
+    assert_eq!(drafted.reason(), Some("spec withdrawn"));
+    assert_eq!(committed.state(), TaskState::Aborted);
+    assert_eq!(committed.commit_sha(), Some("landed123"));
+    assert_eq!(committed.reason(), Some("reverted, gate never ran"));
     Ok(())
   }
 
@@ -616,7 +669,7 @@ mod tests {
     transaction.commit()?;
 
     let transaction = db.transaction()?;
-    dispatch(&transaction, task.id(), 7, false)?;
+    dispatch(&transaction, task.id(), 7, false, None)?;
     transaction.rollback()?;
 
     let transaction = db.transaction()?;
@@ -629,7 +682,7 @@ mod tests {
   }
 
   #[test]
-  fn mutators_reject_illegal_transitions_before_changing_task_data() -> Result<()> {
+  fn mutators_reject_backward_transitions_before_changing_task_data() -> Result<()> {
     let mut db = database();
     db.execute(
       "insert into sessions(id, name) values(7, 'implementer')",
@@ -637,19 +690,19 @@ mod tests {
     )?;
 
     let transaction = db.transaction()?;
-    let task = create(&transaction, "stay failed", 0, 10, None, None)?;
-    let task = dispatch(&transaction, task.id(), 7, false)?;
-    let task = fail(&transaction, task.id(), "implementation failed")?;
+    let task = create(&transaction, "stay aborted", 0, 10, None, None)?;
+    let task = dispatch(&transaction, task.id(), 7, false, None)?;
+    let task = abort(&transaction, task.id(), "implementation failed")?;
 
-    let error = verify(&transaction, task.id(), "unexpected123").unwrap_err();
-    let unchanged = get(&transaction, task.id())?.expect("failed task");
+    let error = record_commit(&transaction, task.id(), "unexpected123", None).unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("aborted task");
     transaction.commit()?;
 
     assert_eq!(
       error.to_string(),
-      "task 1 cannot transition from failed to verified"
+      "task 1 cannot advance from aborted to committed"
     );
-    assert_eq!(unchanged.state(), TaskState::Failed);
+    assert_eq!(unchanged.state(), TaskState::Aborted);
     assert_eq!(unchanged.commit_sha(), None);
     assert_eq!(unchanged.events().len(), 3);
     Ok(())
