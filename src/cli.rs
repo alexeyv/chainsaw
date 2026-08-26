@@ -123,6 +123,8 @@ pub enum Command {
   },
   /// Print current run state.
   State,
+  /// Print the directory holding this run's session transcripts.
+  LogsDir,
   /// Print measured context use.
   Context { name: Option<String> },
   /// Open or close a human-wait interval.

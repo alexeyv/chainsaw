@@ -131,6 +131,10 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       }
     }
     Command::State => cmd_state(store, runtime),
+    Command::LogsDir => {
+      println!("{}", store.logs_dir.display());
+      Ok(())
+    }
     Command::Context { name } => cmd_context(store, runtime, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),

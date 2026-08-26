@@ -615,7 +615,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             drop_prompts=0,
         )
         log = self.logs_dir_for(harness) / f"{session_id}.jsonl"
-        log.parent.mkdir(parents=True)
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "type": "assistant",
             "message": {"usage": {
@@ -694,6 +694,44 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn("a human wait is open", open_state.stdout)
         self.assertNotIn("a human wait is open", closed_state.stdout)
+
+
+class BusySessionContractTests(SupervisorContractCase):
+    """A busy agent queues a prompt and works through it once it goes idle."""
+
+    def test_a_prompt_is_withheld_while_busy_and_lands_when_the_session_goes_idle(self):
+        self.launch()
+        self.set_agent_status("worker", "busy")
+        log = self.session_log("worker")
+        landed_while_busy = []
+
+        def release():
+            landed_while_busy.append(
+                log.exists() and "queued while busy" in log.read_text()
+            )
+            self.set_agent_status("worker", "idle")
+
+        timer = threading.Timer(0.3, release)
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        self.assert_success(self.cli("prompt", "worker", "queued while busy"))
+        timer.join(timeout=5)
+
+        self.assertEqual(
+            landed_while_busy, [False],
+            "a busy session must withhold the prompt, not answer it synchronously",
+        )
+        self.assertEqual(
+            log.read_text().count("queued while busy"), 1,
+            "the queued prompt should land exactly once, neither lost nor duplicated",
+        )
+        self.assertEqual(
+            [operation["operation"] for operation in self.runtime_operations()
+             if operation["operation"] == "prompt"],
+            ["prompt"],
+            "the supervisor waited the queue out; it should not have resent",
+        )
 
 
 class DottedRunDirectoryContractTests(SupervisorContractCase):

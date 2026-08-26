@@ -1,5 +1,6 @@
 """Fixtures for exercising the supervisor only through its process boundary."""
 
+import fcntl
 import json
 import os
 import shlex
@@ -59,14 +60,22 @@ class SupervisorContractCase(unittest.TestCase):
         self.git("add", "seed.txt")
         self.git("commit", "-q", "-m", "chore: initial fixture")
         self._tool_use_sequence = 0
+        self._logs_dirs = {}
 
     @property
     def logs_dir(self):
         return self.logs_dir_for(self.run_dir)
 
     def logs_dir_for(self, run_dir):
-        munged = os.path.realpath(run_dir).replace("/", "-")
-        return self.home / ".claude" / "projects" / munged
+        """Ask the supervisor where it keeps transcripts; never reimplement its rule."""
+        if run_dir not in self._logs_dirs:
+            result = subprocess.run(
+                [*self.supervisor_command, "--run-dir", str(run_dir), "logs-dir"],
+                text=True, capture_output=True, env=self.env, timeout=30,
+            )
+            self.assert_success(result)
+            self._logs_dirs[run_dir] = Path(result.stdout.strip())
+        return self._logs_dirs[run_dir]
 
     def cli(self, *args, input_text=None, timeout=30):
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir), *map(str, args)]
@@ -153,6 +162,22 @@ class SupervisorContractCase(unittest.TestCase):
 
     def runtime_operations(self):
         return self.zero_cost_dummy_state()["operations"]
+
+    def set_agent_status(self, name, status):
+        """Mark a session busy or idle; a busy one queues prompts instead of answering.
+
+        The supervisor polls this file once a second, so take its lock and land the
+        new contents atomically rather than racing its read-modify-write.
+        """
+        lock_path = self.runtime_state_path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = self.zero_cost_dummy_state()
+            state["agents"][name]["status"] = status
+            temporary = self.runtime_state_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(state, sort_keys=True))
+            temporary.replace(self.runtime_state_path)
 
     def session_log(self, name):
         state = self.zero_cost_dummy_state()
