@@ -12,9 +12,7 @@ the commentator's findings — not implementation detail.
 ## Setup
 
 1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`); if not, stop and say so.
-   Every role is a visible interactive session in its own pane or tab, addressable by
-   Herdr agent name, typeable by the human. Never headless, never a sub-agent.
-2. Inputs: a spec and a clean-slate run directory — a checkout in which no session has
+2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
    ever started, so its session-log directory (`~/.claude/projects/<munged-path>/`)
    holds exactly this run. If logs already exist there, tell the human and stop.
 3. Resolve the project root and role path from this file's own location, not the run
@@ -25,17 +23,21 @@ the commentator's findings — not implementation detail.
    once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
    Start the supervisor once, as a background process:
-   `$SUP daemon --lead <your-agent-name> &`. From then on you are its client; you never
-   launch a session or send a prompt by hand.
+   `$SUP daemon --lead <your-agent-name> &`.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
-   from yours. After that, the only messages
-   it receives are a content-free nudge (the supervisor's staleness kick) and
-   `/compact` (the supervisor does that too). Never leads, checklists, summaries, or
-   "confirm X". It records review output and reads resolutions only through `$SUP`.
+   from yours.
+
 5. Models are set explicitly per role; the supervisor's defaults are in
    `DEFAULTS.md`.
 
+## Basics
+Every role is a visible interactive session in its own pane or tab, addressable by
+Herdr agent name. Never headless, never a sub-agent.
+
 Human steering in any pane is authoritative and overrides this loop.
+
+You and the commentator must never send or receive messages to each other - only
+through supervisor CLI ($SUP).
 
 ## Review protocol
 
@@ -87,56 +89,41 @@ continuation prompts, and handoffs.
 
 ## Task lifecycle
 
-A task moves forward through five states and can stop at `aborted` from any of them.
-There are no backward edges.
+Normally, a task progresses through five states.
 
     drafted -> dispatched -> in_flight -> committed_unverified -> accepted
-       |            |             |                  |
-       +------------+-------------+------------------+---------------> aborted
 
-Each transition has its own verb, because each one carries its own arguments. Every
-transition records an optional reason against that step, which `state` shows. Moving a
-task to the state it already occupies is a no-op that succeeds, so a retry is always
-safe; moving it backward fails. `accepted` and `aborted` are terminal.
+It can also become aborted from any of these states.
 
-**drafted** — the task exists and its text is frozen. `$SUP task new` creates it.
-Nothing has been sent to an implementer. This is the only state in which the work can
-still be reshaped, and you reshape it by drafting a different task, not by editing this
-one.
+**drafted** — the task exists and its prompt is frozen. `$SUP task new` creates a `drafted` task.
+Nothing has been sent to an implementer yet. If you decide to reshape the task, you abort it,
+and draft another.
 
-**dispatched** — the task prompt has landed in an implementer's session log, confirmed
-by the supervisor against the log itself, and the session is bound to the task. You
-cause this: `$SUP dispatch <task-id> --to implementer-<n> [--reuse] [--reason "..."]`.
-If the prompt never lands the task stays `drafted`, so a failed send costs you nothing
-but a retry.
+**dispatched** — implementer session received the task prompt. You
+trigger this: `$SUP dispatch <task-id> --to implementer-<n> [--reuse] [--reason "..."]`.
 
-**in_flight** — the supervisor has recorded the measurement baseline: the session's log
-offset, the HEAD the implementer started from, and its starting context size. The
-supervisor sets this itself, immediately after dispatch. You never advance a task here.
+**in_flight** — implementer started working on the task. The supervisor detects and
+records this automatically, along with the measurement baseline: the session's log offset,
+git revision the implementer started from, and its starting context size.
 
-**committed_unverified** — the daemon has seen a commit in that session's log that
-exists in git and descends from the task's base HEAD. The supervisor sets this. It means
-a commit landed; it does not mean the implementer has stopped working. This is the state
-that releases the next dispatch: the moment a task reaches it, dispatch the next one to
-the pre-warmed session — do not wait for the session to go idle, and do not wait for the
-commit to be judged. The name is also the reminder. A task sitting in
-`committed_unverified` in `state` is work you have not judged yet, and it stays there,
-visibly, until you do.
+**committed_unverified** — implementer has committed its work to Git. The supervisor detects and
+records this automatically. As soon as you see this state, dispatching the next task to the next
+implementer is your top priority. The session may not be idle yet (summarizing). The commit is not
+reviewed by the commentator yet. It doesn't matter: even if you are busy, pause whatever you were
+working on, and dispatch the next task as quickly as possible. Then go back to your previous activity.
 
-**accepted** — terminal, and the only successful ending. `$SUP verify <task-id>` runs
-the mechanical gate — the commit is in git, carries no attribution trailer, the tree is
-clean, and the project's quality gate ran last in the log — and accepts the task only if
-it passes, recording `gate passed at <sha>` as the reason. It prints the problems and
-fails otherwise, leaving the task `committed_unverified`. `$SUP accept <task-id>
---reason "..."`
-skips the gate and accepts on your justification instead. The reason is what tells
-anyone reading `state` how the task was accepted.
+**accepted** — terminal state, successful ending.
+Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
+Trigger the transition thus: `$SUP accept <task-id>`
+This runs some validations.
+If you eventually decide to accept the task bypassing validations:
+`$SUP accept <task-id> --force --reason "..."`
+A reason is required with `--force`, and only meaningful with it.
 
-**aborted** — terminal, reachable from every other state. The task will not produce an
-accepted commit. `$SUP abort <task-id> --reason "..."`. Use it when the implementer
+**aborted** — terminal state, reachable from every other state.
+`$SUP abort <task-id> --reason "..."`. Use it when the implementer
 failed to deliver, and equally when a commit landed that you have reverted rather than
-kept — a landed commit does not oblige you to accept it. Aborts are counted along the
-retry lineage; three on the same task escalates to the human.
+kept — a landed commit does not oblige you to accept it.
 
 ## Writing a task
 
@@ -195,8 +182,9 @@ measured separately (`$SUP state` shows both).
    rewrite is read after its commit; large files by line range.
 2. The moment the previous task reaches `committed_unverified`, get the next one
    moving — do not wait for its session to fall idle and do not wait to judge its
-   commit. Dispatch first, then come back and judge the previous task: `$SUP verify
-   <task-id>` runs the gate, and `$SUP accept <task-id> --reason "..."` overrides it.
+   commit. Dispatch first, then come back and judge the previous task: `$SUP accept
+   <task-id>` runs the gate, and `$SUP accept <task-id> --force --reason "..."`
+   bypasses it.
    Neither one gates this dispatch, and nothing forces you to run either; the task's own
    state name is what tells you it is still outstanding. Dispatch with
    `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated fresh session,
@@ -273,15 +261,12 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task.
 
 ## Stopping
 
-"Stop" means end the run for good. Ask once — "end the run for good?" — and take
-the answer; never infer it. Then, in order:
+When the user says to stop OR the supervisor says you reached 250k context, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Then, in order:
 
-1. Let the in-flight implementer finish; run the gate on its commit.
-2. Wait for the commentator on that commit.
+1. Let the in-flight implementer finish.
+2. Wait for the commentator's findings on that commit.
 3. Write the continuation prompt to the run directory: HEAD, the gate command and
    exact numbers, done/next derived from git not remembered, the exact observation
    cursor, every unresolved finding keyed by its stable number in full, resolved
    findings and their reasons, open questions, traps hit.
 4. `$SUP stop`.
-
-Nothing restarts itself. Same contract when the supervisor says you passed 250k.

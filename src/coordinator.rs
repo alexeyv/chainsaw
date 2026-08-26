@@ -103,8 +103,11 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       reuse,
       reason,
     } => cmd_dispatch(store, runtime, task, &to, reuse, reason.as_deref()),
-    Command::Verify { task } => cmd_verify(store, runtime, task),
-    Command::Accept { task, reason } => cmd_accept(store, task, &reason),
+    Command::Accept {
+      task,
+      force,
+      reason,
+    } => cmd_accept(store, runtime, task, force, reason.as_deref()),
     Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
     Command::Observe { task, text } => cmd_observe(store, task, &text),
     Command::Finding { task, description } => cmd_finding(store, task, &description),
@@ -812,7 +815,54 @@ fn new_commit_for(
   Ok(None)
 }
 
-fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Result<()> {
+/// Accept a task. Without `--force` this runs the mechanical gate and accepts
+/// only if it passes; with it the caller's reason stands in for the gate.
+fn cmd_accept(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+  force: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  if task_snapshot(store, task_id)?.is_none() {
+    bail!("supervisor: no task {task_id}");
+  }
+  match (force, reason) {
+    (true, Some(reason)) => accept_without_the_gate(store, task_id, reason),
+    (true, None) => bail!("supervisor: accept --force requires a non-empty --reason"),
+    (false, Some(_)) => {
+      bail!("supervisor: --reason only applies with --force; accept without it runs the gate")
+    }
+    (false, None) => accept_through_the_gate(store, runtime, task_id),
+  }
+}
+
+fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<()> {
+  let Some(task) = task_snapshot(store, task_id)? else {
+    bail!("supervisor: no task {task_id}");
+  };
+  if reason.trim().is_empty() {
+    bail!("supervisor: accept --force requires a non-empty --reason");
+  }
+  if task.state() != TaskState::CommittedUnverified || task.commit_sha().is_none() {
+    bail!(
+      "supervisor: task {task_id} is {}, not a committed unverified task",
+      task.state()
+    );
+  }
+  let transaction = store.db.unchecked_transaction()?;
+  task::accept(&transaction, task_id, reason)?;
+  transaction.commit()?;
+  store.event("accepted", &format!("task {task_id}: {reason}"))?;
+  println!("task {task_id} accepted without the gate: {reason}");
+  Ok(())
+}
+
+fn accept_through_the_gate(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
@@ -1278,27 +1328,6 @@ fn looks_gitignored(path: &str) -> bool {
     || DIRS
       .iter()
       .any(|dir| format!("/{trimmed}/").contains(&format!("/{dir}/")))
-}
-
-fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
-    bail!("supervisor: no task {task_id}");
-  };
-  if reason.trim().is_empty() {
-    bail!("supervisor: accept requires a non-empty --reason");
-  }
-  if task.state() != TaskState::CommittedUnverified || task.commit_sha().is_none() {
-    bail!(
-      "supervisor: task {task_id} is {}, not a committed unverified task",
-      task.state()
-    );
-  }
-  let transaction = store.db.unchecked_transaction()?;
-  task::accept(&transaction, task_id, reason)?;
-  transaction.commit()?;
-  store.event("accepted", &format!("task {task_id}: {reason}"))?;
-  println!("task {task_id} accepted without the gate: {reason}");
-  Ok(())
 }
 
 fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {

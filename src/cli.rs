@@ -69,13 +69,15 @@ pub enum Command {
     #[arg(long)]
     reason: Option<String>,
   },
-  /// Run the mechanical gate on a committed task, accepting it if it passes.
-  Verify { task: i64 },
-  /// Accept a committed task on your own justification, skipping the gate.
+  /// Accept a task, running the mechanical gate unless it is forced.
   Accept {
     task: i64,
+    /// Accept without running the gate. Requires --reason.
     #[arg(long)]
-    reason: String,
+    force: bool,
+    /// Why the gate was bypassed. Only meaningful with --force.
+    #[arg(long)]
+    reason: Option<String>,
   },
   /// Record predicted and actual task size.
   Calibrate { task: i64 },
