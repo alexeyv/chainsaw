@@ -29,7 +29,7 @@ Run the complete gate from the repository root, in this order:
 cargo fmt --check
 cargo clippy --quiet --all-targets --all-features --locked -- -D warnings
 cargo test --quiet --locked
-python3 -m unittest discover -s tests -q
+python3 -B -m unittest discover -s tests -q
 mkdir -p tools/bin
 clang++ -o tools/bin/context-probe tools/context-probe.cc
 ```
