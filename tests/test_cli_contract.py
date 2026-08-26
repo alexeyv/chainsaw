@@ -173,7 +173,7 @@ class VerificationContractTests(SupervisorContractCase):
         self.assert_success(self.cli("config", "gate", "quality-gate"))
         task, sha = self.prepare_committed_task(gate="quality-gate")
 
-        result = self.assert_success(self.cli("advance", str(task), "accepted"))
+        result = self.assert_success(self.cli("verify", str(task)))
         state = self.assert_success(self.cli("state"))
 
         self.assertIn(f"task {task} accepted: gate passed at {sha[:10]}", result.stdout)
@@ -183,7 +183,7 @@ class VerificationContractTests(SupervisorContractCase):
     def test_missing_gate_configuration_is_a_note_not_a_failure(self):
         task, _ = self.prepare_committed_task()
 
-        result = self.assert_success(self.cli("advance", str(task), "accepted"))
+        result = self.assert_success(self.cli("verify", str(task)))
 
         self.assertIn("gate not configured", result.stdout)
         self.assertIn("gate-last unchecked", result.stdout)
@@ -193,7 +193,7 @@ class VerificationContractTests(SupervisorContractCase):
         self.launch()
         self.assert_success(self.dispatch(task))
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "no commit found in the implementer's log")
 
@@ -201,14 +201,14 @@ class VerificationContractTests(SupervisorContractCase):
         task, _ = self.prepare_committed_task()
         (self.run_dir / "untracked.txt").write_text("dirty\n")
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "tree is dirty")
 
     def test_verify_rejects_attribution_trailers(self):
         task, _ = self.prepare_committed_task(trailer=True)
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "commit carries an attribution trailer")
 
@@ -217,7 +217,7 @@ class VerificationContractTests(SupervisorContractCase):
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
         self.assertNotEqual(task_sha, self.head())
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "commit is not HEAD")
 
@@ -225,7 +225,7 @@ class VerificationContractTests(SupervisorContractCase):
         self.assert_success(self.cli("config", "gate", "quality-gate"))
         task, _ = self.prepare_committed_task()
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "did not run before the commit")
 
@@ -233,7 +233,7 @@ class VerificationContractTests(SupervisorContractCase):
         self.assert_success(self.cli("config", "gate", "quality-gate"))
         task, _ = self.prepare_committed_task(gate="quality-gate", gate_ok=False)
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "gate before the commit failed")
 
@@ -243,7 +243,7 @@ class VerificationContractTests(SupervisorContractCase):
             gate="quality-gate", after_gate="sed -i.bak s/a/b/ work.txt",
         )
 
-        result = self.cli("advance", str(task), "accepted")
+        result = self.cli("verify", str(task))
 
         self.assert_failure(result, "source-modifying command after the gate")
 
@@ -253,7 +253,7 @@ class VerificationContractTests(SupervisorContractCase):
             gate="quality-gate", after_gate="git status --short",
         )
 
-        result = self.assert_success(self.cli("advance", str(task), "accepted"))
+        result = self.assert_success(self.cli("verify", str(task)))
 
         self.assertIn("task 1 accepted", result.stdout)
 
@@ -268,7 +268,7 @@ class VerificationContractTests(SupervisorContractCase):
             after_gate=f'F={notes}\ncat >> "$F" <<\'EOF\'\nnotes\nEOF',
         )
 
-        result = self.assert_success(self.cli("advance", str(task), "accepted"))
+        result = self.assert_success(self.cli("verify", str(task)))
 
         self.assertIn("task 1 accepted", result.stdout)
 
@@ -284,7 +284,7 @@ class VerificationContractTests(SupervisorContractCase):
         timer.start()
         self.addCleanup(timer.cancel)
 
-        result = self.assert_success(self.cli("advance", str(task), "accepted"))
+        result = self.assert_success(self.cli("verify", str(task)))
         timer.join(timeout=2)
 
         self.assertIn(f"task {task} accepted: gate passed at {sha[:10]}", result.stdout)
@@ -293,7 +293,7 @@ class VerificationContractTests(SupervisorContractCase):
 class ReuseContractTests(SupervisorContractCase):
     def verified_first_task(self):
         task, _ = self.prepare_committed_task()
-        self.assert_success(self.cli("advance", str(task), "accepted"))
+        self.assert_success(self.cli("verify", str(task)))
         return task
 
     def test_idle_current_session_can_be_reused(self):
@@ -415,7 +415,7 @@ class ReuseContractTests(SupervisorContractCase):
         daemon.wait(timeout=10)
 
         accepted = self.assert_success(self.cli(
-            "advance", str(task), "accepted", "--reason", "gate failure was a known false positive",
+            "accept", str(task), "--reason", "gate failure was a known false positive",
         ))
         state = self.assert_success(self.cli("state"))
 
@@ -437,7 +437,7 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         self.assert_success(self.dispatch(task))
         sha = self.commit_file()
         self.record_commit("worker", sha)
-        self.assert_success(self.cli("advance", str(task), "accepted"))
+        self.assert_success(self.cli("verify", str(task)))
 
         self.assert_success(self.cli(
             "observe", "--task", str(task), "terminal observation",
@@ -635,7 +635,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         sha = self.commit_file("work.txt", "one\ntwo\n")
         self.append_usage("worker", input_tokens=15, cache_read=40, cache_creation=5)
         self.record_commit("worker", sha)
-        self.assert_success(self.cli("advance", str(task), "accepted"))
+        self.assert_success(self.cli("verify", str(task)))
 
         result = self.assert_success(self.cli("calibrate", str(task)))
 
@@ -701,7 +701,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
     def test_daemon_observes_commentator_ingestion(self):
         task, sha = self.prepare_committed_task()
-        self.assert_success(self.cli("advance", str(task), "accepted"))
+        self.assert_success(self.cli("verify", str(task)))
         self.assert_success(self.cli(
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
         ))

@@ -57,21 +57,25 @@ pub enum Command {
     #[arg(long)]
     reason: String,
   },
-  /// Advance a task to its next lifecycle state.
-  Advance {
+  /// Advance a drafted task to dispatched on an implementer session.
+  Dispatch {
     task: i64,
-    /// Target state. Advancing to the task's current state is a no-op.
-    state: AdvanceState,
-    /// Implementer session to dispatch to (state `dispatched`).
     #[arg(long)]
-    to: Option<String>,
+    to: String,
     /// Dispatch to a session that has already taken a task.
     #[arg(long)]
     reuse: bool,
-    /// Why this transition was made. For `accepted`, giving a reason overrides
-    /// the mechanical gate instead of running it.
+    /// Why this dispatch was made; recorded against the transition.
     #[arg(long)]
     reason: Option<String>,
+  },
+  /// Run the mechanical gate on a committed task, accepting it if it passes.
+  Verify { task: i64 },
+  /// Accept a committed task on your own justification, skipping the gate.
+  Accept {
+    task: i64,
+    #[arg(long)]
+    reason: String,
   },
   /// Record predicted and actual task size.
   Calibrate { task: i64 },
@@ -123,14 +127,6 @@ pub enum Command {
   HumanWait { action: HumanWaitAction },
   /// Ask the daemon to stop.
   Stop,
-}
-
-/// Lifecycle states a caller may advance a task to. `in_flight` and `committed`
-/// are recorded by the supervisor itself and are not addressable here.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum AdvanceState {
-  Dispatched,
-  Accepted,
 }
 
 #[derive(Debug, Subcommand)]

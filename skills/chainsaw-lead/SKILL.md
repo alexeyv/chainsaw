@@ -94,10 +94,10 @@ There are no backward edges.
        |            |             |            |
        +------------+-------------+------------+----------> aborted
 
-`$SUP advance <task-id> <state> [flags]` moves a task forward, and every transition
-takes an optional `--reason` that is recorded against that step and shown by `state`.
-Advancing to the state a task already occupies is a no-op that succeeds, so a retry is
-always safe. Advancing to an earlier state fails. `accepted` and `aborted` are terminal.
+Each transition has its own verb, because each one carries its own arguments. Every
+transition records an optional reason against that step, which `state` shows. Moving a
+task to the state it already occupies is a no-op that succeeds, so a retry is always
+safe; moving it backward fails. `accepted` and `aborted` are terminal.
 
 **drafted** — the task exists and its text is frozen. `$SUP task new` creates it.
 Nothing has been sent to an implementer. This is the only state in which the work can
@@ -106,9 +106,9 @@ one.
 
 **dispatched** — the task prompt has landed in an implementer's session log, confirmed
 by the supervisor against the log itself, and the session is bound to the task. You
-cause this: `$SUP advance <task-id> dispatched --to implementer-<n> [--reuse]`. If the
-prompt never lands the task stays `drafted`, so a failed send costs you nothing but a
-retry.
+cause this: `$SUP dispatch <task-id> --to implementer-<n> [--reuse] [--reason "..."]`.
+If the prompt never lands the task stays `drafted`, so a failed send costs you nothing
+but a retry.
 
 **in_flight** — the supervisor has recorded the measurement baseline: the session's log
 offset, the HEAD the implementer started from, and its starting context size. The
@@ -121,13 +121,13 @@ releases the next dispatch. The moment a task is `committed`, dispatch the next 
 the pre-warmed session — do not wait for the session to go idle, and do not wait for the
 commit to be judged.
 
-**accepted** — terminal, and the only successful ending. `$SUP advance <task-id>
-accepted` runs the mechanical gate — the commit is in git, carries no attribution
-trailer, the tree is clean, and the project's quality gate ran last in the log — and
-advances the task only if it passes, recording `gate passed at <sha>` as the reason. It
-prints the problems and fails otherwise, leaving the task `committed`. Adding
-`--reason "..."` skips the gate and accepts on your justification instead; the reason is
-what tells anyone reading `state` how the task was accepted.
+**accepted** — terminal, and the only successful ending. `$SUP verify <task-id>` runs
+the mechanical gate — the commit is in git, carries no attribution trailer, the tree is
+clean, and the project's quality gate ran last in the log — and accepts the task only if
+it passes, recording `gate passed at <sha>` as the reason. It prints the problems and
+fails otherwise, leaving the task `committed`. `$SUP accept <task-id> --reason "..."`
+skips the gate and accepts on your justification instead. The reason is what tells
+anyone reading `state` how the task was accepted.
 
 **aborted** — terminal, reachable from every other state. The task will not produce an
 accepted commit. `$SUP abort <task-id> --reason "..."`. Use it when the implementer
@@ -192,12 +192,11 @@ measured separately (`$SUP state` shows both).
    rewrite is read after its commit; large files by line range.
 2. The moment the previous task reaches `committed`, dispatch the next one — do not
    wait for its session to fall idle and do not wait to judge its commit. Judging is a
-   separate step you take when convenient: `$SUP advance <task-id> accepted` runs the
-   gate, and `$SUP advance <task-id> accepted --reason "..."` overrides it. Neither one
-   gates this dispatch. Dispatch with
-   `$SUP advance <task-id> dispatched --to implementer-<n>` for the pre-populated fresh
-   session, or `$SUP advance <task-id> dispatched --to implementer-<k> --reuse` for the
-   idle earlier one
+   separate step you take when convenient: `$SUP verify <task-id>` runs the gate, and
+   `$SUP accept <task-id> --reason "..."` overrides it. Neither one gates this dispatch.
+   Dispatch with `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated
+   fresh session, or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle
+   earlier one
    (`--to` is a choice, not ceremony; without `--reuse` the supervisor refuses a session
    that already took a task). Either sends the task verbatim and then the implementer's
    contract. A pre-populated session gets "these files changed since your reading
@@ -259,8 +258,8 @@ measured separately (`$SUP state` shows both).
    (`$SUP task new --retry-of <task-id>`). The supervisor counts aborts across the
    retries; at three it tells you to escalate to the human.
 8. Continuation (default off) is the same mechanism as reuse: when the next task
-   is a direct continuation on the same files, `advance <task-id> dispatched --to` the
-   same implementer `--reuse`; the supervisor's measured context and staleness decide, never
+   is a direct continuation on the same files, `dispatch <task-id> --to` the same
+   implementer `--reuse`; the supervisor's measured context and staleness decide, never
    the implementer's own estimate. A task that needs a clean head always gets a fresh
    one.
 9. A human-flagged trivial edit (trigger word `trivial:`) you do yourself — edit,

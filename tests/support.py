@@ -132,7 +132,7 @@ class SupervisorContractCase(unittest.TestCase):
         return self.assert_success(self.cli("launch", name))
 
     def dispatch(self, task_id, name="worker", reuse=False):
-        args = ["advance", str(task_id), "dispatched", "--to", name]
+        args = ["dispatch", str(task_id), "--to", name]
         if reuse:
             args.append("--reuse")
         return self.cli(*args)

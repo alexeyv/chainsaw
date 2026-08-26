@@ -16,7 +16,7 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
-use crate::cli::{AdvanceState, Command, HumanWaitAction, TaskCommand, Verdict};
+use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Task, TaskState};
 use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
@@ -97,21 +97,14 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       ),
     },
     Command::Abort { task, reason } => cmd_abort(store, task, &reason),
-    Command::Advance {
+    Command::Dispatch {
       task,
-      state,
       to,
       reuse,
       reason,
-    } => cmd_advance(
-      store,
-      runtime,
-      task,
-      state,
-      to.as_deref(),
-      reuse,
-      reason.as_deref(),
-    ),
+    } => cmd_dispatch(store, runtime, task, &to, reuse, reason.as_deref()),
+    Command::Verify { task } => cmd_verify(store, runtime, task),
+    Command::Accept { task, reason } => cmd_accept(store, task, &reason),
     Command::Calibrate { task } => cmd_calibrate(store, runtime, task),
     Command::Observe { task, text } => cmd_observe(store, task, &text),
     Command::Finding { task, description } => cmd_finding(store, task, &description),
@@ -669,38 +662,13 @@ fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<Strin
   Ok(format!("{}\n\n", lines.join("\n")))
 }
 
-/// Route an `advance` to the transition that state names. Advancing to
-/// `accepted` runs the mechanical gate unless the caller supplied a reason, in
-/// which case the reason is the justification and the gate is skipped.
-fn cmd_advance(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  task_id: i64,
-  state: AdvanceState,
-  to: Option<&str>,
-  reuse: bool,
-  reason: Option<&str>,
-) -> Result<()> {
-  match state {
-    AdvanceState::Dispatched => {
-      let Some(to) = to else {
-        bail!("supervisor: advance to dispatched requires --to <implementer>");
-      };
-      cmd_dispatch(store, runtime, task_id, to, reuse)
-    }
-    AdvanceState::Accepted => match reason {
-      Some(reason) => cmd_accept(store, task_id, reason),
-      None => cmd_verify(store, runtime, task_id),
-    },
-  }
-}
-
 fn cmd_dispatch(
   store: &Store,
   runtime: &dyn SessionRuntime,
   task_id: i64,
   implementer: &str,
   reuse: bool,
+  reason: Option<&str>,
 ) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: task {task_id} is not in state drafted");
@@ -782,7 +750,9 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let dispatch_reason = reuse.then(|| format!("reuse of {implementer}"));
+  let dispatch_reason = reason
+    .map(str::to_owned)
+    .or_else(|| reuse.then(|| format!("reuse of {implementer}")));
   let transaction = store.db.unchecked_transaction()?;
   task::dispatch(
     &transaction,
