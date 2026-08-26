@@ -8,7 +8,8 @@ from the assertion.
 
 Prove what each function we bother to test is supposed to do, then how it
 deviates. Unit-test what is straightforward at this layer; cover the rest
-through integration. Repetition between cases is fine.
+through integration. Repetition between cases is fine. Do not unit test
+trivial getters, functions, or constructors.
 
 ### Subject and names
 

@@ -4,6 +4,9 @@ mod observation;
 mod task;
 mod task_event;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 use anyhow::{Result, bail};
 
 pub use calibration::Calibration;
