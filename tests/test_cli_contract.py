@@ -145,6 +145,13 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "is not in flight")
 
+    def test_fail_reports_a_missing_task_before_validating_the_reason(self):
+        missing = self.cli("fail", "999", "--reason", "ordinary failure")
+        missing_with_blank_reason = self.cli("fail", "999", "--reason", "  ")
+
+        self.assert_failure(missing, "supervisor: no task 999")
+        self.assert_failure(missing_with_blank_reason, "supervisor: no task 999")
+
     def test_fail_requires_a_nonempty_reason(self):
         task = self.new_task()
         self.launch()

@@ -1334,14 +1334,13 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
 }
 
 fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let task = task_snapshot(store, task_id)?;
+  let Some(task) = task_snapshot(store, task_id)? else {
+    bail!("supervisor: no task {task_id}");
+  };
   if reason.trim().is_empty() {
     bail!("supervisor: fail requires a non-empty --reason");
   }
-  if !task
-    .as_ref()
-    .is_some_and(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
-  {
+  if !matches!(task.state(), TaskState::Dispatched | TaskState::InFlight) {
     bail!("supervisor: task {task_id} is not in flight");
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
