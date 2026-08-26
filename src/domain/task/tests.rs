@@ -1,539 +1,563 @@
-use anyhow::Result;
-use chrono::{DateTime, Utc};
 use strum::IntoEnumIterator;
 
-use super::{Task, TaskState};
+use super::TaskState;
 use crate::domain::TaskEvent;
+use crate::domain::test_helpers::{TaskSpec, build, drafted_task, event, format_task, task_in};
 
-fn timestamp(seconds: i64) -> DateTime<Utc> {
-  DateTime::from_timestamp(seconds, 0).unwrap()
-}
+mod can_transition_to {
+  use super::*;
 
-#[test]
-fn states_display_with_their_stable_names() {
-  for (state, name) in [
-    (TaskState::Drafted, "drafted"),
-    (TaskState::Dispatched, "dispatched"),
-    (TaskState::InFlight, "in_flight"),
-    (TaskState::CommittedUnverified, "committed_unverified"),
-    (TaskState::Accepted, "accepted"),
-    (TaskState::Aborted, "aborted"),
-  ] {
-    assert_eq!(state.to_string(), state.as_str());
-    assert_eq!(state.to_string(), name);
+  #[test]
+  fn should_work() {
+    assert!(TaskState::Drafted.can_transition_to(TaskState::Dispatched));
+    assert!(TaskState::Dispatched.can_transition_to(TaskState::InFlight));
+    assert!(TaskState::InFlight.can_transition_to(TaskState::CommittedUnverified));
+    assert!(TaskState::CommittedUnverified.can_transition_to(TaskState::Accepted));
   }
-}
 
-#[test]
-fn the_lifecycle_only_moves_forward_and_ends_at_a_terminal_state() {
-  let allowed = [
-    (TaskState::Drafted, TaskState::Dispatched),
-    (TaskState::Drafted, TaskState::InFlight),
-    (TaskState::Drafted, TaskState::CommittedUnverified),
-    (TaskState::Drafted, TaskState::Accepted),
-    (TaskState::Drafted, TaskState::Aborted),
-    (TaskState::Dispatched, TaskState::InFlight),
-    (TaskState::Dispatched, TaskState::CommittedUnverified),
-    (TaskState::Dispatched, TaskState::Accepted),
-    (TaskState::Dispatched, TaskState::Aborted),
-    (TaskState::InFlight, TaskState::CommittedUnverified),
-    (TaskState::InFlight, TaskState::Accepted),
-    (TaskState::InFlight, TaskState::Aborted),
-    (TaskState::CommittedUnverified, TaskState::Accepted),
-    (TaskState::CommittedUnverified, TaskState::Aborted),
-  ];
+  #[test]
+  fn should_allow_skipping_forward_over_intermediate_states() {
+    assert!(TaskState::Drafted.can_transition_to(TaskState::Accepted));
+    assert!(TaskState::Dispatched.can_transition_to(TaskState::CommittedUnverified));
+  }
 
-  for current in TaskState::iter() {
-    for next in TaskState::iter() {
+  #[test]
+  fn should_allow_aborting_from_every_state_that_is_not_terminal() {
+    for state in TaskState::iter() {
       assert_eq!(
-        current.can_transition_to(next),
-        allowed.contains(&(current, next)),
-        "unexpected transition {current} -> {next}"
+        state.can_transition_to(TaskState::Aborted),
+        !state.is_terminal(),
+        "abort reachability wrong for {state}"
       );
+    }
+  }
+
+  #[test]
+  fn should_refuse_to_stay_in_or_move_backward_from_any_state() {
+    for current in TaskState::iter() {
+      for next in TaskState::iter().filter(|next| *next <= current) {
+        assert!(
+          !current.can_transition_to(next),
+          "{current} -> {next} was allowed"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn should_refuse_to_leave_a_terminal_state() {
+    for current in [TaskState::Accepted, TaskState::Aborted] {
+      for next in TaskState::iter() {
+        assert!(
+          !current.can_transition_to(next),
+          "{current} -> {next} was allowed"
+        );
+      }
     }
   }
 }
 
-#[test]
-fn every_nonterminal_state_can_abort_and_no_state_can_leave_a_terminal_one() {
-  for state in TaskState::iter() {
-    assert_eq!(
-      state.can_transition_to(TaskState::Aborted),
-      !state.is_terminal(),
-      "abort reachability wrong for {state}"
-    );
-    assert!(
-      !state.can_transition_to(state),
-      "{state} advances to itself"
-    );
+mod is_terminal {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert!(TaskState::Accepted.is_terminal());
+    assert!(TaskState::Aborted.is_terminal());
   }
 
-  assert!(TaskState::Accepted.is_terminal());
-  assert!(TaskState::Aborted.is_terminal());
-}
-
-#[allow(clippy::too_many_arguments)]
-fn task_with(
-  id: i64,
-  text: &str,
-  predicted_files: i64,
-  state: TaskState,
-  session_id: Option<i64>,
-  commit_sha: Option<&str>,
-  reason: Option<&str>,
-  file_list: Option<Vec<&str>>,
-  is_session_reuse: bool,
-  context_size_start: Option<i64>,
-) -> Result<Task> {
-  let states = match state {
-    TaskState::Drafted => vec![TaskState::Drafted],
-    TaskState::Dispatched => vec![TaskState::Drafted, TaskState::Dispatched],
-    TaskState::InFlight => vec![
-      TaskState::Drafted,
-      TaskState::Dispatched,
-      TaskState::InFlight,
-    ],
-    TaskState::CommittedUnverified => vec![
+  #[test]
+  fn should_be_false_for_every_state_a_task_can_leave() {
+    for state in [
       TaskState::Drafted,
       TaskState::Dispatched,
       TaskState::InFlight,
       TaskState::CommittedUnverified,
-    ],
-    TaskState::Accepted => vec![
-      TaskState::Drafted,
+    ] {
+      assert!(!state.is_terminal(), "{state} is terminal");
+    }
+  }
+}
+
+mod try_from {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    for (state, name) in [
+      (TaskState::Drafted, "drafted"),
+      (TaskState::Dispatched, "dispatched"),
+      (TaskState::InFlight, "in_flight"),
+      (TaskState::CommittedUnverified, "committed_unverified"),
+      (TaskState::Accepted, "accepted"),
+      (TaskState::Aborted, "aborted"),
+    ] {
+      assert_eq!(state.as_str(), name);
+      assert_eq!(state.to_string(), name);
+      assert_eq!(TaskState::try_from(name).unwrap(), state);
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_name_is_unknown() {
+    for name in ["", "Drafted", "inflight", "accepted "] {
+      let error = TaskState::try_from(name).unwrap_err();
+      assert_eq!(error.to_string(), format!("unknown task state {name:?}"));
+    }
+  }
+}
+
+mod new {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let task = build(drafted_task()).unwrap();
+
+    assert_eq!(
+      format_task(&task),
+      r#"id: 3
+text: "implement the task"
+predicted_files: 2
+predicted_lines: 20
+state: drafted
+session_id: none
+commit_sha: none
+created_at: 1700000000.500
+retry_of_task_id: none
+reason: none
+log_offset: 0
+base_head: none
+predicted_file_list: none
+is_session_reuse: false
+context_size_start: none
+events:
+  1 drafted none"#
+    );
+  }
+
+  #[test]
+  fn should_expose_every_field_of_an_accepted_task() {
+    let task = build(TaskSpec {
+      retry_of_task_id: Some(2),
+      predicted_file_list: Some(vec!["src/a.rs", "src/b.rs"]),
+      is_session_reuse: true,
+      ..task_in(TaskState::Accepted, Some("gate passed"))
+    })
+    .unwrap();
+
+    assert_eq!(
+      format_task(&task),
+      r#"id: 3
+text: "implement the task"
+predicted_files: 2
+predicted_lines: 20
+state: accepted
+session_id: 7
+commit_sha: "abc123"
+created_at: 1700000000.500
+retry_of_task_id: 2
+reason: "gate passed"
+log_offset: 100
+base_head: "base123"
+predicted_file_list: ["src/a.rs", "src/b.rs"]
+is_session_reuse: true
+context_size_start: 900
+events:
+  1 drafted none
+  2 dispatched none
+  3 in_flight none
+  4 committed_unverified none
+  5 accepted "gate passed""#
+    );
+  }
+
+  #[test]
+  fn should_accept_a_task_aborted_before_it_committed() {
+    let task = build(TaskSpec {
+      commit_sha: None,
+      ..task_in(TaskState::Aborted, Some("implementer stalled"))
+    })
+    .unwrap();
+
+    assert_eq!(task.state(), TaskState::Aborted);
+    assert_eq!(task.reason(), Some("implementer stalled"));
+    assert_eq!(task.commit_sha(), None);
+  }
+
+  #[test]
+  fn should_accept_a_task_aborted_straight_from_drafted() {
+    let task = build(TaskSpec {
+      events: vec![
+        event(1, TaskState::Drafted, None).unwrap(),
+        event(2, TaskState::Aborted, Some("withdrawn")).unwrap(),
+      ],
+      ..drafted_task()
+    })
+    .unwrap();
+
+    assert_eq!(task.state(), TaskState::Aborted);
+    assert_eq!(task.reason(), Some("withdrawn"));
+  }
+
+  #[test]
+  fn should_keep_events_in_identity_order_across_a_backward_clock_step() {
+    let earlier = event(1, TaskState::Drafted, None).unwrap();
+    let later = TaskEvent::new(
+      2,
+      TaskState::Aborted,
+      Some("withdrawn".to_owned()),
+      earlier.created_at() - chrono::Duration::seconds(10),
+    )
+    .unwrap();
+
+    let task = build(TaskSpec {
+      events: vec![earlier, later],
+      ..drafted_task()
+    })
+    .unwrap();
+
+    assert_eq!(task.state(), TaskState::Aborted);
+    assert!(task.events()[1].created_at() < task.events()[0].created_at());
+  }
+
+  #[test]
+  fn should_fail_when_the_id_is_not_positive() {
+    for id in [i64::MIN, -1, 0] {
+      let error = build(TaskSpec {
+        id,
+        ..drafted_task()
+      })
+      .unwrap_err();
+      assert_eq!(error.to_string(), "id must be positive");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_text_is_blank() {
+    for text in ["", " ", "\n\t"] {
+      let error = build(TaskSpec {
+        text,
+        ..drafted_task()
+      })
+      .unwrap_err();
+      assert_eq!(error.to_string(), "text cannot be blank");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_predicted_files_is_negative() {
+    let error = build(TaskSpec {
+      predicted_files: -1,
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "predicted_files cannot be negative");
+  }
+
+  #[test]
+  fn should_fail_when_predicted_lines_is_negative() {
+    let error = build(TaskSpec {
+      predicted_lines: -1,
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "predicted_lines cannot be negative");
+  }
+
+  #[test]
+  fn should_fail_when_the_session_id_is_not_positive() {
+    for session_id in [i64::MIN, -1, 0] {
+      let error = build(TaskSpec {
+        session_id: Some(session_id),
+        ..drafted_task()
+      })
+      .unwrap_err();
+      assert_eq!(error.to_string(), "session_id must be positive");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_commit_sha_is_blank() {
+    let error = build(TaskSpec {
+      commit_sha: Some(" "),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "commit_sha cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_created_at_is_negative_or_not_finite() {
+    for created_at in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+      let error = build(TaskSpec {
+        created_at,
+        ..drafted_task()
+      })
+      .unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        "created_at must be finite and nonnegative"
+      );
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_retried_task_id_is_not_positive() {
+    for retry_of_task_id in [i64::MIN, -1, 0] {
+      let error = build(TaskSpec {
+        retry_of_task_id: Some(retry_of_task_id),
+        ..drafted_task()
+      })
+      .unwrap_err();
+      assert_eq!(error.to_string(), "retry_of_task_id must be positive");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_a_task_retries_itself() {
+    let error = build(TaskSpec {
+      id: 3,
+      retry_of_task_id: Some(3),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "a task cannot retry itself");
+  }
+
+  #[test]
+  fn should_fail_when_the_log_offset_is_negative() {
+    let error = build(TaskSpec {
+      log_offset: -1,
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "log_offset cannot be negative");
+  }
+
+  #[test]
+  fn should_fail_when_the_base_head_is_blank() {
+    let error = build(TaskSpec {
+      base_head: Some(""),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "base_head cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_the_starting_context_size_is_negative() {
+    let error = build(TaskSpec {
+      context_size_start: Some(-1),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "context_size_start cannot be negative");
+  }
+
+  #[test]
+  fn should_fail_when_a_state_past_drafted_has_no_session() {
+    for state in [
       TaskState::Dispatched,
       TaskState::InFlight,
       TaskState::CommittedUnverified,
       TaskState::Accepted,
-    ],
-    TaskState::Aborted => vec![
-      TaskState::Drafted,
-      TaskState::Dispatched,
-      TaskState::InFlight,
-      TaskState::Aborted,
-    ],
-  };
-  let last = states.len() - 1;
-  Task::new(
-    id,
-    text.to_owned(),
-    predicted_files,
-    20,
-    session_id,
-    commit_sha.map(str::to_owned),
-    1_700_000_000.0,
-    None,
-    100,
-    Some("abc123".to_owned()),
-    file_list.map(|files| files.into_iter().map(str::to_owned).collect()),
-    is_session_reuse,
-    context_size_start,
-    states
-      .into_iter()
-      .enumerate()
-      .map(|(index, state)| {
-        TaskEvent::new(
-          index as i64 + 1,
-          state,
-          (index == last)
-            .then_some(reason)
-            .flatten()
-            .map(str::to_owned),
-          timestamp(1_700_000_000 + index as i64),
-        )
-        .unwrap()
+    ] {
+      let error = build(TaskSpec {
+        session_id: None,
+        ..task_in(state, None)
       })
-      .collect(),
-  )
+      .unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        format!("{state:?} task requires a session")
+      );
+    }
+  }
+
+  #[test]
+  fn should_fail_when_a_committed_state_has_no_commit() {
+    for state in [TaskState::CommittedUnverified, TaskState::Accepted] {
+      let error = build(TaskSpec {
+        commit_sha: None,
+        ..task_in(state, None)
+      })
+      .unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        format!("{state:?} task requires a commit")
+      );
+    }
+  }
+
+  #[test]
+  fn should_fail_when_session_reuse_is_claimed_without_a_session() {
+    let error = build(TaskSpec {
+      is_session_reuse: true,
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "session reuse requires an assigned session"
+    );
+  }
 }
 
-fn drafted_task_with_events(events: Vec<TaskEvent>) -> Result<Task> {
-  Task::new(
-    1,
-    "task".to_owned(),
-    0,
-    0,
-    Some(7),
-    None,
-    1_700_000_000.0,
-    None,
-    0,
-    None,
-    None,
-    false,
-    None,
-    events,
-  )
+mod validate_predicted_files {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let task = build(TaskSpec {
+      predicted_files: 2,
+      predicted_file_list: Some(vec!["src/a.rs", "src/b.rs"]),
+      ..drafted_task()
+    })
+    .unwrap();
+    assert_eq!(
+      task.predicted_file_list(),
+      Some(["src/a.rs".to_owned(), "src/b.rs".to_owned()].as_slice())
+    );
+  }
+
+  #[test]
+  fn should_accept_any_count_when_there_is_no_list() {
+    let task = build(TaskSpec {
+      predicted_files: 9,
+      predicted_file_list: None,
+      ..drafted_task()
+    })
+    .unwrap();
+    assert_eq!(task.predicted_files(), 9);
+  }
+
+  #[test]
+  fn should_accept_an_empty_list_with_a_zero_count() {
+    let task = build(TaskSpec {
+      predicted_files: 0,
+      predicted_file_list: Some(vec![]),
+      ..drafted_task()
+    })
+    .unwrap();
+    assert_eq!(task.predicted_file_list(), Some([].as_slice()));
+  }
+
+  #[test]
+  fn should_fail_when_the_count_does_not_match_the_list() {
+    let error = build(TaskSpec {
+      predicted_files: 1,
+      predicted_file_list: Some(vec!["src/a.rs", "src/b.rs"]),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "predicted file count 1 does not match 2 listed files"
+    );
+  }
+
+  #[test]
+  fn should_fail_when_a_listed_file_is_blank() {
+    let error = build(TaskSpec {
+      predicted_files: 2,
+      predicted_file_list: Some(vec!["src/a.rs", " "]),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "predicted_file_list cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_a_file_is_listed_twice() {
+    let error = build(TaskSpec {
+      predicted_files: 2,
+      predicted_file_list: Some(vec!["src/a.rs", "src/a.rs"]),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "predicted file list contains duplicate \"src/a.rs\""
+    );
+  }
 }
 
-#[test]
-fn exposes_every_field_without_mutators() {
-  let events = vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(1_699_999_900)).unwrap(),
-    TaskEvent::new(2, TaskState::Dispatched, None, timestamp(1_699_999_950)).unwrap(),
-    TaskEvent::new(
-      3,
-      TaskState::InFlight,
-      Some("retrying".to_owned()),
-      timestamp(1_700_000_000),
-    )
-    .unwrap(),
-  ];
-  let task = Task::new(
-    2,
-    "Implement the task".to_owned(),
-    2,
-    20,
-    Some(7),
-    None,
-    1_700_000_000.0,
-    Some(1),
-    100,
-    Some("abc123".to_owned()),
-    Some(vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()]),
-    true,
-    Some(40),
-    events.clone(),
-  )
-  .unwrap();
+mod validate_events {
+  use super::*;
 
-  assert_eq!(task.id(), 2);
-  assert_eq!(task.text(), "Implement the task");
-  assert_eq!(task.predicted_files(), 2);
-  assert_eq!(task.predicted_lines(), 20);
-  assert_eq!(task.state(), TaskState::InFlight);
-  assert_eq!(task.session_id(), Some(7));
-  assert_eq!(task.commit_sha(), None);
-  assert_eq!(task.created_at(), 1_700_000_000.0);
-  assert_eq!(task.retry_of_task_id(), Some(1));
-  assert_eq!(task.reason(), Some("retrying"));
-  assert_eq!(task.log_offset(), 100);
-  assert_eq!(task.base_head(), Some("abc123"));
-  assert_eq!(
-    task.predicted_file_list(),
-    Some(["src/a.rs".to_owned(), "src/b.rs".to_owned()].as_slice())
-  );
-  assert!(task.is_session_reuse());
-  assert_eq!(task.context_size_start(), Some(40));
-  assert_eq!(task.events(), events.as_slice());
-}
+  fn with_events(events: Vec<TaskEvent>) -> anyhow::Error {
+    build(TaskSpec {
+      events,
+      ..task_in(TaskState::Accepted, None)
+    })
+    .unwrap_err()
+  }
 
-#[test]
-fn requires_a_positive_identity() {
-  let error = task_with(
-    0,
-    "task",
-    0,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    None,
-    false,
-    None,
-  )
-  .unwrap_err();
+  #[test]
+  fn should_work() {
+    for state in TaskState::iter() {
+      let task = build(task_in(state, None)).unwrap();
+      assert_eq!(task.state(), state);
+    }
+  }
 
-  assert_eq!(error.to_string(), "id must be positive");
-}
+  #[test]
+  fn should_fail_when_there_are_no_events() {
+    let error = with_events(vec![]);
+    assert_eq!(error.to_string(), "a task requires at least one event");
+  }
 
-#[test]
-fn requires_nonblank_text_and_nonnegative_estimates() {
-  let blank = task_with(
-    1,
-    "  ",
-    0,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    None,
-    false,
-    None,
-  )
-  .unwrap_err();
-  let negative = task_with(
-    1,
-    "task",
-    -1,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    None,
-    false,
-    None,
-  )
-  .unwrap_err();
+  #[test]
+  fn should_fail_when_the_first_event_is_not_drafted() {
+    let error = with_events(vec![event(1, TaskState::Dispatched, None).unwrap()]);
+    assert_eq!(error.to_string(), "a task's first event must be drafted");
+  }
 
-  assert_eq!(blank.to_string(), "text cannot be blank");
-  assert_eq!(negative.to_string(), "predicted_files cannot be negative");
-}
+  #[test]
+  fn should_fail_when_two_events_share_an_id() {
+    let error = with_events(vec![
+      event(1, TaskState::Drafted, None).unwrap(),
+      event(1, TaskState::Dispatched, None).unwrap(),
+    ]);
+    assert_eq!(error.to_string(), "task events contain duplicate id 1");
+  }
 
-#[test]
-fn assigned_states_require_a_session() {
-  let error = task_with(
-    1,
-    "task",
-    0,
-    TaskState::InFlight,
-    None,
-    None,
-    None,
-    None,
-    false,
-    None,
-  )
-  .unwrap_err();
+  #[test]
+  fn should_fail_when_event_ids_do_not_increase() {
+    let error = with_events(vec![
+      event(2, TaskState::Drafted, None).unwrap(),
+      event(1, TaskState::Dispatched, None).unwrap(),
+    ]);
+    assert_eq!(
+      error.to_string(),
+      "task events are out of identity order: 1 follows 2"
+    );
+  }
 
-  assert_eq!(error.to_string(), "InFlight task requires a session");
-}
+  #[test]
+  fn should_fail_when_the_history_moves_backward() {
+    let error = with_events(vec![
+      event(1, TaskState::Drafted, None).unwrap(),
+      event(2, TaskState::InFlight, None).unwrap(),
+      event(3, TaskState::Dispatched, None).unwrap(),
+    ]);
+    assert_eq!(
+      error.to_string(),
+      "task cannot transition from in_flight to dispatched"
+    );
+  }
 
-#[test]
-fn completed_states_require_a_commit() {
-  let error = task_with(
-    1,
-    "task",
-    0,
-    TaskState::CommittedUnverified,
-    Some(2),
-    None,
-    None,
-    None,
-    false,
-    None,
-  )
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "CommittedUnverified task requires a commit"
-  );
-}
-
-#[test]
-fn a_task_aborted_before_it_committed_needs_no_commit() -> Result<()> {
-  let task = task_with(
-    1,
-    "task",
-    0,
-    TaskState::Aborted,
-    Some(2),
-    None,
-    Some("implementer stalled"),
-    None,
-    false,
-    None,
-  )?;
-
-  assert_eq!(task.state(), TaskState::Aborted);
-  assert_eq!(task.commit_sha(), None);
-  assert_eq!(task.reason(), Some("implementer stalled"));
-  Ok(())
-}
-
-#[test]
-fn a_task_cannot_retry_itself() {
-  let error = Task::new(
-    1,
-    "task".to_owned(),
-    0,
-    0,
-    None,
-    None,
-    1.0,
-    Some(1),
-    0,
-    None,
-    None,
-    false,
-    None,
-    vec![TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap()],
-  )
-  .unwrap_err();
-
-  assert_eq!(error.to_string(), "a task cannot retry itself");
-}
-
-#[test]
-fn predicted_file_count_must_match_the_list() {
-  let error = task_with(
-    1,
-    "task",
-    1,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    Some(vec!["a.rs", "b.rs"]),
-    false,
-    None,
-  )
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "predicted file count 1 does not match 2 listed files"
-  );
-}
-
-#[test]
-fn predicted_file_list_rejects_blank_and_duplicate_paths() {
-  let blank = task_with(
-    1,
-    "task",
-    1,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    Some(vec![" "]),
-    false,
-    None,
-  )
-  .unwrap_err();
-  let duplicate = task_with(
-    1,
-    "task",
-    2,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    Some(vec!["a.rs", "a.rs"]),
-    false,
-    None,
-  )
-  .unwrap_err();
-
-  assert_eq!(blank.to_string(), "predicted_file_list cannot be blank");
-  assert_eq!(
-    duplicate.to_string(),
-    "predicted file list contains duplicate \"a.rs\""
-  );
-}
-
-#[test]
-fn session_reuse_requires_a_session() {
-  let error = task_with(
-    1,
-    "task",
-    0,
-    TaskState::Drafted,
-    None,
-    None,
-    None,
-    None,
-    true,
-    None,
-  )
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "session reuse requires an assigned session"
-  );
-}
-
-#[test]
-fn requires_at_least_one_event() {
-  let error = drafted_task_with_events(Vec::new()).unwrap_err();
-
-  assert_eq!(error.to_string(), "a task requires at least one event");
-}
-
-#[test]
-fn lifecycle_starts_drafted() {
-  let error = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Dispatched, None, timestamp(1)).unwrap(),
-  ])
-  .unwrap_err();
-
-  assert_eq!(error.to_string(), "a task's first event must be drafted");
-}
-
-#[test]
-fn event_ids_are_unique_within_a_task() {
-  let error = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(2)).unwrap(),
-  ])
-  .unwrap_err();
-
-  assert_eq!(error.to_string(), "task events contain duplicate id 1");
-}
-
-#[test]
-fn backward_clock_steps_do_not_change_event_order() -> Result<()> {
-  let task = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(2)).unwrap(),
-    TaskEvent::new(2, TaskState::Dispatched, None, timestamp(1)).unwrap(),
-  ])?;
-
-  assert_eq!(task.events()[0].id(), 1);
-  assert_eq!(task.events()[1].id(), 2);
-  assert!(task.events()[1].created_at() < task.events()[0].created_at());
-  Ok(())
-}
-
-#[test]
-fn events_must_be_in_increasing_identity_order() {
-  let error = drafted_task_with_events(vec![
-    TaskEvent::new(2, TaskState::Drafted, None, timestamp(1)).unwrap(),
-    TaskEvent::new(1, TaskState::Dispatched, None, timestamp(2)).unwrap(),
-  ])
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "task events are out of identity order: 1 follows 2"
-  );
-}
-
-#[test]
-fn event_history_rejects_a_backward_transition() {
-  let error = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
-    TaskEvent::new(2, TaskState::InFlight, None, timestamp(2)).unwrap(),
-    TaskEvent::new(3, TaskState::Dispatched, None, timestamp(3)).unwrap(),
-  ])
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "task cannot transition from in_flight to dispatched"
-  );
-}
-
-#[test]
-fn event_history_rejects_anything_after_a_terminal_state() {
-  let error = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
-    TaskEvent::new(2, TaskState::Aborted, None, timestamp(2)).unwrap(),
-    TaskEvent::new(3, TaskState::Accepted, None, timestamp(3)).unwrap(),
-  ])
-  .unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    "task cannot transition from aborted to accepted"
-  );
-}
-
-#[test]
-fn a_task_may_abort_straight_from_drafted() -> Result<()> {
-  let task = drafted_task_with_events(vec![
-    TaskEvent::new(1, TaskState::Drafted, None, timestamp(1)).unwrap(),
-    TaskEvent::new(
-      2,
-      TaskState::Aborted,
-      Some("withdrawn".to_owned()),
-      timestamp(2),
-    )
-    .unwrap(),
-  ])?;
-
-  assert_eq!(task.state(), TaskState::Aborted);
-  assert_eq!(task.reason(), Some("withdrawn"));
-  Ok(())
+  #[test]
+  fn should_fail_when_the_history_continues_past_a_terminal_state() {
+    let error = with_events(vec![
+      event(1, TaskState::Drafted, None).unwrap(),
+      event(2, TaskState::Aborted, Some("stalled")).unwrap(),
+      event(3, TaskState::Accepted, None).unwrap(),
+    ]);
+    assert_eq!(
+      error.to_string(),
+      "task cannot transition from aborted to accepted"
+    );
+  }
 }

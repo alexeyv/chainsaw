@@ -43,8 +43,6 @@ pub enum Command {
     wait: bool,
     #[arg(long, default_value_t = 300)]
     timeout: u64,
-    #[arg(long)]
-    prepopulate: bool,
   },
   /// Manage tasks.
   Task {

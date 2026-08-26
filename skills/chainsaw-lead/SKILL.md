@@ -170,7 +170,7 @@ measured separately (`$SUP state` shows both).
    the author's frame itself in question — which records the override like `accept`
    does. Fresh is still the norm; the point is that the question gets asked at the
    moment of the launch, not read off `state` and forgotten. For a fresh session,
-   `$SUP prompt implementer-<n+1> "<reading turn>" --prepopulate` with:
+   `$SUP prompt implementer-<n+1> "<reading turn>"` with:
 
    ```text
    You are about to be given one task in this repository. This turn is preparation
@@ -190,13 +190,14 @@ measured separately (`$SUP state` shows both).
    bypasses them.
    Neither one gates this dispatch, and nothing forces you to run either; the task's own
    state name is what tells you it is still outstanding. Dispatch with
-   `$SUP dispatch <task-id> --to implementer-<n>` for the pre-populated fresh session,
+   `$SUP dispatch <task-id> --to implementer-<n>` for the fresh session,
    or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle earlier one
    (`--to` is a choice, not ceremony; without `--reuse` the supervisor refuses a session
    that already took a task). Either sends the task verbatim and then the implementer's
-   contract. A pre-populated session gets "these files changed since your reading
-   turn: [...]" first; a reused one gets the commits that landed since its own last turn
-   and the files they touched *outside* the task's file set — nothing about the files it
+   contract. A fresh session gets "these files changed since your session started:
+   [...]" first when the tree has moved since its launch; a reused one gets the commits
+   that landed since its own last turn and the files they touched *outside* the task's
+   file set — nothing about the files it
    is about to edit (rationale at step 6). `--reuse` refuses, measured not judged, when
    that session is in flight, its last task aborted, its context is over
    `reuse-max-context` (60k), or the tree moved more than `reuse-max-stale-lines` (200

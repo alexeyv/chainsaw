@@ -1,40 +1,55 @@
-use chrono::{DateTime, Utc};
+use crate::domain::test_helpers::{format_observation, observation};
 
-use super::Observation;
+mod new {
+  use super::*;
 
-fn timestamp() -> DateTime<Utc> {
-  DateTime::from_timestamp(1_700_000_000, 0).unwrap()
-}
+  #[test]
+  fn should_work() {
+    let observation = observation(3, Some(5), "the gate ran twice").unwrap();
 
-#[test]
-fn exposes_valid_informational_context() {
-  let observation =
-    Observation::new(3, Some(5), "review complete".to_owned(), timestamp()).unwrap();
+    assert_eq!(
+      format_observation(&observation),
+      r#"id: 3
+task_id: 5
+text: "the gate ran twice"
+created_at: 2023-11-14T22:13:20Z"#
+    );
+  }
 
-  assert_eq!(observation.id(), 3);
-  assert_eq!(observation.task_id(), Some(5));
-  assert_eq!(observation.text(), "review complete");
-  assert_eq!(observation.created_at(), timestamp());
-}
+  #[test]
+  fn should_accept_a_run_wide_observation_with_no_task() {
+    let observation = observation(3, None, "run wide").unwrap();
 
-#[test]
-fn validates_identity_task_and_text() {
-  assert_eq!(
-    Observation::new(0, None, "context".to_owned(), timestamp())
-      .unwrap_err()
-      .to_string(),
-    "id must be positive"
-  );
-  assert_eq!(
-    Observation::new(1, Some(0), "context".to_owned(), timestamp())
-      .unwrap_err()
-      .to_string(),
-    "task_id must be positive"
-  );
-  assert_eq!(
-    Observation::new(1, None, " ".to_owned(), timestamp())
-      .unwrap_err()
-      .to_string(),
-    "text cannot be blank"
-  );
+    assert_eq!(
+      format_observation(&observation),
+      r#"id: 3
+task_id: none
+text: "run wide"
+created_at: 2023-11-14T22:13:20Z"#
+    );
+  }
+
+  #[test]
+  fn should_fail_when_the_id_is_not_positive() {
+    for id in [i64::MIN, -1, 0] {
+      let error = observation(id, Some(5), "text").unwrap_err();
+      assert_eq!(error.to_string(), "id must be positive");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_task_id_is_not_positive() {
+    for task_id in [i64::MIN, -1, 0] {
+      let error = observation(3, Some(task_id), "text").unwrap_err();
+      assert_eq!(error.to_string(), "task_id must be positive");
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_text_is_blank() {
+    for text in ["", " ", "\n\t"] {
+      let error = observation(3, Some(5), text).unwrap_err();
+      assert_eq!(error.to_string(), "text cannot be blank");
+    }
+  }
 }

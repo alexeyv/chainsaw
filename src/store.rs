@@ -13,7 +13,7 @@ create table config(key text primary key, value text);
 create table sessions(id integer primary key, name text not null, role text,
   pane_id text, tab_id text, external_session_id text unique, started_at real,
   context int default 0, context_max int default 0, last_growth real,
-  kicked_at real, prepopulated_at real, stopped_at real, log_path text);
+  kicked_at real, stopped_at real, log_path text, launched_head text);
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at real, retry_of_task_id int references tasks(id),
@@ -60,7 +60,7 @@ pub struct Session {
   pub context_max: i64,
   pub last_growth: Option<f64>,
   pub kicked_at: Option<f64>,
-  pub prepopulated_at: Option<f64>,
+  pub launched_head: Option<String>,
   pub stopped_at: Option<f64>,
 }
 
@@ -223,7 +223,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
       .unwrap_or_default(),
     last_growth: row.get("last_growth")?,
     kicked_at: row.get("kicked_at")?,
-    prepopulated_at: row.get("prepopulated_at")?,
+    launched_head: row.get("launched_head")?,
     stopped_at: row.get("stopped_at")?,
   })
 }

@@ -71,17 +71,7 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       text,
       wait,
       timeout,
-      prepopulate,
-    } => {
-      cmd_prompt(store, runtime, &name, &text, wait, timeout)?;
-      if prepopulate && let Some(session) = store.latest_session_named(&name)? {
-        store.db.execute(
-          "update sessions set prepopulated_at=? where id=?",
-          params![now(), session.id],
-        )?;
-      }
-      Ok(())
-    }
+    } => cmd_prompt(store, runtime, &name, &text, wait, timeout),
     Command::Task { action } => match action {
       TaskCommand::New {
         files,
@@ -422,13 +412,14 @@ fn cmd_launch(
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
+  let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
   store.db.execute(
     "update sessions set stopped_at=? where name=? and stopped_at is null",
     params![now(), name],
   )?;
   store.db.execute(
-        "insert into sessions(name,role,pane_id,tab_id,external_session_id,started_at,last_growth) values(?,?,?,?,?,?,?)",
-        params![name, options.role, pane_id, tab_id, external_session_id, now(), now()],
+        "insert into sessions(name,role,pane_id,tab_id,external_session_id,started_at,last_growth,launched_head) values(?,?,?,?,?,?,?,?)",
+        params![name, options.role, pane_id, tab_id, external_session_id, now(), now(), launched_head],
   )?;
   store.event("launch", name)?;
   println!(
@@ -723,26 +714,8 @@ fn cmd_dispatch(
 
   let preamble = if reuse {
     reuse_preamble(store, &task, &session)?
-  } else if session.prepopulated_at.is_some() {
-    let transaction = store.db.unchecked_transaction()?;
-    let since = task::all(&transaction)?.into_iter().rev().find(|task| {
-      matches!(
-        task.state(),
-        TaskState::CommittedUnverified | TaskState::Accepted
-      ) && task.commit_sha().is_some()
-    });
-    transaction.commit()?;
-    if let Some(sha) = since.and_then(|task| task.commit_sha().map(str::to_owned)) {
-      let files = git_stdout(store, &["show", "--name-only", "--format=", &sha])?;
-      format!(
-        "These files changed since your reading turn; read them first: {}\n\n",
-        files.lines().collect::<Vec<_>>().join(", ")
-      )
-    } else {
-      String::new()
-    }
   } else {
-    String::new()
+    files_changed_since_launch(store, &session)?
   };
 
   let prompt = format!(
@@ -784,11 +757,23 @@ fn cmd_dispatch(
   } else {
     println!("task {task_id} in flight on {implementer}");
   }
-  store.db.execute(
-    "update sessions set prepopulated_at=NULL where id=?",
-    [session.id],
-  )?;
   Ok(())
+}
+
+/// The session may have read the tree before its task arrived; name what moved
+/// since it started so it rereads that first. Empty when nothing has.
+fn files_changed_since_launch(store: &Store, session: &Session) -> Result<String> {
+  let Some(head) = session.launched_head.as_deref() else {
+    return Ok(String::new());
+  };
+  let files = git_stdout(store, &["diff", "--name-only", &format!("{head}..HEAD")])?;
+  if files.is_empty() {
+    return Ok(String::new());
+  }
+  Ok(format!(
+    "These files changed since your session started; read them first: {}\n\n",
+    files.lines().collect::<Vec<_>>().join(", ")
+  ))
 }
 
 fn short_sha(sha: &str) -> &str {
@@ -1277,9 +1262,6 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
     let mut flags = String::new();
     if session.role == "implementer" && session.context > IMPLEMENTER_LIMIT_TOKENS {
       flags.push_str(" OVER-LIMIT");
-    }
-    if session.prepopulated_at.is_some() {
-      flags.push_str(" pre-populated");
     }
     if session.role == "implementer"
       && last_task_on(store, session.id)?.is_some()

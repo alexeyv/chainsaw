@@ -1,101 +1,103 @@
-use chrono::{DateTime, Utc};
+use crate::domain::test_helpers::{calibration, calibration_measuring, format_calibration};
 
-use super::Calibration;
+mod new {
+  use super::*;
 
-fn timestamp(seconds: i64) -> DateTime<Utc> {
-  DateTime::from_timestamp(seconds, 0).unwrap()
-}
+  #[test]
+  fn should_work() {
+    let calibration = calibration(3, 7, Some(12.5)).unwrap();
 
-fn calibration_with(
-  id: i64,
-  task_id: i64,
-  wall_seconds: Option<f64>,
-  values: [i64; 6],
-) -> anyhow::Result<Calibration> {
-  Calibration::new(
-    id,
-    task_id,
-    values[0],
-    values[1],
-    values[2],
-    values[3],
-    wall_seconds,
-    timestamp(1_700_000_000),
-    values[4],
-    values[5],
-  )
-}
-
-#[test]
-fn constructor_exposes_every_field_without_mutators() {
-  let created_at = timestamp(1_700_000_000);
-  let calibration = Calibration::new(3, 7, 2, 20, 4, 35, Some(12.5), created_at, 100, 900).unwrap();
-
-  assert_eq!(calibration.id(), 3);
-  assert_eq!(calibration.task_id(), 7);
-  assert_eq!(calibration.predicted_files(), 2);
-  assert_eq!(calibration.predicted_lines(), 20);
-  assert_eq!(calibration.actual_files(), 4);
-  assert_eq!(calibration.actual_lines(), 35);
-  assert_eq!(calibration.wall_seconds(), Some(12.5));
-  assert_eq!(calibration.created_at(), created_at);
-  assert_eq!(calibration.context_size_start(), 100);
-  assert_eq!(calibration.context_size_end(), 900);
-}
-
-#[test]
-fn constructor_requires_a_positive_id() {
-  for id in [i64::MIN, -1, 0] {
-    let error = calibration_with(id, 7, None, [0; 6]).unwrap_err();
-    assert_eq!(error.to_string(), "id must be positive");
+    assert_eq!(
+      format_calibration(&calibration),
+      r#"id: 3
+task_id: 7
+predicted_files: 2
+predicted_lines: 20
+actual_files: 4
+actual_lines: 35
+wall_seconds: 12.5
+created_at: 2023-11-14T22:13:20Z
+context_size_start: 100
+context_size_end: 900"#
+    );
   }
-}
 
-#[test]
-fn constructor_requires_a_positive_task_id() {
-  for task_id in [i64::MIN, -1, 0] {
-    let error = calibration_with(1, task_id, None, [0; 6]).unwrap_err();
-    assert_eq!(error.to_string(), "task_id must be positive");
+  #[test]
+  fn should_accept_an_absent_wall_time() {
+    let calibration = calibration(3, 7, None).unwrap();
+    assert_eq!(calibration.wall_seconds(), None);
   }
-}
 
-#[test]
-fn constructor_requires_nonnegative_measurements() {
-  let fields = [
-    "predicted_files",
-    "predicted_lines",
-    "actual_files",
-    "actual_lines",
-    "context_size_start",
-    "context_size_end",
-  ];
-  for (index, field) in fields.into_iter().enumerate() {
-    let mut values = [0; 6];
-    values[index] = -1;
-    let error = calibration_with(1, 7, None, values).unwrap_err();
-    assert_eq!(error.to_string(), format!("{field} cannot be negative"));
+  #[test]
+  fn should_accept_zero_measurements_and_an_unchanged_context() {
+    let calibration = calibration_measuring(3, 7, Some(0.0), [0, 0, 0, 0, 500, 500]).unwrap();
+
+    assert_eq!(
+      format_calibration(&calibration),
+      r#"id: 3
+task_id: 7
+predicted_files: 0
+predicted_lines: 0
+actual_files: 0
+actual_lines: 0
+wall_seconds: 0
+created_at: 2023-11-14T22:13:20Z
+context_size_start: 500
+context_size_end: 500"#
+    );
   }
-}
 
-#[test]
-fn constructor_requires_context_to_end_at_or_after_its_start() {
-  let error = calibration_with(1, 7, None, [0, 0, 0, 0, 2, 1]).unwrap_err();
-  assert_eq!(
-    error.to_string(),
-    "context_size_end cannot precede context_size_start"
-  );
-}
+  #[test]
+  fn should_fail_when_the_id_is_not_positive() {
+    for id in [i64::MIN, -1, 0] {
+      let error = calibration(id, 7, None).unwrap_err();
+      assert_eq!(error.to_string(), "id must be positive");
+    }
+  }
 
-#[test]
-fn constructor_allows_an_absent_wall_time_but_rejects_invalid_values() {
-  assert!(calibration_with(1, 7, None, [0; 6]).is_ok());
-  assert!(calibration_with(1, 7, Some(0.0), [0; 6]).is_ok());
+  #[test]
+  fn should_fail_when_the_task_id_is_not_positive() {
+    for task_id in [i64::MIN, -1, 0] {
+      let error = calibration(3, task_id, None).unwrap_err();
+      assert_eq!(error.to_string(), "task_id must be positive");
+    }
+  }
 
-  for wall_seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-    let error = calibration_with(1, 7, Some(wall_seconds), [0; 6]).unwrap_err();
+  #[test]
+  fn should_fail_when_a_measurement_is_negative() {
+    let fields = [
+      "predicted_files",
+      "predicted_lines",
+      "actual_files",
+      "actual_lines",
+      "context_size_start",
+      "context_size_end",
+    ];
+    for (index, field) in fields.into_iter().enumerate() {
+      let mut measurements = [0; 6];
+      measurements[index] = -1;
+      let error = calibration_measuring(3, 7, None, measurements).unwrap_err();
+      assert_eq!(error.to_string(), format!("{field} cannot be negative"));
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_wall_time_is_negative_or_not_finite() {
+    for seconds in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+      let error = calibration(3, 7, Some(seconds)).unwrap_err();
+      assert_eq!(
+        error.to_string(),
+        "wall_seconds must be finite and nonnegative"
+      );
+    }
+  }
+
+  #[test]
+  fn should_fail_when_the_context_ends_before_it_starts() {
+    let error = calibration_measuring(3, 7, None, [0, 0, 0, 0, 900, 899]).unwrap_err();
     assert_eq!(
       error.to_string(),
-      "wall_seconds must be finite and nonnegative"
+      "context_size_end cannot precede context_size_start"
     );
   }
 }

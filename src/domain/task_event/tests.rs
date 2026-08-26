@@ -1,50 +1,48 @@
-use chrono::{DateTime, Utc};
-use strum::IntoEnumIterator;
-
-use super::TaskEvent;
 use crate::domain::TaskState;
+use crate::domain::test_helpers::{event, format_event};
 
-fn timestamp(seconds: i64) -> DateTime<Utc> {
-  DateTime::from_timestamp(seconds, 0).unwrap()
-}
+mod new {
+  use super::*;
 
-#[test]
-fn constructor_exposes_every_field_without_mutators() {
-  let created_at = timestamp(1_700_000_000);
-  let event = TaskEvent::new(3, TaskState::InFlight, Some("reuse".to_owned()), created_at).unwrap();
+  #[test]
+  fn should_work() {
+    let event = event(3, TaskState::Aborted, Some("implementer stalled")).unwrap();
 
-  assert_eq!(event.id(), 3);
-  assert_eq!(event.state(), TaskState::InFlight);
-  assert_eq!(event.reason(), Some("reuse"));
-  assert_eq!(event.created_at(), created_at);
-}
-
-#[test]
-fn a_reason_is_optional_on_every_transition() {
-  let event = TaskEvent::new(1, TaskState::CommittedUnverified, None, timestamp(1)).unwrap();
-
-  assert_eq!(event.reason(), None);
-}
-
-#[test]
-fn constructor_accepts_every_state_variant() {
-  for (index, state) in TaskState::iter().enumerate() {
-    assert!(TaskEvent::new(index as i64 + 1, state, None, timestamp(1)).is_ok());
+    assert_eq!(
+      format_event(&event),
+      r#"id: 3
+state: aborted
+reason: "implementer stalled"
+created_at: 2023-11-14T22:13:23Z"#
+    );
   }
-}
 
-#[test]
-fn constructor_requires_a_positive_id() {
-  for id in [i64::MIN, -1, 0] {
-    let error = TaskEvent::new(id, TaskState::Drafted, None, timestamp(1)).unwrap_err();
-    assert_eq!(error.to_string(), "id must be positive");
+  #[test]
+  fn should_accept_an_event_without_a_reason() {
+    let event = event(1, TaskState::Drafted, None).unwrap();
+
+    assert_eq!(
+      format_event(&event),
+      r#"id: 1
+state: drafted
+reason: none
+created_at: 2023-11-14T22:13:21Z"#
+    );
   }
-}
 
-#[test]
-fn constructor_rejects_a_blank_reason() {
-  let error =
-    TaskEvent::new(1, TaskState::Aborted, Some("  ".to_owned()), timestamp(1)).unwrap_err();
+  #[test]
+  fn should_fail_when_the_id_is_not_positive() {
+    for id in [i64::MIN, -1, 0] {
+      let error = event(id, TaskState::Drafted, None).unwrap_err();
+      assert_eq!(error.to_string(), "id must be positive");
+    }
+  }
 
-  assert_eq!(error.to_string(), "reason cannot be blank");
+  #[test]
+  fn should_fail_when_the_reason_is_blank() {
+    for reason in ["", " ", "\n\t"] {
+      let error = event(3, TaskState::Aborted, Some(reason)).unwrap_err();
+      assert_eq!(error.to_string(), "reason cannot be blank");
+    }
+  }
 }
