@@ -50,27 +50,6 @@ pub struct Finding {
 }
 
 impl Finding {
-  pub fn new(
-    id: i64,
-    task_id: i64,
-    description: String,
-    verdict: FindingVerdict,
-    verdict_reason: String,
-    fix_task_id: Option<i64>,
-    created_at: DateTime<Utc>,
-  ) -> Result<Self> {
-    Self::from_record(
-      id,
-      task_id,
-      description,
-      Some(verdict),
-      Some(verdict_reason),
-      fix_task_id,
-      created_at,
-      Some(created_at),
-    )
-  }
-
   pub fn registered(
     id: i64,
     task_id: i64,
@@ -196,28 +175,31 @@ mod tests {
     verdict_reason: &str,
     fix_task_id: Option<i64>,
   ) -> anyhow::Result<Finding> {
-    Finding::new(
+    Finding::from_record(
       id,
       task_id,
       description.to_owned(),
-      verdict,
-      verdict_reason.to_owned(),
+      Some(verdict),
+      Some(verdict_reason.to_owned()),
       fix_task_id,
       timestamp(1_700_000_000),
+      Some(timestamp(1_700_000_001)),
     )
   }
 
   #[test]
-  fn constructor_exposes_every_field_without_mutators() {
+  fn resolved_record_exposes_every_field_without_mutators() {
     let created_at = timestamp(1_700_000_000);
-    let finding = Finding::new(
+    let resolved_at = timestamp(1_700_000_001);
+    let finding = Finding::from_record(
       3,
       5,
       "verification can accept the wrong commit".to_owned(),
-      FindingVerdict::Task,
-      "the check trusts an ambiguous log entry".to_owned(),
+      Some(FindingVerdict::Task),
+      Some("the check trusts an ambiguous log entry".to_owned()),
       Some(7),
       created_at,
+      Some(resolved_at),
     )
     .unwrap();
 
@@ -234,7 +216,7 @@ mod tests {
     );
     assert_eq!(finding.fix_task_id(), Some(7));
     assert_eq!(finding.created_at(), created_at);
-    assert_eq!(finding.resolved_at(), Some(created_at));
+    assert_eq!(finding.resolved_at(), Some(resolved_at));
     assert!(finding.is_resolved());
   }
 

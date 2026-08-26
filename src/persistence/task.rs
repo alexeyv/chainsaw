@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{FindingVerdict, Task, TaskEvent, TaskState};
+use crate::domain::{Task, TaskEvent, TaskState};
 
 struct TaskRow {
   id: i64,
@@ -130,26 +130,6 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
-pub fn record_finding(
-  transaction: &Transaction<'_>,
-  task: &Task,
-  description: &str,
-  verdict: FindingVerdict,
-  verdict_reason: &str,
-  fix_task_id: Option<i64>,
-) -> Result<Task> {
-  super::finding::insert(
-    transaction,
-    task.id(),
-    description,
-    verdict,
-    verdict_reason,
-    fix_task_id,
-  )?;
-  get(transaction, task.id())?
-    .with_context(|| format!("task {} disappeared while recording a finding", task.id()))
-}
-
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
   let predicted_file_list = row
     .get::<_, Option<String>>("predicted_file_list")?
@@ -175,7 +155,6 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
 
 fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
   let events = load_events(transaction, row.id)?;
-  let findings = super::finding::for_task(transaction, row.id)?;
   Task::new(
     row.id,
     row.text,
@@ -193,7 +172,6 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.context_size_start,
     row.context_size_end,
     events,
-    findings,
   )
 }
 
@@ -227,8 +205,8 @@ mod tests {
   use anyhow::Result;
   use chrono::Utc;
 
-  use super::{all, create, get, predecessor, record_finding, tasks_for_session};
-  use crate::domain::{FindingVerdict, TaskState};
+  use super::{all, create, get, predecessor, tasks_for_session};
+  use crate::domain::TaskState;
   use crate::persistence::task_event;
   use crate::persistence::test_fixture::database;
 
@@ -283,7 +261,6 @@ mod tests {
     assert!(task.created_at() <= after);
     assert_eq!(task.events().len(), 1);
     assert_eq!(task.events()[0].state(), TaskState::Drafted);
-    assert!(task.findings().is_empty());
     assert_eq!(
       stored,
       (
@@ -381,22 +358,6 @@ mod tests {
     let transaction = db.transaction()?;
     let original = create(&transaction, "inspect snapshots", 0, 20, None, None)?;
     let second_event = task_event::create(&transaction, original.id(), TaskState::Drafted)?;
-    let first_snapshot = record_finding(
-      &transaction,
-      &original,
-      "first finding",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
-    let second_snapshot = record_finding(
-      &transaction,
-      &first_snapshot,
-      "second finding",
-      FindingVerdict::Dropped,
-      "already covered",
-      None,
-    )?;
     let loaded = get(&transaction, original.id())?.expect("created task");
     transaction.commit()?;
 
@@ -408,18 +369,7 @@ mod tests {
         .collect::<Vec<_>>(),
       vec![original.events()[0].id(), second_event.id()]
     );
-    assert_eq!(
-      loaded
-        .findings()
-        .iter()
-        .map(|finding| finding.id())
-        .collect::<Vec<_>>(),
-      vec![
-        first_snapshot.findings()[0].id(),
-        second_snapshot.findings()[1].id()
-      ]
-    );
-    assert_eq!(loaded, second_snapshot);
+    assert_eq!(loaded.id(), original.id());
     Ok(())
   }
 
@@ -432,32 +382,15 @@ mod tests {
 
     let first = create(&transaction, "first", 0, 10, None, None)?;
     task_event::create(&transaction, first.id(), TaskState::Drafted)?;
-    let first = record_finding(
-      &transaction,
-      &first,
-      "first task finding",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
+    let first = get(&transaction, first.id())?.expect("first task");
     let second = create(&transaction, "second", 0, 20, None, None)?;
-    let second = record_finding(
-      &transaction,
-      &second,
-      "second task finding",
-      FindingVerdict::Dropped,
-      "already covered",
-      None,
-    )?;
 
     let tasks = all(&transaction)?;
     transaction.commit()?;
 
     assert_eq!(tasks, vec![first, second]);
     assert_eq!(tasks[0].events().len(), 2);
-    assert_eq!(tasks[0].findings().len(), 1);
     assert_eq!(tasks[1].events().len(), 1);
-    assert_eq!(tasks[1].findings().len(), 1);
     Ok(())
   }
 
@@ -483,31 +416,15 @@ mod tests {
     )?;
     transaction.execute("update tasks set session_id=8 where id=?", [other.id()])?;
     task_event::create(&transaction, second.id(), TaskState::Drafted)?;
-    let first = record_finding(
-      &transaction,
-      &first,
-      "first target finding",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
-    let second = record_finding(
-      &transaction,
-      &second,
-      "second target finding",
-      FindingVerdict::Dropped,
-      "already covered",
-      None,
-    )?;
+    let first = get(&transaction, first.id())?.expect("first target task");
+    let second = get(&transaction, second.id())?.expect("second target task");
 
     let tasks = tasks_for_session(&transaction, 7)?;
     transaction.commit()?;
 
     assert_eq!(tasks, vec![first, second]);
     assert_eq!(tasks[0].events().len(), 1);
-    assert_eq!(tasks[0].findings().len(), 1);
     assert_eq!(tasks[1].events().len(), 2);
-    assert_eq!(tasks[1].findings().len(), 1);
     Ok(())
   }
 
@@ -522,81 +439,13 @@ mod tests {
     let second = create(&transaction, "second", 0, 20, None, None)?;
     let third = create(&transaction, "third", 0, 30, None, None)?;
     task_event::create(&transaction, second.id(), TaskState::Drafted)?;
-    let second = record_finding(
-      &transaction,
-      &second,
-      "predecessor finding",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
+    let second = get(&transaction, second.id())?.expect("second task");
 
     assert_eq!(predecessor(&transaction, first.id())?, None);
     assert_eq!(predecessor(&transaction, third.id())?, Some(second.clone()));
     assert_eq!(predecessor(&transaction, i64::MAX)?, Some(third));
     assert_eq!(second.events().len(), 2);
-    assert_eq!(second.findings().len(), 1);
     transaction.commit()?;
-    Ok(())
-  }
-
-  #[test]
-  fn recording_a_finding_returns_a_new_snapshot_and_commits_it() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let original = create(&transaction, "keep snapshots immutable", 0, 10, None, None)?;
-    transaction.commit()?;
-
-    let original_snapshot = original.clone();
-    let transaction = db.transaction()?;
-    let updated = record_finding(
-      &transaction,
-      &original,
-      "a defect",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
-
-    assert_eq!(original, original_snapshot);
-    assert!(original.findings().is_empty());
-    assert_eq!(updated.findings().len(), 1);
-    assert_eq!(updated.findings()[0].task_id(), original.id());
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    assert_eq!(get(&transaction, original.id())?, Some(updated));
-    transaction.commit()?;
-    Ok(())
-  }
-
-  #[test]
-  fn rolling_back_a_recorded_finding_preserves_the_stored_snapshot() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let original = create(&transaction, "roll back findings", 0, 10, None, None)?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    let updated = record_finding(
-      &transaction,
-      &original,
-      "temporary finding",
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
-    assert_eq!(updated.findings().len(), 1);
-    transaction.rollback()?;
-
-    let transaction = db.transaction()?;
-    let loaded = get(&transaction, original.id())?.expect("created task");
-    transaction.commit()?;
-
-    assert_eq!(loaded, original);
-    assert!(loaded.findings().is_empty());
     Ok(())
   }
 }

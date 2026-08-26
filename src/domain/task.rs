@@ -3,7 +3,7 @@ use std::fmt;
 
 use anyhow::{Result, bail};
 
-use super::{finding::Finding, task_event::TaskEvent};
+use super::task_event::TaskEvent;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskState {
@@ -89,7 +89,6 @@ pub struct Task {
   context_size_start: Option<i64>,
   context_size_end: Option<i64>,
   events: Vec<TaskEvent>,
-  findings: Vec<Finding>,
 }
 
 impl Task {
@@ -111,7 +110,6 @@ impl Task {
     context_size_start: Option<i64>,
     context_size_end: Option<i64>,
     events: Vec<TaskEvent>,
-    findings: Vec<Finding>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("text", &text)?;
@@ -132,7 +130,6 @@ impl Task {
     require_optional_nonnegative("context_size_start", context_size_start)?;
     require_optional_nonnegative("context_size_end", context_size_end)?;
     validate_events(&events)?;
-    validate_findings(id, &findings)?;
     let state = events.last().expect("validated nonempty event log").state();
 
     if state.requires_session() && session_id.is_none() {
@@ -169,7 +166,6 @@ impl Task {
       context_size_start,
       context_size_end,
       events,
-      findings,
     })
   }
 
@@ -243,10 +239,6 @@ impl Task {
 
   pub fn events(&self) -> &[TaskEvent] {
     &self.events
-  }
-
-  pub fn findings(&self) -> &[Finding] {
-    &self.findings
   }
 }
 
@@ -340,30 +332,13 @@ fn validate_events(events: &[TaskEvent]) -> Result<()> {
   Ok(())
 }
 
-fn validate_findings(task_id: i64, findings: &[Finding]) -> Result<()> {
-  let mut ids = HashSet::new();
-  for finding in findings {
-    if finding.task_id() != task_id {
-      bail!(
-        "finding {} belongs to task {}, not task {task_id}",
-        finding.id(),
-        finding.task_id()
-      );
-    }
-    if !ids.insert(finding.id()) {
-      bail!("task findings contain duplicate id {}", finding.id());
-    }
-  }
-  Ok(())
-}
-
 #[cfg(test)]
 mod tests {
   use anyhow::Result;
   use chrono::{DateTime, Utc};
 
   use super::{Task, TaskState};
-  use crate::domain::{Finding, FindingVerdict, TaskEvent};
+  use crate::domain::TaskEvent;
 
   fn timestamp(seconds: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(seconds, 0).unwrap()
@@ -417,7 +392,6 @@ mod tests {
       context_size_start,
       context_size_end,
       vec![TaskEvent::new(1, state, timestamp(1_700_000_000)).unwrap()],
-      Vec::new(),
     )
   }
 
@@ -439,7 +413,6 @@ mod tests {
       None,
       None,
       events,
-      Vec::new(),
     )
   }
 
@@ -448,28 +421,6 @@ mod tests {
     let events = vec![
       TaskEvent::new(1, TaskState::Drafted, timestamp(1_699_999_900)).unwrap(),
       TaskEvent::new(2, TaskState::InFlight, timestamp(1_700_000_000)).unwrap(),
-    ];
-    let findings = vec![
-      Finding::new(
-        3,
-        2,
-        "first finding".to_owned(),
-        FindingVerdict::Dropped,
-        "not actionable".to_owned(),
-        None,
-        timestamp(1_700_000_001),
-      )
-      .unwrap(),
-      Finding::new(
-        4,
-        2,
-        "second finding".to_owned(),
-        FindingVerdict::Task,
-        "worth fixing".to_owned(),
-        Some(3),
-        timestamp(1_700_000_002),
-      )
-      .unwrap(),
     ];
     let task = Task::new(
       2,
@@ -488,7 +439,6 @@ mod tests {
       Some(40),
       Some(75),
       events.clone(),
-      findings.clone(),
     )
     .unwrap();
 
@@ -512,7 +462,6 @@ mod tests {
     assert_eq!(task.context_size_start(), Some(40));
     assert_eq!(task.context_size_end(), Some(75));
     assert_eq!(task.events(), events.as_slice());
-    assert_eq!(task.findings(), findings.as_slice());
   }
 
   #[test]
@@ -649,7 +598,6 @@ mod tests {
       None,
       None,
       vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
-      Vec::new(),
     )
     .unwrap_err();
 
@@ -787,87 +735,5 @@ mod tests {
     .unwrap_err();
 
     assert_eq!(error.to_string(), "task event 2 occurs before event 1");
-  }
-
-  #[test]
-  fn accepts_an_empty_finding_collection() {
-    let task = drafted_task_with_events(vec![
-      TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
-    ])
-    .unwrap();
-
-    assert!(task.findings().is_empty());
-  }
-
-  #[test]
-  fn rejects_a_finding_owned_by_another_task() {
-    let finding = Finding::new(
-      1,
-      2,
-      "a defect".to_owned(),
-      FindingVerdict::Dropped,
-      "not actionable".to_owned(),
-      None,
-      timestamp(2),
-    )
-    .unwrap();
-    let error = Task::new(
-      1,
-      "task".to_owned(),
-      0,
-      0,
-      None,
-      None,
-      1.0,
-      None,
-      None,
-      0,
-      None,
-      None,
-      false,
-      None,
-      None,
-      vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
-      vec![finding],
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "finding 1 belongs to task 2, not task 1");
-  }
-
-  #[test]
-  fn rejects_duplicate_finding_identities() {
-    let finding = Finding::new(
-      1,
-      1,
-      "a defect".to_owned(),
-      FindingVerdict::Dropped,
-      "not actionable".to_owned(),
-      None,
-      timestamp(2),
-    )
-    .unwrap();
-    let error = Task::new(
-      1,
-      "task".to_owned(),
-      0,
-      0,
-      None,
-      None,
-      1.0,
-      None,
-      None,
-      0,
-      None,
-      None,
-      false,
-      None,
-      None,
-      vec![TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap()],
-      vec![finding.clone(), finding],
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "task findings contain duplicate id 1");
   }
 }

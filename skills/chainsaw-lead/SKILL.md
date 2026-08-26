@@ -31,11 +31,59 @@ the commentator's findings — not implementation detail.
    from yours. After that, the only messages
    it receives are a content-free nudge (the supervisor's staleness kick) and
    `/compact` (the supervisor does that too). Never leads, checklists, summaries, or
-   "confirm X". Dispositions go to it only through the ledger on disk.
+   "confirm X". It records review output and reads resolutions only through `$SUP`.
 5. Models are set explicitly per role; the supervisor's defaults are in
    `DEFAULTS.md`.
 
 Human steering in any pane is authoritative and overrides this loop.
+
+## Review protocol
+
+The supervisor database and CLI are the only review communication channel. Never
+reconstruct review state from session logs or ad hoc files. Observations and findings
+have different semantics:
+
+- An **observation** is chronological, informational context and requires no verdict.
+  It may concern one task or the whole run.
+- A **finding** is a task-specific concern requiring your judgment. Its numeric id is
+  stable for the run and it remains unresolved until a `resolve` command succeeds.
+
+Start with observation cursor `0` and an empty map of unresolved findings keyed by
+finding id. Poll run-wide so no task's review is omitted:
+
+```sh
+$SUP poll --after-observation 0
+$SUP poll --after-observation "$OBSERVATION_CURSOR"
+```
+
+The JSON response contains `observation_cursor`, `observations`, and `findings`. After
+each successful poll, replace `OBSERVATION_CURSOR` with the returned cursor exactly;
+that is the only cursor to use for the next poll. This advances past delivered
+observations so they are not repeated. Treat observations as context only. Add every
+returned finding to the unresolved map and keep it there until its resolution command
+succeeds; findings are returned again on every poll while unresolved by design.
+
+Resolve a finding you reject with a concrete verdict reason:
+
+```sh
+$SUP resolve 17 --verdict dropped --reason "Already enforced by the parser invariant"
+```
+
+When a finding requires work, create the fix task first, preserve the task number
+printed by `task new`, and only then resolve the stable finding number with that task:
+
+```sh
+FIX_TASK=$($SUP task new --files src/parser.rs,tests/parser.rs \
+  --predicted-lines 35 < fix-task.md)
+$SUP resolve 17 --verdict task --fix-task "$FIX_TASK" \
+  --reason "The parser accepts an invalid empty segment"
+```
+
+If `resolve` fails, the finding is still unresolved. The database is authoritative;
+never infer a resolution from a drafted task or from a finding disappearing from local
+notes. Carry both the exact observation cursor and the full unresolved map (stable
+finding number, source task, description, and current judgment) through `/compact`,
+continuation prompts, and handoffs.
 
 ## Writing a task
 
@@ -123,10 +171,9 @@ measured separately (`$SUP state` shows both).
    supervisor; the command returns as soon as the prompt has landed, not
    when the turn ends, so you are free while the implementer works. Never send two at
    once.
-3. While it works — the only free time in the run: verify the commentator's open
-   findings against git, decide dispositions and record them
-   (`$SUP disposition <task-id> <finding> --verdict task|dropped
-   [--fix-task <task-id>] --reason ...`), gather
+3. While it works — the only free time in the run: poll with the retained observation
+   cursor, verify every unresolved finding against git, and resolve it through the
+   protocol above. Gather
    derivations that do not depend on the in-flight commit, batch questions for the
    human, draft and pre-populate the next task.
 4. After starting the next implementer, append the calibration record for the previous
@@ -138,11 +185,10 @@ measured separately (`$SUP state` shows both).
    from here on.
 5. Progress signals come from the supervisor, never self-reports:
    `$SUP state` shows each task's state and each session's measured context.
-6. `$SUP comments` prints what the commentator has appended to its comments
-   file since you last looked (`state` shows when there is something unread). It
-   narrates on its own clock; never prompt it for a review. A precise finding in that
-   narration normally becomes the next fix task; you alone decide. Take the
-   substance from that file and from git, not from its transcript.
+6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
+   chronological context and every still-unresolved finding. It narrates on its own
+   clock; never prompt it for a review. A precise finding normally becomes the next fix
+   task; you alone decide, and the supervisor remains the authoritative review state.
    A fix task goes back to the session that wrote the commit it is about, when `state`
    shows that session idle with context headroom and the finding names a specified
    change: it holds why the code took that shape, which a fresh session must re-derive
@@ -181,8 +227,9 @@ the answer; never infer it. Then, in order:
 1. Let the in-flight implementer finish; verify its commit.
 2. Wait for the commentator on that commit.
 3. Write the continuation prompt to the run directory: HEAD, the gate command and
-   exact numbers, done/next derived from git not remembered, every open finding in
-   full, judged-and-dropped findings with reasons, open questions, traps hit.
+   exact numbers, done/next derived from git not remembered, the exact observation
+   cursor, every unresolved finding keyed by its stable number in full, resolved
+   findings and their reasons, open questions, traps hit.
 4. `$SUP stop`.
 
 Nothing restarts itself. Same contract when the supervisor says you passed 250k.

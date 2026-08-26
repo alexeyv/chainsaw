@@ -75,18 +75,6 @@ pub enum Command {
   },
   /// Record predicted and actual task size.
   Calibrate { task: i64 },
-  /// Record a commentator finding's disposition.
-  Disposition {
-    /// Task where the finding originated.
-    task_id: i64,
-    description: String,
-    #[arg(long)]
-    verdict: Verdict,
-    #[arg(long = "fix-task")]
-    fix_task_id: Option<i64>,
-    #[arg(long = "reason")]
-    verdict_reason: String,
-  },
   /// Record informational context that requires no response.
   Observe {
     /// Task the observation concerns; omit for a run-wide observation.
@@ -129,11 +117,6 @@ pub enum Command {
   },
   /// Print current run state.
   State,
-  /// Print new commentator entries.
-  Comments {
-    #[arg(long)]
-    all: bool,
-  },
   /// Print measured context use.
   Context { name: Option<String> },
   /// Open or close a human-wait interval.

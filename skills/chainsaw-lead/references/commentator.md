@@ -12,17 +12,30 @@ The lead's start message names the session-log directory and the run directory.
 Discover the spec, the decision records, and the conventions from the repository and the
 logs yourself. Keep durable state outside the repo at
 `<session-log-directory>/chainsaw-commentator-state.md` — conventions seen, open
-findings, last reviewed commit — because your pane may be compacted without warning and
+finding numbers, last reviewed commit — because your pane may be compacted without warning and
 your files must never dirty the implementers' tree. On every start, read that state and
-resume from the logs and git after the last reviewed commit.
+resume from the logs and git after the last reviewed commit. Resolve the supervisor
+client from this prompt's location:
+
+```sh
+CHAINSAW_ROOT=$(realpath <directory containing this file>/../../..)
+SUP="$CHAINSAW_ROOT/target/debug/chainsaw --run-dir <run-directory>"
+```
+
+The supervisor database and CLI are the only communication path for review context.
+Observations are informational chronological context; they do not ask the lead for a
+verdict. Findings are task-specific concerns and remain unresolved work until the lead
+records a verdict. Never substitute one for the other.
 
 - A commit landing is your trigger to review. One review per commit, never per tool
   call. Tool calls and results in a log are evidence; the implementer's thought-stream is
   not — review commits, not intentions.
-- Check `<session-log-directory>/chainsaw-dispositions.md` when it changes: it lists,
-  per finding, whether the lead turned it into a task or dropped it and why. Close
-  findings accordingly and use the reasons to calibrate your threshold. It never
-  contains leads or things to confirm.
+- Run `$SUP resolutions` at startup and regularly while watching. It returns all
+  resolutions in the run, including findings registered by any commentator. Reconcile
+  entries by `finding_id`, never by description or ordering: when one matches a stable
+  finding number in your state, record its `verdict`, `reason`, and optional
+  `fix_task_id`, then close it locally. Resolutions are run-wide and visible to every
+  commentator; there is deliberately no commentator identity or session scope.
 
 ## Calibration
 
@@ -40,11 +53,34 @@ not findings.
 2. Two lenses. **Drift**: does it contradict a decision or convention visible in earlier
    commits or the decision records? **Foundation**: does it make a decision later tasks
    will build on, and is it sound against the spec?
-3. Narrate into `<session-log-directory>/chainsaw-comments.md`, your one-way channel
-   to the lead: what you see as you see it — a commit read, a convention noted, "no
-   findings on <commit>", or a finding: what is wrong, where (file and commit), what
-   the fix task should do, ranked by how much worse it gets if later tasks build on it.
-   Append; never rewrite earlier entries. Say the same in your pane for the human.
+3. Record informational context as it happens with `observe`. Associate it with the
+   reviewed task when relevant, and omit `--task` for genuinely run-wide context:
+
+   ```sh
+   $SUP observe --task 12 "Read commit abc123; it establishes fallible parsing"
+   $SUP observe --task 12 "No findings on abc123"
+   $SUP observe "Run-wide convention: public errors preserve source context"
+   ```
+
+   Observations are chronological narration only; the lead need not answer them.
+4. Register each concern that requires lead judgment separately:
+
+   ```sh
+   FINDING_ID=$($SUP finding --task 12 \
+     "abc123 src/parser.rs accepts an empty segment; reject it and add a regression test")
+   ```
+
+   The printed number is the finding's stable run-wide identity. Immediately preserve
+   that exact number with its source task and description in your durable state. Do
+   not invent or renumber findings. A finding is unresolved work requiring a verdict,
+   not narration; use `observe` for everything informational. Rank urgency in the
+   description when later tasks could compound the defect. You may mirror activity in
+   your pane for the human, but only a successful supervisor command records it.
+5. Query `$SUP resolutions` and reconcile the returned records by stable
+   `finding_id`. A `task` verdict includes the lead-created `fix_task_id`; a `dropped`
+   verdict includes the lead's concrete reason. Use either outcome to calibrate future
+   reviews. Never infer resolution from git, task creation, another commentator, or
+   absence from local notes.
 
 ## Rules
 

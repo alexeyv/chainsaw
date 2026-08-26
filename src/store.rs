@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -42,11 +42,10 @@ create table findings(
   task_id int not null references tasks(id),
   description text not null, verdict text,
   verdict_reason text, fix_task_id int references tasks(id),
-  created_at int not null, resolved_at int,
-  legacy_disposition int not null default 0);
+  created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
-pragma user_version=2;
+pragma user_version=3;
 "#;
 
 pub const TASK_STATES: &[&str] = &[
@@ -198,6 +197,13 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       }
       transaction.execute_batch(SCHEMA)?;
     }
+    2 => transaction.execute_batch(
+      "
+        delete from config where key='comments-read';
+        alter table findings drop column legacy_disposition;
+        pragma user_version=3;
+        ",
+    )?,
     SCHEMA_VERSION => {}
     version => bail!("database schema version {version} is unsupported; expected {SCHEMA_VERSION}"),
   }
@@ -268,11 +274,82 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 2);
+    let legacy_finding_columns = db.query_row(
+      "select count(*) from pragma_table_info('findings') where name='legacy_disposition'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(version, 3);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
     assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
+    assert_eq!(legacy_finding_columns, 0);
+    Ok(())
+  }
+
+  #[test]
+  fn migrates_v2_without_discarding_findings_or_unrelated_config() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(
+      "
+        create table config(key text primary key, value text);
+        create table tasks(id integer primary key);
+        create table findings(
+          id integer primary key autoincrement,
+          task_id int not null references tasks(id),
+          description text not null, verdict text, verdict_reason text,
+          fix_task_id int references tasks(id), created_at int not null,
+          resolved_at int, legacy_disposition int not null default 0);
+        insert into config values('comments-read', '42');
+        insert into config values('gate', 'cargo test');
+        insert into tasks values(1);
+        insert into findings values(1, 1, 'historical finding', 'dropped',
+          'not actionable', null, 100, 101, 1);
+        pragma user_version=2;
+        ",
+    )?;
+
+    initialize_schema(&db)?;
+
+    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    let legacy_columns = db.query_row(
+      "select count(*) from pragma_table_info('findings') where name='legacy_disposition'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    let comments_config = db.query_row(
+      "select count(*) from config where key='comments-read'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    let gate = db.query_row("select value from config where key='gate'", [], |row| {
+      row.get::<_, String>(0)
+    })?;
+    let finding = db.query_row(
+      "select description, verdict, verdict_reason from findings where id=1",
+      [],
+      |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, String>(1)?,
+          row.get::<_, String>(2)?,
+        ))
+      },
+    )?;
+
+    assert_eq!(version, 3);
+    assert_eq!(legacy_columns, 0);
+    assert_eq!(comments_config, 0);
+    assert_eq!(gate, "cargo test");
+    assert_eq!(
+      finding,
+      (
+        "historical finding".to_owned(),
+        "dropped".to_owned(),
+        "not actionable".to_owned()
+      )
+    );
     Ok(())
   }
 
