@@ -21,7 +21,7 @@ use crate::logs::{
   bash_commands, commits_in_log, context_before, context_peak, context_size, file_size,
   latest_assistant_text, prompt_landed,
 };
-use crate::persistence::{calibration, finding, observation, task, task_event};
+use crate::persistence::{calibration, commentary_delivery, finding, observation, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::store::{Session, Store, TASK_STATES, now};
 
@@ -746,7 +746,7 @@ fn cmd_dispatch(
     let since = task::all(&transaction)?.into_iter().rev().find(|task| {
       matches!(
         task.state(),
-        TaskState::Committed | TaskState::Verified | TaskState::Accepted | TaskState::Ingested
+        TaskState::Committed | TaskState::Verified | TaskState::Accepted
       ) && task.commit_sha().is_some()
     });
     transaction.commit()?;
@@ -764,11 +764,7 @@ fn cmd_dispatch(
   };
 
   let transaction = store.db.unchecked_transaction()?;
-  transaction.execute(
-    "update tasks set session_id=?, is_session_reuse=? where id=?",
-    params![session.id, i64::from(reuse), task_id],
-  )?;
-  task_event::create(&transaction, task_id, TaskState::Dispatched)?;
+  task::dispatch(&transaction, task_id, session.id, reuse)?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let prompt = format!(
@@ -778,7 +774,7 @@ fn cmd_dispatch(
   );
   if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
     let transaction = store.db.unchecked_transaction()?;
-    task_event::create(&transaction, task_id, TaskState::Drafted)?;
+    task::redraft(&transaction, task_id)?;
     transaction.commit()?;
     store.event(
       "dispatch-failed",
@@ -791,11 +787,7 @@ fn cmd_dispatch(
   let base = context_before(log.as_deref(), offset);
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
   let transaction = store.db.unchecked_transaction()?;
-  transaction.execute(
-    "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
-    params![offset as i64, head, base as i64, task_id],
-  )?;
-  task_event::create(&transaction, task_id, TaskState::InFlight)?;
+  task::take_flight(&transaction, task_id, offset as i64, &head, base as i64)?;
   transaction.commit()?;
   if reuse {
     println!("task {task_id} in flight on {implementer} (reuse, context base {base})");
@@ -905,25 +897,17 @@ fn cmd_verify(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> Resu
       .push("gate not configured (chainsaw config gate CMD): gate-last unchecked".to_owned()),
     _ => {}
   }
-  if let Some(sha) = &sha
-    && task.commit_sha().is_none()
-  {
-    store.db.execute(
-      "update tasks set commit_sha=? where id=?",
-      params![sha, task_id],
-    )?;
-  }
   let has_hard_problem = problems
     .iter()
     .any(|problem| !problem.starts_with("gate not configured"));
   if !has_hard_problem {
+    let sha = sha
+      .as_deref()
+      .context("verified task unexpectedly has no commit")?;
     let transaction = store.db.unchecked_transaction()?;
-    task_event::create(&transaction, task_id, TaskState::Verified)?;
+    task::verify(&transaction, task_id, sha)?;
     transaction.commit()?;
-    println!(
-      "task {task_id} verified: {}",
-      sha.as_deref().unwrap_or_default()
-    );
+    println!("task {task_id} verified: {sha}");
     for problem in problems {
       println!("note: {problem}");
     }
@@ -1331,20 +1315,14 @@ fn cmd_accept(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   if states.contains("accepted") {
     bail!("supervisor: task {task_id} is already accepted");
   }
-  if !matches!(task.state(), TaskState::Committed | TaskState::Ingested)
-    || task.commit_sha().is_none()
-  {
+  if task.state() != TaskState::Committed || task.commit_sha().is_none() {
     bail!(
       "supervisor: task {task_id} is {}, not a committed unverified task",
       task.state()
     );
   }
   let transaction = store.db.unchecked_transaction()?;
-  transaction.execute(
-    "update tasks set reason=? where id=?",
-    params![reason, task_id],
-  )?;
-  task_event::create(&transaction, task_id, TaskState::Accepted)?;
+  task::accept(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("accepted", &format!("task {task_id}: {reason}"))?;
   println!("task {task_id} accepted without verify: {reason}");
@@ -1376,11 +1354,7 @@ fn cmd_fail(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
   let transaction = store.db.unchecked_transaction()?;
-  transaction.execute(
-    "update tasks set reason=? where id=?",
-    params![reason, task_id],
-  )?;
-  task_event::create(&transaction, task_id, TaskState::Failed)?;
+  task::fail(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("failed", &format!("task {task_id}: {reason}"))?;
   let failures = failures_in_lineage(store, task_id)?;
@@ -1412,7 +1386,8 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
   let dispatched_at: Option<f64> = store
     .db
     .query_row(
-      "select created_at / 1000.0 from task_events where task_id=? and state='dispatched'",
+      "select created_at / 1000.0 from task_events
+       where task_id=? and state='dispatched' order by id desc limit 1",
       [task_id],
       |row| row.get(0),
     )
@@ -1420,7 +1395,8 @@ fn cmd_calibrate(store: &Store, runtime: &dyn SessionRuntime, task_id: i64) -> R
   let committed_at: Option<f64> = store
     .db
     .query_row(
-      "select created_at / 1000.0 from task_events where task_id=? and state='committed'",
+      "select created_at / 1000.0 from task_events
+       where task_id=? and state='committed' order by id desc limit 1",
       [task_id],
       |row| row.get(0),
     )
@@ -1596,25 +1572,40 @@ fn cmd_state(store: &Store, runtime: &dyn SessionRuntime) -> Result<()> {
   println!("tasks");
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
+  let deliveries = tasks
+    .iter()
+    .map(|task| {
+      Ok((
+        task.id(),
+        commentary_delivery::delivered_at(&transaction, task.id())?,
+      ))
+    })
+    .collect::<Result<HashMap<_, _>>>()?;
   transaction.commit()?;
   for task in tasks {
     let mut statement = store
       .db
-      .prepare("select state,created_at / 1000.0 from task_events where task_id=?")?;
+      .prepare("select state,created_at / 1000.0 from task_events where task_id=? order by id")?;
     let log = statement
       .query_map([task.id()], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
       })?
       .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-    let timeline = TASK_STATES
+    let mut timeline = TASK_STATES
       .iter()
       .filter_map(|state| {
         log
           .get(*state)
           .map(|timestamp| format!("{state}@{}", clock_time(*timestamp)))
       })
-      .collect::<Vec<_>>()
-      .join(" ");
+      .collect::<Vec<_>>();
+    if let Some(delivered_at) = deliveries.get(&task.id()).copied().flatten() {
+      timeline.push(format!(
+        "commentary-delivered@{}",
+        clock_time(delivered_at as f64 / 1000.0)
+      ));
+    }
+    let timeline = timeline.join(" ");
     let retry = task
       .retry_of_task_id()
       .map_or_else(String::new, |id| format!("  retry of {id}"));
@@ -1727,7 +1718,8 @@ fn print_time_summary(store: &Store) -> Result<()> {
     let start: Option<f64> = store
       .db
       .query_row(
-        "select created_at / 1000.0 from task_events where task_id=? and state='dispatched'",
+        "select created_at / 1000.0 from task_events
+         where task_id=? and state='dispatched' order by id desc limit 1",
         [task.id()],
         |row| row.get(0),
       )
@@ -1735,7 +1727,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
     let end: Option<f64> = store
             .db
             .query_row(
-                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed','verified','ingested','failed') order by created_at limit 1",
+                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed','verified','failed') order by id limit 1",
                 [task.id()],
                 |row| row.get(0),
             )
@@ -1927,11 +1919,7 @@ fn observe_implementer(
     .unwrap_or_default();
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.db.unchecked_transaction()?;
-    transaction.execute(
-      "update tasks set commit_sha=? where id=?",
-      params![sha, task.id()],
-    )?;
-    task_event::create(&transaction, task.id(), TaskState::Committed)?;
+    task::record_commit(&transaction, task.id(), &sha)?;
     transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else if quiet > STALE_SECONDS
@@ -1964,15 +1952,17 @@ fn observe_commentator(
   compacting: &mut bool,
 ) -> Result<()> {
   let transaction = store.db.unchecked_transaction()?;
-  let pending = task::all(&transaction)?
-    .into_iter()
-    .filter(|task| {
-      matches!(
-        task.state(),
-        TaskState::Verified | TaskState::Committed | TaskState::Accepted
-      ) && task.commit_sha().is_some()
-    })
-    .collect::<Vec<_>>();
+  let mut pending = Vec::new();
+  for task in task::all(&transaction)? {
+    if matches!(
+      task.state(),
+      TaskState::Verified | TaskState::Committed | TaskState::Accepted
+    ) && task.commit_sha().is_some()
+      && commentary_delivery::delivered_at(&transaction, task.id())?.is_none()
+    {
+      pending.push(task);
+    }
+  }
   transaction.commit()?;
   if let Some(log) = log {
     let text = fs::read_to_string(log).unwrap_or_default();
@@ -1981,9 +1971,11 @@ fn observe_commentator(
       let abbreviation = sha.get(..7).unwrap_or(sha);
       if text.contains(abbreviation) {
         let transaction = store.db.unchecked_transaction()?;
-        task_event::create(&transaction, task.id(), TaskState::Ingested)?;
+        let recorded = commentary_delivery::record(&transaction, task.id())?;
         transaction.commit()?;
-        store.event("ingested", &format!("task {}", task.id()))?;
+        if recorded {
+          store.event("commentary-delivered", &format!("task {}", task.id()))?;
+        }
       }
     }
   }

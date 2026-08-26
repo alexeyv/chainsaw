@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -130,6 +130,93 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
+pub fn dispatch(
+  transaction: &Transaction<'_>,
+  id: i64,
+  session_id: i64,
+  reuse: bool,
+) -> Result<Task> {
+  transition(transaction, id, TaskState::Dispatched, |transaction| {
+    transaction.execute(
+      "update tasks set session_id=?, is_session_reuse=? where id=?",
+      params![session_id, i64::from(reuse), id],
+    )?;
+    Ok(())
+  })
+}
+
+pub fn redraft(transaction: &Transaction<'_>, id: i64) -> Result<Task> {
+  transition(transaction, id, TaskState::Drafted, |_| Ok(()))
+}
+
+pub fn take_flight(
+  transaction: &Transaction<'_>,
+  id: i64,
+  log_offset: i64,
+  base_head: &str,
+  context_size_start: i64,
+) -> Result<Task> {
+  transition(transaction, id, TaskState::InFlight, |transaction| {
+    transaction.execute(
+      "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
+      params![log_offset, base_head, context_size_start, id],
+    )?;
+    Ok(())
+  })
+}
+
+pub fn verify(transaction: &Transaction<'_>, id: i64, commit_sha: &str) -> Result<Task> {
+  transition(transaction, id, TaskState::Verified, |transaction| {
+    transaction.execute(
+      "update tasks set commit_sha=? where id=?",
+      params![commit_sha, id],
+    )?;
+    Ok(())
+  })
+}
+
+pub fn accept(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
+  transition(transaction, id, TaskState::Accepted, |transaction| {
+    transaction.execute("update tasks set reason=? where id=?", params![reason, id])?;
+    Ok(())
+  })
+}
+
+pub fn fail(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
+  transition(transaction, id, TaskState::Failed, |transaction| {
+    transaction.execute("update tasks set reason=? where id=?", params![reason, id])?;
+    Ok(())
+  })
+}
+
+pub fn record_commit(transaction: &Transaction<'_>, id: i64, commit_sha: &str) -> Result<Task> {
+  transition(transaction, id, TaskState::Committed, |transaction| {
+    transaction.execute(
+      "update tasks set commit_sha=? where id=?",
+      params![commit_sha, id],
+    )?;
+    Ok(())
+  })
+}
+
+fn transition(
+  transaction: &Transaction<'_>,
+  id: i64,
+  next: TaskState,
+  mutate: impl FnOnce(&Transaction<'_>) -> Result<()>,
+) -> Result<Task> {
+  let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
+  if !current.state().can_transition_to(next) {
+    bail!(
+      "task {id} cannot transition from {} to {next}",
+      current.state()
+    );
+  }
+  mutate(transaction)?;
+  super::task_event::create(transaction, id, next)?;
+  get(transaction, id)?.with_context(|| format!("task {id} disappeared while becoming {next}"))
+}
+
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
   let predicted_file_list = row
     .get::<_, Option<String>>("predicted_file_list")?
@@ -205,7 +292,10 @@ mod tests {
   use anyhow::Result;
   use chrono::Utc;
 
-  use super::{all, create, get, predecessor, tasks_for_session};
+  use super::{
+    accept, all, create, dispatch, fail, get, predecessor, record_commit, redraft, take_flight,
+    tasks_for_session, verify,
+  };
   use crate::domain::TaskState;
   use crate::persistence::task_event;
   use crate::persistence::test_fixture::database;
@@ -352,12 +442,25 @@ mod tests {
   }
 
   #[test]
-  fn reads_a_fully_materialized_task_in_stable_identity_order() -> Result<()> {
+  fn reads_a_fully_materialized_task_in_identity_order_across_a_backward_clock_step() -> Result<()>
+  {
     let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
 
     let transaction = db.transaction()?;
     let original = create(&transaction, "inspect snapshots", 0, 20, None, None)?;
-    let second_event = task_event::create(&transaction, original.id(), TaskState::Drafted)?;
+    let dispatched = dispatch(&transaction, original.id(), 7, false)?;
+    let second_event = dispatched.events().last().expect("dispatch event");
+    transaction.execute(
+      "update task_events set created_at=? where id=?",
+      [
+        original.events()[0].created_at().timestamp_millis() - 1_000,
+        second_event.id(),
+      ],
+    )?;
     let loaded = get(&transaction, original.id())?.expect("created task");
     transaction.commit()?;
 
@@ -369,6 +472,7 @@ mod tests {
         .collect::<Vec<_>>(),
       vec![original.events()[0].id(), second_event.id()]
     );
+    assert!(loaded.events()[1].created_at() < loaded.events()[0].created_at());
     assert_eq!(loaded.id(), original.id());
     Ok(())
   }
@@ -376,13 +480,16 @@ mod tests {
   #[test]
   fn reads_all_fully_materialized_tasks_in_ascending_identity_order() -> Result<()> {
     let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
 
     let transaction = db.transaction()?;
     assert!(all(&transaction)?.is_empty());
 
     let first = create(&transaction, "first", 0, 10, None, None)?;
-    task_event::create(&transaction, first.id(), TaskState::Drafted)?;
-    let first = get(&transaction, first.id())?.expect("first task");
+    let first = dispatch(&transaction, first.id(), 7, false)?;
     let second = create(&transaction, "second", 0, 20, None, None)?;
 
     let tasks = all(&transaction)?;
@@ -415,7 +522,7 @@ mod tests {
       [first.id(), second.id()],
     )?;
     transaction.execute("update tasks set session_id=8 where id=?", [other.id()])?;
-    task_event::create(&transaction, second.id(), TaskState::Drafted)?;
+    task_event::create(&transaction, second.id(), TaskState::Dispatched)?;
     let first = get(&transaction, first.id())?.expect("first target task");
     let second = get(&transaction, second.id())?.expect("second target task");
 
@@ -431,6 +538,10 @@ mod tests {
   #[test]
   fn reads_the_fully_materialized_immediate_identity_predecessor() -> Result<()> {
     let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
 
     let transaction = db.transaction()?;
     assert_eq!(predecessor(&transaction, 1)?, None);
@@ -438,7 +549,8 @@ mod tests {
     let first = create(&transaction, "first", 0, 10, None, None)?;
     let second = create(&transaction, "second", 0, 20, None, None)?;
     let third = create(&transaction, "third", 0, 30, None, None)?;
-    task_event::create(&transaction, second.id(), TaskState::Drafted)?;
+    transaction.execute("update tasks set session_id=7 where id=?", [second.id()])?;
+    task_event::create(&transaction, second.id(), TaskState::Dispatched)?;
     let second = get(&transaction, second.id())?.expect("second task");
 
     assert_eq!(predecessor(&transaction, first.id())?, None);
@@ -446,6 +558,103 @@ mod tests {
     assert_eq!(predecessor(&transaction, i64::MAX)?, Some(third));
     assert_eq!(second.events().len(), 2);
     transaction.commit()?;
+    Ok(())
+  }
+
+  #[test]
+  fn mutators_update_task_data_and_append_the_paired_event() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
+
+    let transaction = db.transaction()?;
+    let verified = create(&transaction, "verify me", 0, 10, None, None)?;
+    let verified = dispatch(&transaction, verified.id(), 7, true)?;
+    assert_eq!(verified.state(), TaskState::Dispatched);
+    assert_eq!(verified.session_id(), Some(7));
+    assert!(verified.is_session_reuse());
+
+    let verified = redraft(&transaction, verified.id())?;
+    assert_eq!(verified.state(), TaskState::Drafted);
+    let verified = dispatch(&transaction, verified.id(), 7, true)?;
+    let verified = take_flight(&transaction, verified.id(), 42, "base123", 900)?;
+    assert_eq!(verified.state(), TaskState::InFlight);
+    assert_eq!(verified.log_offset(), 42);
+    assert_eq!(verified.base_head(), Some("base123"));
+    assert_eq!(verified.context_size_start(), Some(900));
+
+    let verified = verify(&transaction, verified.id(), "verified123")?;
+    assert_eq!(verified.state(), TaskState::Verified);
+    assert_eq!(verified.commit_sha(), Some("verified123"));
+    assert_eq!(verified.events().len(), 6);
+
+    let accepted = create(&transaction, "accept me", 0, 10, None, None)?;
+    let accepted = dispatch(&transaction, accepted.id(), 7, false)?;
+    let accepted = record_commit(&transaction, accepted.id(), "accepted123")?;
+    assert_eq!(accepted.state(), TaskState::Committed);
+    assert_eq!(accepted.commit_sha(), Some("accepted123"));
+    let accepted = accept(&transaction, accepted.id(), "manual review")?;
+    assert_eq!(accepted.state(), TaskState::Accepted);
+    assert_eq!(accepted.reason(), Some("manual review"));
+    let failed = create(&transaction, "fail me", 0, 10, None, None)?;
+    let failed = dispatch(&transaction, failed.id(), 7, false)?;
+    let failed = fail(&transaction, failed.id(), "implementation stalled")?;
+    assert_eq!(failed.state(), TaskState::Failed);
+    assert_eq!(failed.reason(), Some("implementation stalled"));
+    transaction.commit()?;
+    Ok(())
+  }
+
+  #[test]
+  fn mutators_leave_commit_and_rollback_to_the_caller() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
+    let transaction = db.transaction()?;
+    let task = create(&transaction, "remain drafted", 0, 10, None, None)?;
+    transaction.commit()?;
+
+    let transaction = db.transaction()?;
+    dispatch(&transaction, task.id(), 7, false)?;
+    transaction.rollback()?;
+
+    let transaction = db.transaction()?;
+    let task = get(&transaction, task.id())?.expect("drafted task");
+    transaction.commit()?;
+    assert_eq!(task.state(), TaskState::Drafted);
+    assert_eq!(task.session_id(), None);
+    assert_eq!(task.events().len(), 1);
+    Ok(())
+  }
+
+  #[test]
+  fn mutators_reject_illegal_transitions_before_changing_task_data() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "insert into sessions(id, name) values(7, 'implementer')",
+      [],
+    )?;
+
+    let transaction = db.transaction()?;
+    let task = create(&transaction, "stay failed", 0, 10, None, None)?;
+    let task = dispatch(&transaction, task.id(), 7, false)?;
+    let task = fail(&transaction, task.id(), "implementation failed")?;
+
+    let error = verify(&transaction, task.id(), "unexpected123").unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("failed task");
+    transaction.commit()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 cannot transition from failed to verified"
+    );
+    assert_eq!(unchanged.state(), TaskState::Failed);
+    assert_eq!(unchanged.commit_sha(), None);
+    assert_eq!(unchanged.events().len(), 3);
     Ok(())
   }
 }

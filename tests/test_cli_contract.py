@@ -390,6 +390,38 @@ class ReuseContractTests(SupervisorContractCase):
 
 
 class CommunicationProtocolContractTests(SupervisorContractCase):
+    def test_task_lifecycle_does_not_gate_observations_or_findings(self):
+        task = self.new_task(text="Commentary can arrive at any time.")
+        self.assert_success(self.cli(
+            "observe", "--task", str(task), "draft observation",
+        ))
+        self.assert_success(self.cli(
+            "finding", "--task", str(task), "draft finding",
+        ))
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        sha = self.commit_file()
+        self.record_commit("worker", sha)
+        self.assert_success(self.cli("verify", str(task)))
+
+        self.assert_success(self.cli(
+            "observe", "--task", str(task), "terminal observation",
+        ))
+        self.assert_success(self.cli(
+            "finding", "--task", str(task), "terminal finding",
+        ))
+        polled = self.assert_success(self.cli("poll", "--task", str(task)))
+        payload = json.loads(polled.stdout)
+
+        self.assertEqual(
+            [item["text"] for item in payload["observations"]],
+            ["draft observation", "terminal observation"],
+        )
+        self.assertEqual(
+            [item["description"] for item in payload["findings"]],
+            ["draft finding", "terminal finding"],
+        )
+
     def test_complete_incremental_run_wide_protocol(self):
         first_task = self.new_task(text="First reviewed task.", files="first.txt")
         second_task = self.new_task(text="Second reviewed task.", files="second.txt")
@@ -645,9 +677,11 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.append_text(commentator, f"Reviewed commit {sha[:10]}")
 
         daemon = self.start_daemon()
-        self.wait_for_state("1 ingested")
+        state = self.wait_for_state("commentary-delivered@")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
+
+        self.assertIn("1 verified", state.stdout)
 
     def test_stop_is_durable_and_ends_a_running_daemon(self):
         daemon = self.start_daemon()

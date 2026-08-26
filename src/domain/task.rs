@@ -13,7 +13,6 @@ pub enum TaskState {
   Committed,
   Verified,
   Accepted,
-  Ingested,
   Failed,
 }
 
@@ -26,8 +25,20 @@ impl TaskState {
       Self::Committed => "committed",
       Self::Verified => "verified",
       Self::Accepted => "accepted",
-      Self::Ingested => "ingested",
       Self::Failed => "failed",
+    }
+  }
+
+  pub fn can_transition_to(self, next: Self) -> bool {
+    match self {
+      Self::Drafted => next == Self::Dispatched,
+      Self::Dispatched => matches!(
+        next,
+        Self::Drafted | Self::InFlight | Self::Committed | Self::Verified | Self::Failed
+      ),
+      Self::InFlight => matches!(next, Self::Committed | Self::Verified | Self::Failed),
+      Self::Committed => matches!(next, Self::Verified | Self::Accepted),
+      Self::Verified | Self::Accepted | Self::Failed => false,
     }
   }
 
@@ -36,10 +47,7 @@ impl TaskState {
   }
 
   fn requires_commit(self) -> bool {
-    matches!(
-      self,
-      Self::Committed | Self::Verified | Self::Accepted | Self::Ingested
-    )
+    matches!(self, Self::Committed | Self::Verified | Self::Accepted)
   }
 
   fn requires_reason(self) -> bool {
@@ -58,7 +66,6 @@ impl TryFrom<&str> for TaskState {
       "committed" => Ok(Self::Committed),
       "verified" => Ok(Self::Verified),
       "accepted" => Ok(Self::Accepted),
-      "ingested" => Ok(Self::Ingested),
       "failed" => Ok(Self::Failed),
       value => bail!("unknown task state {value:?}"),
     }
@@ -314,6 +321,9 @@ fn validate_events(events: &[TaskEvent]) -> Result<()> {
   if events.is_empty() {
     bail!("a task requires at least one event");
   }
+  if events[0].state() != TaskState::Drafted {
+    bail!("a task's first event must be drafted");
+  }
   let mut ids = HashSet::new();
   for event in events {
     if !ids.insert(event.id()) {
@@ -321,11 +331,18 @@ fn validate_events(events: &[TaskEvent]) -> Result<()> {
     }
   }
   for pair in events.windows(2) {
-    if pair[0].created_at() > pair[1].created_at() {
+    if pair[0].id() >= pair[1].id() {
       bail!(
-        "task event {} occurs before event {}",
+        "task events are out of identity order: {} follows {}",
         pair[1].id(),
         pair[0].id()
+      );
+    }
+    if !pair[0].state().can_transition_to(pair[1].state()) {
+      bail!(
+        "task cannot transition from {} to {}",
+        pair[0].state(),
+        pair[1].state()
       );
     }
   }
@@ -353,11 +370,46 @@ mod tests {
       (TaskState::Committed, "committed"),
       (TaskState::Verified, "verified"),
       (TaskState::Accepted, "accepted"),
-      (TaskState::Ingested, "ingested"),
       (TaskState::Failed, "failed"),
     ] {
       assert_eq!(state.to_string(), state.as_str());
       assert_eq!(state.to_string(), name);
+    }
+  }
+
+  #[test]
+  fn lifecycle_transition_table_is_explicit() {
+    let states = [
+      TaskState::Drafted,
+      TaskState::Dispatched,
+      TaskState::InFlight,
+      TaskState::Committed,
+      TaskState::Verified,
+      TaskState::Accepted,
+      TaskState::Failed,
+    ];
+    let allowed = [
+      (TaskState::Drafted, TaskState::Dispatched),
+      (TaskState::Dispatched, TaskState::Drafted),
+      (TaskState::Dispatched, TaskState::InFlight),
+      (TaskState::Dispatched, TaskState::Committed),
+      (TaskState::Dispatched, TaskState::Verified),
+      (TaskState::Dispatched, TaskState::Failed),
+      (TaskState::InFlight, TaskState::Committed),
+      (TaskState::InFlight, TaskState::Verified),
+      (TaskState::InFlight, TaskState::Failed),
+      (TaskState::Committed, TaskState::Verified),
+      (TaskState::Committed, TaskState::Accepted),
+    ];
+
+    for current in states {
+      for next in states {
+        assert_eq!(
+          current.can_transition_to(next),
+          allowed.contains(&(current, next)),
+          "unexpected transition {current} -> {next}"
+        );
+      }
     }
   }
 
@@ -375,6 +427,40 @@ mod tests {
     context_size_start: Option<i64>,
     context_size_end: Option<i64>,
   ) -> Result<Task> {
+    let states = match state {
+      TaskState::Drafted => vec![TaskState::Drafted],
+      TaskState::Dispatched => vec![TaskState::Drafted, TaskState::Dispatched],
+      TaskState::InFlight => vec![
+        TaskState::Drafted,
+        TaskState::Dispatched,
+        TaskState::InFlight,
+      ],
+      TaskState::Committed => vec![
+        TaskState::Drafted,
+        TaskState::Dispatched,
+        TaskState::InFlight,
+        TaskState::Committed,
+      ],
+      TaskState::Verified => vec![
+        TaskState::Drafted,
+        TaskState::Dispatched,
+        TaskState::InFlight,
+        TaskState::Verified,
+      ],
+      TaskState::Accepted => vec![
+        TaskState::Drafted,
+        TaskState::Dispatched,
+        TaskState::InFlight,
+        TaskState::Committed,
+        TaskState::Accepted,
+      ],
+      TaskState::Failed => vec![
+        TaskState::Drafted,
+        TaskState::Dispatched,
+        TaskState::InFlight,
+        TaskState::Failed,
+      ],
+    };
     Task::new(
       id,
       text.to_owned(),
@@ -391,7 +477,18 @@ mod tests {
       is_session_reuse,
       context_size_start,
       context_size_end,
-      vec![TaskEvent::new(1, state, timestamp(1_700_000_000)).unwrap()],
+      states
+        .into_iter()
+        .enumerate()
+        .map(|(index, state)| {
+          TaskEvent::new(
+            index as i64 + 1,
+            state,
+            timestamp(1_700_000_000 + index as i64),
+          )
+          .unwrap()
+        })
+        .collect(),
     )
   }
 
@@ -401,7 +498,7 @@ mod tests {
       "task".to_owned(),
       0,
       0,
-      None,
+      Some(7),
       None,
       1_700_000_000.0,
       None,
@@ -420,7 +517,8 @@ mod tests {
   fn exposes_every_field_without_mutators() {
     let events = vec![
       TaskEvent::new(1, TaskState::Drafted, timestamp(1_699_999_900)).unwrap(),
-      TaskEvent::new(2, TaskState::InFlight, timestamp(1_700_000_000)).unwrap(),
+      TaskEvent::new(2, TaskState::Dispatched, timestamp(1_699_999_950)).unwrap(),
+      TaskEvent::new(3, TaskState::InFlight, timestamp(1_700_000_000)).unwrap(),
     ];
     let task = Task::new(
       2,
@@ -716,6 +814,16 @@ mod tests {
   }
 
   #[test]
+  fn lifecycle_starts_drafted() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Dispatched, timestamp(1)).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "a task's first event must be drafted");
+  }
+
+  #[test]
   fn event_ids_are_unique_within_a_task() {
     let error = drafted_task_with_events(vec![
       TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
@@ -727,13 +835,43 @@ mod tests {
   }
 
   #[test]
-  fn events_are_in_nondecreasing_timestamp_order() {
-    let error = drafted_task_with_events(vec![
+  fn backward_clock_steps_do_not_change_event_order() -> Result<()> {
+    let task = drafted_task_with_events(vec![
       TaskEvent::new(1, TaskState::Drafted, timestamp(2)).unwrap(),
+      TaskEvent::new(2, TaskState::Dispatched, timestamp(1)).unwrap(),
+    ])?;
+
+    assert_eq!(task.events()[0].id(), 1);
+    assert_eq!(task.events()[1].id(), 2);
+    assert!(task.events()[1].created_at() < task.events()[0].created_at());
+    Ok(())
+  }
+
+  #[test]
+  fn events_must_be_in_increasing_identity_order() {
+    let error = drafted_task_with_events(vec![
       TaskEvent::new(2, TaskState::Drafted, timestamp(1)).unwrap(),
+      TaskEvent::new(1, TaskState::Dispatched, timestamp(2)).unwrap(),
     ])
     .unwrap_err();
 
-    assert_eq!(error.to_string(), "task event 2 occurs before event 1");
+    assert_eq!(
+      error.to_string(),
+      "task events are out of identity order: 1 follows 2"
+    );
+  }
+
+  #[test]
+  fn event_history_rejects_illegal_lifecycle_transitions() {
+    let error = drafted_task_with_events(vec![
+      TaskEvent::new(1, TaskState::Drafted, timestamp(1)).unwrap(),
+      TaskEvent::new(2, TaskState::Failed, timestamp(2)).unwrap(),
+    ])
+    .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "task cannot transition from drafted to failed"
+    );
   }
 }

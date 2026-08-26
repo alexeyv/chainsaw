@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -24,6 +24,8 @@ create table task_events(
   id integer primary key autoincrement,
   task_id int not null references tasks(id), state text,
   created_at int not null);
+create table commentary_deliveries(
+  task_id int primary key references tasks(id), delivered_at int not null);
 create table prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table calibrations(
@@ -45,7 +47,7 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
-pragma user_version=3;
+pragma user_version=4;
 "#;
 
 pub const TASK_STATES: &[&str] = &[
@@ -55,7 +57,6 @@ pub const TASK_STATES: &[&str] = &[
   "committed",
   "verified",
   "accepted",
-  "ingested",
   "failed",
 ];
 
@@ -197,18 +198,40 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       }
       transaction.execute_batch(SCHEMA)?;
     }
-    2 => transaction.execute_batch(
-      "
+    2 => {
+      transaction.execute_batch(
+        "
         delete from config where key='comments-read';
         alter table findings drop column legacy_disposition;
         pragma user_version=3;
         ",
-    )?,
+      )?;
+      migrate_v3_to_v4(&transaction)?;
+    }
+    3 => migrate_v3_to_v4(&transaction)?,
     SCHEMA_VERSION => {}
     version => bail!("database schema version {version} is unsupported; expected {SCHEMA_VERSION}"),
   }
   transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
+  Ok(())
+}
+
+fn migrate_v3_to_v4(transaction: &Transaction<'_>) -> Result<()> {
+  transaction.execute_batch(
+    "
+      create table commentary_deliveries(
+        task_id int primary key references tasks(id), delivered_at int not null);
+      insert into commentary_deliveries(task_id, delivered_at)
+        select task_id, created_at from task_events as event
+        where state='ingested' and id=(
+          select max(id) from task_events
+          where task_id=event.task_id and state='ingested'
+        );
+      delete from task_events where state='ingested';
+      pragma user_version=4;
+      ",
+  )?;
   Ok(())
 }
 
@@ -279,12 +302,18 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 3);
+    let commentary_delivery_columns = db.query_row(
+      "select count(*) from pragma_table_info('commentary_deliveries')",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(version, 4);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
     assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
     assert_eq!(legacy_finding_columns, 0);
+    assert_eq!(commentary_delivery_columns, 2);
     Ok(())
   }
 
@@ -295,6 +324,10 @@ mod tests {
       "
         create table config(key text primary key, value text);
         create table tasks(id integer primary key);
+        create table task_events(
+          id integer primary key autoincrement,
+          task_id int not null references tasks(id), state text,
+          created_at int not null);
         create table findings(
           id integer primary key autoincrement,
           task_id int not null references tasks(id),
@@ -338,7 +371,7 @@ mod tests {
       },
     )?;
 
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     assert_eq!(legacy_columns, 0);
     assert_eq!(comments_config, 0);
     assert_eq!(gate, "cargo test");
@@ -350,6 +383,45 @@ mod tests {
         "not actionable".to_owned()
       )
     );
+    Ok(())
+  }
+
+  #[test]
+  fn migrates_v3_ingestion_events_to_commentary_delivery_receipts() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(
+      "
+        create table tasks(id integer primary key);
+        create table task_events(
+          id integer primary key autoincrement,
+          task_id int not null references tasks(id), state text,
+          created_at int not null);
+        insert into tasks values(1);
+        insert into task_events(task_id, state, created_at) values
+          (1, 'drafted', 100),
+          (1, 'committed', 200),
+          (1, 'ingested', 300),
+          (1, 'ingested', 250);
+        pragma user_version=3;
+        ",
+    )?;
+
+    initialize_schema(&db)?;
+
+    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    let delivered_at = db.query_row(
+      "select delivered_at from commentary_deliveries where task_id=1",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    let states = db
+      .prepare("select state from task_events where task_id=1 order by id")?
+      .query_map([], |row| row.get::<_, String>(0))?
+      .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    assert_eq!(version, 4);
+    assert_eq!(delivered_at, 250);
+    assert_eq!(states, vec!["drafted", "committed"]);
     Ok(())
   }
 

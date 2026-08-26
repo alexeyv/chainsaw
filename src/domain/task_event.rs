@@ -66,7 +66,6 @@ mod tests {
       TaskState::Committed,
       TaskState::Verified,
       TaskState::Accepted,
-      TaskState::Ingested,
       TaskState::Failed,
     ];
 

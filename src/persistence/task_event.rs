@@ -4,7 +4,11 @@ use rusqlite::{Transaction, params};
 
 use crate::domain::{TaskEvent, TaskState};
 
-pub fn create(transaction: &Transaction<'_>, task_id: i64, state: TaskState) -> Result<TaskEvent> {
+pub(super) fn create(
+  transaction: &Transaction<'_>,
+  task_id: i64,
+  state: TaskState,
+) -> Result<TaskEvent> {
   let created_at = Utc::now();
   let id = transaction.query_row(
     "
