@@ -12,7 +12,8 @@ Agentic software development process, minimizing downtime between coding session
 - Lead prompt: `skills/chainsaw-lead/SKILL.md`
 - Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
 - Supervisor binary: `target/debug/chainsaw`, built from `src/`
-- Context probe: `tools/bin/context-probe` built from `tools/context-probe.cc` 
+- Context probe: `tools/bin/context-probe` built from `tools/context-probe.cc`
+- How to write tests: `tests/AGENTS.md` 
 
 ## Running and verifying
 
@@ -33,8 +34,7 @@ mkdir -p tools/bin
 clang++ -o tools/bin/context-probe tools/context-probe.cc
 ```
 
-The Python command is the black-box contract harness; the system under test is the
-Rust coordinator.
+How tests should be written is in `tests/AGENTS.md`.
 
 - Every failing automatic test is a show stopper, even if unrelated to work at hand. Fix or escalate, never ignore.
 
