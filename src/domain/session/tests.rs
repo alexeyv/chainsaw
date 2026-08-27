@@ -285,18 +285,23 @@ mod can_be_kicked {
 
   #[test]
   fn should_work() {
-    let session = build_session(working_implementer()).unwrap();
-    assert!(session.can_be_kicked());
-  }
+    let armed = build_session(working_implementer()).unwrap();
+    assert!(armed.can_be_kicked());
 
-  #[test]
-  fn should_refuse_when_the_session_was_already_kicked() {
-    let session = build_session(SessionSpec {
+    let latched = build_session(SessionSpec {
       kicked_at: Some(timestamp(1_700_000_900)),
       ..working_implementer()
     })
     .unwrap();
-    assert!(!session.can_be_kicked());
+    assert!(!latched.can_be_kicked());
+
+    let rearmed = build_session(SessionSpec {
+      last_growth: timestamp(1_700_001_000),
+      kicked_at: None,
+      ..working_implementer()
+    })
+    .unwrap();
+    assert!(rearmed.can_be_kicked());
   }
 
   #[test]
