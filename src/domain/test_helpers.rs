@@ -74,8 +74,14 @@ pub fn timestamp(seconds: i64) -> DateTime<Utc> {
   DateTime::from_timestamp(seconds, 0).unwrap()
 }
 
-fn format_time(time: DateTime<Utc>) -> String {
+pub fn format_time(time: DateTime<Utc>) -> String {
   time.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Stored times are whole milliseconds, so compare at that grain.
+pub fn within(time: DateTime<Utc>, before: DateTime<Utc>, after: DateTime<Utc>) -> bool {
+  let millis = time.timestamp_millis();
+  millis >= before.timestamp_millis() && millis <= after.timestamp_millis()
 }
 
 fn format_option<T: fmt::Display>(value: Option<T>) -> String {

@@ -1,9 +1,11 @@
 use anyhow::Result;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::Utc;
 use rusqlite::{Connection, Transaction};
 
 use super::{all, create, get, latest_named, record_kick, record_reading, stop_named};
-use crate::domain::test_helpers::{format_session, format_sessions, timestamp};
+use crate::domain::test_helpers::{
+  format_session, format_sessions, format_time, timestamp, within,
+};
 use crate::domain::{Role, Session};
 use crate::persistence::test_fixture::database;
 
@@ -15,16 +17,6 @@ fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Res
     external,
     Some("base123"),
   )
-}
-
-/// Stored times are whole milliseconds, so compare at that grain.
-fn within(time: DateTime<Utc>, before: DateTime<Utc>, after: DateTime<Utc>) -> bool {
-  let millis = time.timestamp_millis();
-  millis >= before.timestamp_millis() && millis <= after.timestamp_millis()
-}
-
-fn format_time(time: DateTime<Utc>) -> String {
-  time.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// The stored row as the daemon would see it, with times in milliseconds.
