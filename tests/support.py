@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -53,7 +54,8 @@ class SupervisorContractCase(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Chainsaw Tests",
             "GIT_COMMITTER_EMAIL": "chainsaw-tests@example.invalid",
         })
-        self.supervisor_command = SUPERVISOR_COMMAND
+        self.supervisor_command = self._private_supervisor_command()
+        self._daemons = []
 
         self.git("init", "-q", "-b", "master")
         (self.run_dir / "seed.txt").write_text("initial\n")
@@ -61,6 +63,15 @@ class SupervisorContractCase(unittest.TestCase):
         self.git("commit", "-q", "-m", "chore: initial fixture")
         self._tool_use_sequence = 0
         self._logs_dirs = {}
+
+    def _private_supervisor_command(self):
+        """Run a private copy of the binary, so a rebuild in target/ during the
+        run cannot replace it under a live daemon."""
+        if SUPERVISOR_COMMAND != [str(BINARY)]:
+            return SUPERVISOR_COMMAND
+        private = self.sandbox / BINARY.name
+        shutil.copy2(BINARY, private)
+        return [str(private)]
 
     @property
     def logs_dir(self):
@@ -250,13 +261,16 @@ class SupervisorContractCase(unittest.TestCase):
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
                    "--poll-interval-ms", "10"]
+        stderr_path = self.sandbox / f"daemon-{len(self._daemons)}.stderr"
         process = subprocess.Popen(
             command,
             text=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_path.open("w"),
             env=self.env,
         )
+        process.stderr_path = stderr_path
+        self._daemons.append(process)
 
         def cleanup():
             if process.poll() is None:
@@ -266,6 +280,8 @@ class SupervisorContractCase(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     process.wait(timeout=5)
+            if process.returncode != 0:
+                self.fail(f"daemon did not exit cleanly:{self.daemon_report()}")
 
         self.addCleanup(cleanup)
         return process
@@ -278,4 +294,17 @@ class SupervisorContractCase(unittest.TestCase):
             if needle in last.stdout:
                 return last
             time.sleep(0.1)
-        self.fail(f"state never contained {needle!r}:\n{last and last.stdout}")
+        self.fail(
+            f"state never contained {needle!r}:\n{last and last.stdout}"
+            f"{self.daemon_report()}"
+        )
+
+    def daemon_report(self):
+        """What every daemon of this test has said and whether it is still up."""
+        lines = []
+        for process in self._daemons:
+            status = ("running" if process.poll() is None
+                      else f"exited with {process.returncode}")
+            stderr = process.stderr_path.read_text().strip()
+            lines.append(f"daemon pid {process.pid} {status}; stderr:\n{stderr or '(empty)'}")
+        return "\n" + "\n".join(lines) if lines else ""
