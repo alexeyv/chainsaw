@@ -148,6 +148,27 @@ pub enum TaskCommand {
     #[arg(long = "retry-of")]
     retry_of_task_id: Option<i64>,
   },
+  /// Remedy a coordinator failure to observe an implementer commit.
+  RecordCommit {
+    task: i64,
+    sha: String,
+    /// Record the transition manually. Requires --reason.
+    #[arg(long)]
+    force: bool,
+    /// Why the coordinator-driven transition is being remedied.
+    #[arg(long)]
+    reason: Option<String>,
+  },
+  /// Remedy a coordinator failure to observe commentary delivery.
+  RecordCommentary {
+    task: i64,
+    /// Record the transition manually. Requires --reason.
+    #[arg(long)]
+    force: bool,
+    /// Why the coordinator-driven transition is being remedied.
+    #[arg(long)]
+    reason: Option<String>,
+  },
 }
 
 #[derive(Clone, Debug, ValueEnum)]

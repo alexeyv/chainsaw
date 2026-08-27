@@ -33,6 +33,7 @@ const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
 const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
+const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on its own; use --force --reason only to remedy a coordinator failure";
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks, then the project's quality gate last. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, and a one-paragraph semantic delta.";
 
@@ -86,6 +87,17 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         retry_of_task_id,
         files.as_deref(),
       ),
+      TaskCommand::RecordCommit {
+        task,
+        sha,
+        force,
+        reason,
+      } => cmd_task_record_commit(store, task, &sha, force, reason.as_deref()),
+      TaskCommand::RecordCommentary {
+        task,
+        force,
+        reason,
+      } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
     },
     Command::Abort { task, reason } => cmd_abort(store, task, &reason),
     Command::Dispatch {
@@ -808,6 +820,124 @@ fn new_commit_for(
   Ok(None)
 }
 
+fn forced_remedy_reason<'a>(
+  command: &str,
+  force: bool,
+  reason: Option<&'a str>,
+) -> Result<&'a str> {
+  match (force, reason) {
+    (true, Some(reason)) if !reason.trim().is_empty() => Ok(reason),
+    (true, _) => bail!("supervisor: {command} --force requires a non-empty --reason"),
+    (false, Some(_)) => {
+      bail!("supervisor: --reason only applies with --force; {COORDINATOR_REMEDY_ONLY}")
+    }
+    (false, None) => bail!("supervisor: {COORDINATOR_REMEDY_ONLY}"),
+  }
+}
+
+fn canonical_commit(store: &Store, sha: &str) -> Result<Option<String>> {
+  if !(7..=40).contains(&sha.len())
+    || !sha
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  {
+    return Ok(None);
+  }
+  let revision = format!("{sha}^{{commit}}");
+  let output = git(store, &["rev-parse", "--verify", &revision])?;
+  if !output.status.success() {
+    return Ok(None);
+  }
+  Ok(Some(
+    String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+  ))
+}
+
+fn cmd_task_record_commit(
+  store: &Store,
+  task_id: i64,
+  sha: &str,
+  force: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  let Some(task) = task_snapshot(store, task_id)? else {
+    bail!("supervisor: no task {task_id}");
+  };
+  let reason = forced_remedy_reason("task record-commit", force, reason)?;
+  if !matches!(task.state(), TaskState::Dispatched | TaskState::InFlight) {
+    bail!(
+      "supervisor: task {task_id} is {}, not awaiting a coordinator-recorded commit",
+      task.state()
+    );
+  }
+  let Some(commit_sha) = canonical_commit(store, sha)? else {
+    bail!("supervisor: commit {sha} does not exist in the run repository");
+  };
+  let transaction = store.db.unchecked_transaction()?;
+  for other in task::all(&transaction)? {
+    if other.id() != task_id
+      && other
+        .commit_sha()
+        .is_some_and(|recorded| commit_sha.starts_with(recorded))
+    {
+      bail!(
+        "supervisor: commit {sha} is already recorded for task {}",
+        other.id()
+      );
+    }
+  }
+  let base_head = task.base_head().with_context(|| {
+    format!("supervisor: task {task_id} has no base_head to validate the commit against")
+  })?;
+  if commit_sha == canonical_commit(store, base_head)?.unwrap_or_default()
+    || !git(
+      store,
+      &["merge-base", "--is-ancestor", base_head, &commit_sha],
+    )?
+    .status
+    .success()
+  {
+    bail!(
+      "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
+    );
+  }
+  task::record_commit(&transaction, task_id, sha, Some(reason))?;
+  transaction.commit()?;
+  store.event("forced-commit", &format!("task {task_id} {sha}: {reason}"))?;
+  println!("task {task_id} commit recorded by force: {sha}");
+  Ok(())
+}
+
+fn cmd_task_record_commentary(
+  store: &Store,
+  task_id: i64,
+  force: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  let Some(task) = task_snapshot(store, task_id)? else {
+    bail!("supervisor: no task {task_id}");
+  };
+  let reason = forced_remedy_reason("task record-commentary", force, reason)?;
+  if !matches!(
+    task.state(),
+    TaskState::CommittedUnverified | TaskState::Accepted
+  ) || task.commit_sha().is_none()
+  {
+    bail!(
+      "supervisor: task {task_id} is {}, not ready for commentary delivery",
+      task.state()
+    );
+  }
+  let transaction = store.db.unchecked_transaction()?;
+  if !commentary_delivery::record(&transaction, task_id)? {
+    bail!("supervisor: commentary delivery is already recorded for task {task_id}");
+  }
+  transaction.commit()?;
+  store.event("forced-commentary", &format!("task {task_id}: {reason}"))?;
+  println!("task {task_id} commentary delivery recorded by force");
+  Ok(())
+}
+
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
 fn cmd_accept(store: &Store, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
@@ -1289,7 +1419,7 @@ fn cmd_state(store: &Store) -> Result<()> {
     println!("  (a human wait is open)");
   }
   let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','accepted','launch-fresh') order by at desc limit 5",
+        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','accepted','launch-fresh','forced-commit','forced-commentary') order by at desc limit 5",
     )?;
   let events = statement.query_map([], |row| {
     Ok((

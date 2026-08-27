@@ -130,6 +130,15 @@ A reason is required with `--force`, and only meaningful with it.
 failed to deliver, and equally when a commit landed that you have reverted rather than
 kept — a landed commit does not oblige you to accept it.
 
+### Remedying a coordinator failure
+
+The coordinator normally records commit and commentary-delivery transitions itself. If
+it misses one, remedy only that failure with `$SUP task record-commit <task-id> <sha>
+--force --reason "..."` or `$SUP task record-commentary <task-id> --force --reason
+"..."`; do not use these commands to skip evidence or lifecycle stages. The commit must
+exist in the run repository, descend from the task's base head, and belong to no other
+task. The supervisor records the reason in the run timeline.
+
 ## Writing a task
 
 Draft the next task while the current implementer works; dispatch as soon as the

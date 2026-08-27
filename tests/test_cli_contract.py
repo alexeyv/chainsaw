@@ -186,6 +186,137 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
 
 class VerificationContractTests(SupervisorContractCase):
+    def test_daemon_owned_transitions_require_a_forced_coordinator_remedy(self):
+        task = self.new_task()
+
+        commit = self.cli("task", "record-commit", str(task), self.head())
+        commentary = self.cli("task", "record-commentary", str(task))
+
+        message = (
+            "normally the coordinator records this on its own; use --force "
+            "--reason only to remedy a coordinator failure"
+        )
+        self.assert_failure(commit, message)
+        self.assert_failure(commentary, message)
+
+    def test_forced_coordinator_remedies_record_transitions_and_reasons(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        sha = self.commit_file()
+
+        commit = self.assert_success(self.cli(
+            "task", "record-commit", str(task), sha, "--force", "--reason",
+            "daemon restarted before observing the marker",
+        ))
+        commentary = self.assert_success(self.cli(
+            "task", "record-commentary", str(task), "--force", "--reason",
+            "commentator ingestion was missed after restart",
+        ))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn("commit recorded by force", commit.stdout)
+        self.assertIn("commentary delivery recorded by force", commentary.stdout)
+        self.assertIn(f"{task} committed_unverified", state.stdout)
+        self.assertIn("commentary-delivered@", state.stdout)
+        self.assertIn("forced-commit", state.stdout)
+        self.assertIn("daemon restarted before observing the marker", state.stdout)
+        self.assertIn("forced-commentary", state.stdout)
+        self.assertIn("commentator ingestion was missed after restart", state.stdout)
+
+    def test_forced_commit_requires_valid_new_task_commit_evidence(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        missing = self.cli(
+            "task", "record-commit", str(task), "deadbeef", "--force",
+            "--reason", "marker was missed",
+        )
+        base = self.cli(
+            "task", "record-commit", str(task), self.head(), "--force",
+            "--reason", "marker was missed",
+        )
+
+        self.assert_failure(missing, "does not exist in the run repository")
+        self.assert_failure(base, "does not descend from task")
+
+    def test_forced_commit_rejects_a_commit_from_an_unrelated_history(self):
+        self.git("checkout", "--orphan", "unrelated")
+        self.git("rm", "--cached", "seed.txt")
+        (self.run_dir / "seed.txt").unlink()
+        unrelated_sha = self.commit_file(
+            "unrelated.txt", "unrelated\n", "test: unrelated fixture commit",
+        )
+        self.git("checkout", "master")
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.cli(
+            "task", "record-commit", str(task), unrelated_sha, "--force",
+            "--reason", "marker was missed",
+        )
+
+        self.assert_failure(result, "does not descend from task")
+
+    def test_forced_commit_rejects_a_commit_recorded_for_another_task(self):
+        first = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(first))
+        sha = self.commit_file()
+        self.assert_success(self.cli(
+            "task", "record-commit", str(first), sha, "--force", "--reason",
+            "first marker was missed",
+        ))
+        second = self.new_task(text="Second task.", files="second.txt")
+        self.assert_success(self.cli(
+            "launch", "replacement", "--fresh", "--reason", "independent fixture",
+        ))
+        self.assert_success(self.dispatch(second, "replacement"))
+
+        result = self.cli(
+            "task", "record-commit", str(second), sha, "--force", "--reason",
+            "second marker was missed",
+        )
+
+        self.assert_failure(result, f"already recorded for task {first}")
+
+    def test_forced_coordinator_remedies_require_nonempty_reasons(self):
+        task = self.new_task()
+
+        commit_with_blank_reason = self.cli(
+            "task", "record-commit", str(task), self.head(), "--force",
+            "--reason", "  ",
+        )
+        commentary_without_reason = self.cli(
+            "task", "record-commentary", str(task), "--force",
+        )
+        commit_reason_without_force = self.cli(
+            "task", "record-commit", str(task), self.head(), "--reason",
+            "manual intervention",
+        )
+        commentary_with_blank_reason = self.cli(
+            "task", "record-commentary", str(task), "--force", "--reason", "  ",
+        )
+
+        self.assert_failure(
+            commit_with_blank_reason,
+            "task record-commit --force requires a non-empty --reason",
+        )
+        self.assert_failure(
+            commentary_without_reason,
+            "task record-commentary --force requires a non-empty --reason",
+        )
+        self.assert_failure(
+            commit_reason_without_force,
+            "--reason only applies with --force",
+        )
+        self.assert_failure(
+            commentary_with_blank_reason,
+            "task record-commentary --force requires a non-empty --reason",
+        )
+
     def test_a_clean_commit_is_accepted_without_reproving_the_gate(self):
         task, sha = self.prepare_committed_task()
 
