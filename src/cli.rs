@@ -117,7 +117,7 @@ pub enum Command {
   },
   /// Print JSON containing all resolved findings.
   Resolutions,
-  /// Read or write a run setting.
+  /// Read or write a run-state flag in the supervisor database.
   Config {
     key: String,
     #[arg(allow_hyphen_values = true)]

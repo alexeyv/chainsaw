@@ -203,7 +203,7 @@ measured separately (`$SUP state` shows both).
    is about to edit (rationale at step 6). `--reuse` refuses, measured not judged, when
    that session is in flight, its last task aborted, its context is over
    `reuse-max-context` (60k), or the tree moved more than `reuse-max-stale-lines` (200
-   changed lines) since its last turn — its memory is then wrong, not merely old; launch
+   changed lines; both tunable in `chainsaw.json` at the run root) since its last turn — its memory is then wrong, not merely old; launch
    fresh instead. The implementer's contract:
 
    ```text

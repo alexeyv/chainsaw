@@ -109,15 +109,6 @@ impl Store {
     Ok(self.cfg(key)?.unwrap_or_else(|| default.to_owned()))
   }
 
-  pub fn cfg_i64(&self, key: &str, default: i64) -> i64 {
-    self
-      .cfg(key)
-      .ok()
-      .flatten()
-      .and_then(|value| value.parse().ok())
-      .unwrap_or(default)
-  }
-
   pub fn set_cfg(&self, key: &str, value: &str) -> Result<()> {
     self.db.execute(
       "insert or replace into config values(?,?)",

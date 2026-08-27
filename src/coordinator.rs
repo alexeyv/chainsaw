@@ -24,14 +24,13 @@ use crate::logs::{
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
+use crate::settings::Settings;
 use crate::store::{Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
-const REUSE_MAX_CONTEXT: i64 = 60_000;
-const REUSE_MAX_STALE_LINES: i64 = 200;
 const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 
@@ -294,7 +293,8 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
       task.id()
     )));
   }
-  let context_limit = store.cfg_i64("reuse-max-context", REUSE_MAX_CONTEXT);
+  let settings = Settings::load(&store.run_dir)?;
+  let context_limit = settings.reuse_max_context();
   if session.context() > context_limit {
     return Ok(Some(format!(
       "context {} is over reuse-max-context {context_limit}",
@@ -303,7 +303,7 @@ fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
   }
   let since = last.and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned));
   let (commits, files, lines) = staleness(store, since.as_deref())?;
-  let stale_limit = store.cfg_i64("reuse-max-stale-lines", REUSE_MAX_STALE_LINES);
+  let stale_limit = settings.reuse_max_stale_lines();
   if lines > stale_limit {
     return Ok(Some(format!(
       "tree moved {lines} lines in {files} files over {commits} commits since its last turn, over reuse-max-stale-lines {stale_limit}: its memory of the tree is wrong, not merely old"

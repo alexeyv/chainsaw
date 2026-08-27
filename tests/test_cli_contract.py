@@ -75,11 +75,11 @@ class TaskContractTests(SupervisorContractCase):
         self.assertIn("retry of 1", state.stdout)
 
     def test_config_round_trips_across_processes(self):
-        self.assert_success(self.cli("config", "reuse-max-context", "48000"))
+        self.assert_success(self.cli("config", "lead", "lead-7"))
 
-        result = self.assert_success(self.cli("config", "reuse-max-context"))
+        result = self.assert_success(self.cli("config", "lead"))
 
-        self.assertEqual(result.stdout, "48000\n")
+        self.assertEqual(result.stdout, "lead-7\n")
 
 
 class PromptAndDispatchContractTests(SupervisorContractCase):
@@ -321,12 +321,22 @@ class ReuseContractTests(SupervisorContractCase):
 
     def test_session_over_configured_context_limit_cannot_be_reused(self):
         self.verified_first_task()
-        self.assert_success(self.cli("config", "reuse-max-context", "-1"))
+        (self.run_dir / "chainsaw.json").write_text('{"reuse-max-context": -1}\n')
         second = self.new_task(text="Second task.", files="second.txt")
 
         result = self.dispatch(second, reuse=True)
 
         self.assert_failure(result, "is over reuse-max-context -1")
+
+    def test_reuse_refuses_an_unreadable_settings_file(self):
+        self.verified_first_task()
+        (self.run_dir / "chainsaw.json").write_text('{"reuse-max-contxt": 1}\n')
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.dispatch(second, reuse=True)
+
+        self.assert_failure(result, "invalid settings in")
+        self.assert_failure(result, 'unknown setting "reuse-max-contxt"')
 
     def test_session_with_a_materially_stale_tree_cannot_be_reused(self):
         self.verified_first_task()
