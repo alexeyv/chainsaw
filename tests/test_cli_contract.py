@@ -104,6 +104,24 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
             ],
         )
 
+    def test_a_lost_prompt_is_retried_three_times_and_reported(self):
+        (self.run_dir / "chainsaw.json").write_text(
+            '{"prompt-landing-seconds": 0}\n'
+        )
+        self.launch()
+        self.update_zero_cost_dummy(drop_prompts=3)
+
+        result = self.cli("prompt", "worker", "lost in transit")
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(result, "never landed after 3 attempts")
+        self.assertEqual(
+            [operation["operation"] for operation in self.runtime_operations()
+             if operation["operation"] == "prompt"],
+            ["prompt", "prompt", "prompt"],
+        )
+        self.assertIn("prompt-failed worker", state.stdout)
+
     def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
         task = self.new_task()
         self.assert_success(self.cli(
@@ -857,31 +875,54 @@ class BusySessionContractTests(SupervisorContractCase):
     """A busy agent queues a prompt and works through it once it goes idle."""
 
     def test_a_prompt_is_withheld_while_busy_and_lands_when_the_session_goes_idle(self):
+        (self.run_dir / "chainsaw.json").write_text(
+            '{"prompt-landing-seconds": 1}\n'
+        )
         self.launch()
         self.set_agent_status("worker", "busy")
         log = self.session_log("worker")
         landed_while_busy = []
 
         def release():
-            landed_while_busy.append(
-                log.exists() and "queued while busy" in log.read_text()
-            )
+            entries = [json.loads(line) for line in log.read_text().splitlines()]
+            landed_while_busy.append(any(
+                entry.get("type") == "user" for entry in entries
+            ))
             self.set_agent_status("worker", "idle")
 
-        timer = threading.Timer(0.3, release)
+        timer = threading.Timer(1.3, release)
         timer.start()
         self.addCleanup(timer.cancel)
 
-        self.assert_success(self.cli("prompt", "worker", "queued while busy"))
+        self.assert_success(self.cli(
+            "prompt", "worker", "queued while busy", "--wait"
+        ))
         timer.join(timeout=5)
+
+        entries = [json.loads(line) for line in log.read_text().splitlines()]
+        enqueues = [
+            entry for entry in entries
+            if entry.get("type") == "queue-operation"
+            and entry.get("operation") == "enqueue"
+            and entry.get("content") == "queued while busy"
+        ]
+        users = [
+            entry for entry in entries
+            if entry.get("type") == "user"
+            and entry.get("message", {}).get("content") == "queued while busy"
+        ]
 
         self.assertEqual(
             landed_while_busy, [False],
             "a busy session must withhold the prompt, not answer it synchronously",
         )
         self.assertEqual(
-            log.read_text().count("queued while busy"), 1,
-            "the queued prompt should land exactly once, neither lost nor duplicated",
+            len(enqueues), 1,
+            "the busy session should record exactly one queued copy",
+        )
+        self.assertEqual(
+            len(users), 1,
+            "the queued prompt should be delivered exactly once",
         )
         self.assertEqual(
             [operation["operation"] for operation in self.runtime_operations()
@@ -889,6 +930,8 @@ class BusySessionContractTests(SupervisorContractCase):
             ["prompt"],
             "the supervisor waited the queue out; it should not have resent",
         )
+        state = self.assert_success(self.cli("state"))
+        self.assertIn("prompt-queued worker", state.stdout)
 
 
 class DottedRunDirectoryContractTests(SupervisorContractCase):

@@ -19,8 +19,8 @@ use strum::IntoEnumIterator;
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskState};
 use crate::logs::{
-  commits_in_log, context_before, context_peak, context_size, file_size, latest_assistant_text,
-  prompt_landed,
+  PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
+  latest_assistant_text, prompt_landed,
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
@@ -459,6 +459,7 @@ fn cmd_prompt(
     params![name, text, now()],
   )?;
   let prompt_id = store.db.last_insert_rowid();
+  let prompt_landing_seconds = Settings::load(&store.run_dir)?.prompt_landing_seconds() as f64;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
@@ -471,7 +472,7 @@ fn cmd_prompt(
       [prompt_id],
     )?;
     let _ = runtime.prompt(name, text);
-    let deadline = now() + 15.0;
+    let deadline = now() + prompt_landing_seconds;
     while now() < deadline {
       let _ = runtime.query(name);
       let path = session_log_named(store, name)?;
@@ -479,12 +480,15 @@ fn cmd_prompt(
         offset = 0;
       }
       if let Some(path) = path
-        && prompt_landed(&path, offset, &needle)
+        && let Some(landing) = prompt_landed(&path, offset, &needle)
       {
         store.db.execute(
           "update prompts set landed_at=? where id=?",
           params![now(), prompt_id],
         )?;
+        if landing == PromptLanding::Queued {
+          store.event("prompt-queued", name)?;
+        }
         FileExt::unlock(&lock)?;
         if wait {
           let _ = runtime.wait(name, Duration::from_secs(timeout));
@@ -1419,7 +1423,7 @@ fn cmd_state(store: &Store) -> Result<()> {
     println!("  (a human wait is open)");
   }
   let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','accepted','launch-fresh','forced-commit','forced-commentary') order by at desc limit 5",
+        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary') order by at desc limit 5",
     )?;
   let events = statement.query_map([], |row| {
     Ok((
@@ -1665,12 +1669,12 @@ fn kick_if_stalled(
       .map(|session| session.status)
       .as_deref()
       .is_some_and(|status| matches!(status, "idle" | "done"))
+    && daemon_prompt(store, runtime, session.name(), "continue")
   {
     store.event("kick", session.name())?;
     let transaction = store.db.unchecked_transaction()?;
     session::record_kick(&transaction, session.id())?;
     transaction.commit()?;
-    daemon_prompt(store, runtime, session.name(), "continue");
   }
   Ok(())
 }
@@ -1741,9 +1745,10 @@ fn observe_commentator(
     }
   }
   if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
-    *compacting = true;
-    store.event("compact", &format!("{} at {context}", session.name()))?;
-    daemon_prompt(store, runtime, session.name(), "/compact");
+    if daemon_prompt(store, runtime, session.name(), "/compact") {
+      *compacting = true;
+      store.event("compact", &format!("{} at {context}", session.name()))?;
+    }
   } else if context < COMMENTATOR_COMPACT_TOKENS {
     *compacting = false;
   }
@@ -1757,9 +1762,7 @@ fn observe_lead(
   context: i64,
 ) -> Result<()> {
   if context > LEAD_STOP_TOKENS && store.cfg("lead-told-stop")?.as_deref() != Some("1") {
-    store.set_cfg("lead-told-stop", "1")?;
-    store.event("stop-lead", &format!("context {context}"))?;
-    daemon_prompt(
+    let landed = daemon_prompt(
       store,
       runtime,
       name,
@@ -1767,6 +1770,10 @@ fn observe_lead(
         "supervisor: your context is {context} tokens, past {LEAD_STOP_TOKENS}. Stop the run per the skill's Stopping section: the human must ask them plainly whether to end the run for good, then let the in-flight implementer finish, wait for the commentator on that commit, write the continuation prompt, then stop."
       ),
     );
+    if landed {
+      store.set_cfg("lead-told-stop", "1")?;
+      store.event("stop-lead", &format!("context {context}"))?;
+    }
   }
   Ok(())
 }

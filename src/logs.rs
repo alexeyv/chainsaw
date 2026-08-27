@@ -78,11 +78,31 @@ fn token_field(usage: &Value, key: &str) -> u64 {
   usage.get(key).and_then(Value::as_u64).unwrap_or_default()
 }
 
-pub fn prompt_landed(path: &Path, offset: u64, needle: &str) -> bool {
-  entries(path, offset).into_iter().any(|entry| {
-    entry.get("type").and_then(Value::as_str) == Some("user")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptLanding {
+  Landed,
+  Queued,
+}
+
+pub fn prompt_landed(path: &Path, offset: u64, needle: &str) -> Option<PromptLanding> {
+  let mut queued = false;
+  for entry in entries(path, offset) {
+    if entry.get("type").and_then(Value::as_str) == Some("user")
       && text_of(entry.pointer("/message/content").unwrap_or(&Value::Null)).contains(needle)
-  })
+    {
+      return Some(PromptLanding::Landed);
+    }
+    if entry.get("type").and_then(Value::as_str) == Some("queue-operation")
+      && entry.get("operation").and_then(Value::as_str) == Some("enqueue")
+      && entry
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| content.contains(needle))
+    {
+      queued = true;
+    }
+  }
+  queued.then_some(PromptLanding::Queued)
 }
 
 pub fn latest_assistant_text(path: &Path) -> Option<String> {
@@ -211,7 +231,63 @@ fn text_of(content: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::usage_of_line;
+  use std::fs;
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  use super::{PromptLanding, prompt_landed, usage_of_line};
+
+  fn landing_in(transcript: &str, needle: &str) -> Option<PromptLanding> {
+    static NEXT_TRANSCRIPT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+      "chainsaw-prompt-landing-{}-{}.jsonl",
+      std::process::id(),
+      NEXT_TRANSCRIPT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, transcript).unwrap();
+    let landing = prompt_landed(&path, 0, needle);
+    let _ = fs::remove_file(path);
+    landing
+  }
+
+  mod prompt_landed {
+    use super::*;
+
+    #[test]
+    fn should_work() {
+      let transcript = r#"{"type":"user","message":{"content":"deliver this prompt"}}"#;
+
+      assert_eq!(
+        landing_in(transcript, "deliver this"),
+        Some(PromptLanding::Landed)
+      );
+    }
+
+    #[test]
+    fn should_report_a_matching_enqueue() {
+      let transcript =
+        r#"{"type":"queue-operation","operation":"enqueue","content":"deliver this prompt"}"#;
+
+      assert_eq!(
+        landing_in(transcript, "deliver this"),
+        Some(PromptLanding::Queued)
+      );
+    }
+
+    #[test]
+    fn should_report_neither_when_no_entry_matches() {
+      let transcript = r#"{"type":"assistant","message":{"content":"deliver this prompt"}}"#;
+
+      assert_eq!(landing_in(transcript, "deliver this"), None);
+    }
+
+    #[test]
+    fn should_ignore_an_enqueue_for_a_different_prompt() {
+      let transcript =
+        r#"{"type":"queue-operation","operation":"enqueue","content":"something else"}"#;
+
+      assert_eq!(landing_in(transcript, "deliver this"), None);
+    }
+  }
 
   #[test]
   fn sums_context_tokens() {

@@ -5,9 +5,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
@@ -344,6 +345,28 @@ impl ZeroCostDummy {
     Ok(())
   }
 
+  /// Write the transcript entry a real agent produces when it queues a prompt.
+  fn enqueue(session: &Value, text: &str) -> Result<()> {
+    let run_dir = session
+      .get("run_dir")
+      .and_then(Value::as_str)
+      .context("dummy session lacks run_dir")?;
+    let external_id = session
+      .get("session_id")
+      .and_then(Value::as_str)
+      .context("dummy session lacks session_id")?;
+    let log = Self::logs_dir(Path::new(run_dir))?.join(format!("{external_id}.jsonl"));
+    Self::append_log(
+      &log,
+      &json!({
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "content": text,
+        "timestamp": Utc::now().to_rfc3339(),
+      }),
+    )
+  }
+
   fn is_busy(session: &Value) -> bool {
     session.get("status").and_then(Value::as_str) == Some("busy")
   }
@@ -472,6 +495,7 @@ impl SessionRuntime for ZeroCostDummy {
         .cloned()
         .with_context(|| format!("dummy session {session_id} does not exist"))?;
       if Self::is_busy(&session) {
+        Self::enqueue(&session, text)?;
         let queued = Self::object_mut(state, "agents")?
           .get_mut(session_id)
           .and_then(|session| session.get_mut("queued"))
@@ -499,7 +523,22 @@ impl SessionRuntime for ZeroCostDummy {
         "timeout_ms": timeout.as_millis(),
       }));
       Ok(())
-    })
+    })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+      let idle = self.with_state(|state| {
+        Self::drain_queue(state, session_id)?;
+        Ok(
+          Self::object_mut(state, "agents")?
+            .get(session_id)
+            .is_none_or(|session| !Self::is_busy(session)),
+        )
+      })?;
+      if idle || Instant::now() >= deadline {
+        return Ok(());
+      }
+      thread::sleep(Duration::from_millis(10));
+    }
   }
 }
 

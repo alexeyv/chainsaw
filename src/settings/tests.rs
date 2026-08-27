@@ -36,12 +36,13 @@ mod load {
     let dir = ScratchDir::new();
     fs::write(
       dir.path().join(FILE_NAME),
-      r#"{"reuse-max-context": 48000, "reuse-max-stale-lines": 50}"#,
+      r#"{"prompt-landing-seconds": 3, "reuse-max-context": 48000, "reuse-max-stale-lines": 50}"#,
     )
     .unwrap();
 
     let settings = Settings::load(dir.path()).unwrap();
 
+    assert_eq!(settings.prompt_landing_seconds(), 3);
     assert_eq!(settings.reuse_max_context(), 48_000);
     assert_eq!(settings.reuse_max_stale_lines(), 50);
   }
@@ -76,6 +77,10 @@ mod parse {
   fn should_work() {
     let settings = Settings::parse(r#"{"reuse-max-context": -1}"#).unwrap();
 
+    assert_eq!(
+      settings.prompt_landing_seconds(),
+      DEFAULT_PROMPT_LANDING_SECONDS
+    );
     assert_eq!(settings.reuse_max_context(), -1);
     assert_eq!(
       settings.reuse_max_stale_lines(),
