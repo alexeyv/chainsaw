@@ -41,6 +41,21 @@ class ReviewPromptContractTests(unittest.TestCase):
         self.assertIn("visible to every\n  commentator", self.commentator)
         self.assertIn("no commentator identity or session scope", self.commentator)
 
+    def test_lead_is_told_not_to_assert_unverified_facts(self):
+        self.assertIn(
+            "Don't state facts about the code you haven't verified. Say what the implementer\n"
+            "   needs to find out, not what you assume the answer is.",
+            self.lead,
+        )
+
+    def test_implementer_contract_runs_the_gate_once_in_both_copies(self):
+        coordinator = (PROJECT_ROOT / "src" / "coordinator.rs").read_text()
+        phrase = "run the project's quality gate once, immediately before"
+        self.assertIn(phrase, self.lead.replace("\n   ", " "))
+        self.assertIn(phrase, coordinator)
+        self.assertIn("gate failures you judged pre-existing", coordinator)
+        self.assertIn("known pre-existing gate failures", self.lead)
+
     def test_prompts_and_coordinator_do_not_name_legacy_review_files(self):
         legacy_names = (
             "chainsaw-" + "comments.md",

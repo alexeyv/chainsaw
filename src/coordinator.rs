@@ -35,7 +35,7 @@ const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on its own; use --force --reason only to remedy a coordinator failure";
 
-const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks, then the project's quality gate last. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, and a one-paragraph semantic delta.";
+const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
 pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
   match command {

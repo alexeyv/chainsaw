@@ -41,6 +41,7 @@ Human steering in any pane is authoritative and overrides this loop.
 You and the commentator must never send or receive messages to each other - only
 through supervisor CLI ($SUP).
 
+
 ## Review protocol
 
 The supervisor database and CLI are the only review communication channel. Never
@@ -158,8 +159,12 @@ previous commit has landed, reconciling the draft against the actual tree.
    commentator.
 4. Run every task-specific check yourself at the base commit and record its baseline;
    never type one from memory. Do not re-run the quality gate yourself — take the
-   base numbers from the previous implementer's report and log.
-5. Record it: `$SUP task new --files a.py,b.py --predicted-lines N < task.md` prints
+   base numbers and the known pre-existing gate failures from the previous
+   implementer's report and log, and name those failures in the brief so the
+   implementer does not rediscover them.
+5. Don't state facts about the code you haven't verified. Say what the implementer
+   needs to find out, not what you assume the answer is.
+6. Record it: `$SUP task new --files a.py,b.py --predicted-lines N < task.md` prints
    the task id; name the predicted files (the count is derived), so the supervisor can
    judge overlap for a reused implementer — `--predicted-files N` alone is the fallback
    when the set is genuinely unknown. Never edit a brief in place after dispatch. A
@@ -222,9 +227,10 @@ measured separately (`$SUP state` shows both).
 
    ```text
    Verify the tree is clean; stop if dirty. Implement only this task. Run the task's
-   checks, then the project's quality gate last. Commit without attribution trailers,
-   leave the tree clean, and finish with the commit id, changed-file manifest, and a
-   one-paragraph semantic delta.
+   checks as you work; run the project's quality gate once, immediately before
+   committing. Commit without attribution trailers, leave the tree clean, and finish
+   with the commit id, changed-file manifest, a one-paragraph semantic delta, and any
+   gate failures you judged pre-existing (test name and one-line error).
    ```
 
    Prompts are serial and delivery is verified against the session log by the
