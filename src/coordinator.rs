@@ -420,7 +420,7 @@ fn cmd_launch(
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
   let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   session::stop_named(&transaction, name)?;
   session::create(
     &transaction,
@@ -608,7 +608,7 @@ fn cmd_task_new(
   let predicted_files = predicted_files.context("task file prediction was not validated")?;
   let predicted_file_list =
     (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   let task = task::create(
     &transaction,
     &text,
@@ -755,7 +755,7 @@ fn cmd_dispatch(
   let dispatch_reason = reason
     .map(str::to_owned)
     .or_else(|| reuse.then(|| format!("reuse of {implementer}")));
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
     task_id,
@@ -769,7 +769,7 @@ fn cmd_dispatch(
   let offset = file_size(log.as_deref());
   let base = context_before(log.as_deref(), offset);
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   task::take_flight(&transaction, task_id, offset as i64, &head, base as i64)?;
   transaction.commit()?;
   if reuse {
@@ -877,7 +877,7 @@ fn cmd_task_record_commit(
   let Some(commit_sha) = canonical_commit(store, sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   for other in task::all(&transaction)? {
     if other.id() != task_id
       && other
@@ -932,7 +932,7 @@ fn cmd_task_record_commentary(
       task.state()
     );
   }
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   if !commentary_delivery::record(&transaction, task_id)? {
     bail!("supervisor: commentary delivery is already recorded for task {task_id}");
   }
@@ -971,7 +971,7 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
       task.state()
     );
   }
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   task::accept(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("accepted", &format!("task {task_id}: {reason}"))?;
@@ -1039,7 +1039,7 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     let sha = sha
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
-    let transaction = store.db.unchecked_transaction()?;
+    let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task_id, sha, None)?;
     task::accept(&transaction, task_id, &format!("checks passed at {sha}"))?;
     transaction.commit()?;
@@ -1103,7 +1103,7 @@ fn cmd_abort(store: &Store, task_id: i64, reason: &str) -> Result<()> {
     bail!("supervisor: task {task_id} is already {}", task.state());
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   task::abort(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("aborted", &format!("task {task_id}: {reason}"))?;
@@ -1176,7 +1176,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   }
   let base = task.context_size_start().unwrap_or_default();
   let context = (end - base).max(0);
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   calibration::create(
     &transaction,
     task_id,
@@ -1204,7 +1204,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
 }
 
 fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   if let Some(task_id) = task_id {
     require_task(&transaction, task_id)?;
   }
@@ -1215,7 +1215,7 @@ fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
 }
 
 fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   require_task(&transaction, task_id)?;
   let finding = finding::register(&transaction, task_id, description)?;
   transaction.commit()?;
@@ -1280,7 +1280,7 @@ fn cmd_resolve(
     Verdict::Task => FindingVerdict::Task,
     Verdict::Dropped => FindingVerdict::Dropped,
   };
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   let finding = finding::get(&transaction, finding_id)?
     .with_context(|| format!("supervisor: no finding {finding_id}"))?;
   if let Some(fix_task_id) = fix_task_id {
@@ -1606,7 +1606,7 @@ fn daemon(
       let context = context_size(Some(&log)) as i64;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
-      let transaction = store.db.unchecked_transaction()?;
+      let transaction = store.write_transaction()?;
       session::record_reading(&transaction, session.id(), context, grew, timestamp)?;
       transaction.commit()?;
       let quiet = session.quiet_seconds(timestamp) as f64;
@@ -1638,7 +1638,7 @@ fn daemon(
 /// lead says about itself. The same session id keeps its row across daemon
 /// restarts; a different one is a new incarnation and stops the old row.
 fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
-  let transaction = store.db.unchecked_transaction()?;
+  let transaction = store.write_transaction()?;
   let current = session::latest_named(&transaction, lead)?;
   if !current.is_some_and(|session| {
     session.is_live()
@@ -1672,7 +1672,7 @@ fn kick_if_stalled(
     && daemon_prompt(store, runtime, session.name(), "continue")
   {
     store.event("kick", session.name())?;
-    let transaction = store.db.unchecked_transaction()?;
+    let transaction = store.write_transaction()?;
     session::record_kick(&transaction, session.id())?;
     transaction.commit()?;
   }
@@ -1697,7 +1697,7 @@ fn observe_implementer(
     .map(|path| commits_in_log(path, task.log_offset() as u64))
     .unwrap_or_default();
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
-    let transaction = store.db.unchecked_transaction()?;
+    let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
     transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
@@ -1735,7 +1735,7 @@ fn observe_commentator(
       let sha = task.commit_sha().unwrap_or_default();
       let abbreviation = sha.get(..7).unwrap_or(sha);
       if text.contains(abbreviation) {
-        let transaction = store.db.unchecked_transaction()?;
+        let transaction = store.write_transaction()?;
         let recorded = commentary_delivery::record(&transaction, task.id())?;
         transaction.commit()?;
         if recorded {

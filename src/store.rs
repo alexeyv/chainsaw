@@ -124,6 +124,14 @@ impl Store {
     )?;
     Ok(())
   }
+
+  /// Reserve the SQLite writer lock before any reads can make an upgrade fail fast.
+  pub fn write_transaction(&self) -> Result<Transaction<'_>> {
+    Ok(Transaction::new_unchecked(
+      &self.db,
+      TransactionBehavior::Immediate,
+    )?)
+  }
 }
 
 pub fn now() -> f64 {
@@ -161,15 +169,16 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
   use std::fs;
+  use std::path::PathBuf;
   use std::sync::atomic::{AtomicU64, Ordering};
   use std::sync::{Arc, Barrier};
   use std::thread;
   use std::time::Duration;
 
   use anyhow::Result;
-  use rusqlite::Connection;
+  use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-  use super::{initialize_schema, project_directory_name};
+  use super::{Store, initialize_schema, project_directory_name};
 
   static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
 
@@ -192,6 +201,55 @@ mod tests {
         project_directory_name(Path::new("/Users/a/src/ui.wt/refactor")),
         "-Users-a-src-ui.wt-refactor"
       );
+    }
+  }
+
+  mod write_transaction {
+    use super::*;
+
+    #[test]
+    fn should_work() -> Result<()> {
+      let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
+      let path = std::env::temp_dir().join(format!(
+        "chainsaw-write-transaction-{}-{suffix}.db",
+        std::process::id()
+      ));
+      let db = Connection::open(&path)?;
+      db.busy_timeout(Duration::from_secs(2))?;
+      db.execute_batch("create table counter(value int); insert into counter values(0);")?;
+      let store = Store {
+        run_dir: PathBuf::new(),
+        logs_dir: PathBuf::new(),
+        path: path.clone(),
+        db,
+      };
+      let barrier = Arc::new(Barrier::new(2));
+      let blocker_barrier = Arc::clone(&barrier);
+      let blocker_path = path.clone();
+      let blocker = thread::spawn(move || -> Result<()> {
+        let db = Connection::open(blocker_path)?;
+        let transaction = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)?;
+        blocker_barrier.wait();
+        thread::sleep(Duration::from_millis(100));
+        transaction.commit()?;
+        Ok(())
+      });
+      barrier.wait();
+
+      let transaction = store.write_transaction()?;
+      let value =
+        transaction.query_row("select value from counter", [], |row| row.get::<_, i64>(0))?;
+      transaction.execute("update counter set value=?", [value + 1])?;
+      transaction.commit()?;
+      blocker.join().expect("writer thread panicked")?;
+      let value = store
+        .db
+        .query_row("select value from counter", [], |row| row.get::<_, i64>(0))?;
+
+      assert_eq!(value, 1);
+      drop(store);
+      let _ = fs::remove_file(path);
+      Ok(())
     }
   }
 
