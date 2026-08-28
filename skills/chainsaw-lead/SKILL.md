@@ -101,12 +101,15 @@ It can also become aborted from any of these states.
 Nothing has been sent to an implementer yet. If you decide to reshape the task, you abort it,
 and draft another.
 
-**dispatched** — implementer session received the task prompt. You
-trigger this: `$SUP dispatch <task-id> --to implementer-<n> [--reuse] [--reason "..."]`.
+**dispatched** — implementer session received the task prompt, but has not yet produced
+new transcript output after it. You trigger this: `$SUP dispatch <task-id> --to
+implementer-<n> [--reuse] [--reason "..."]`. The supervisor records the session's log
+offset here so it can distinguish prompt delivery from the implementer starting work.
 
-**in_flight** — implementer started working on the task. The supervisor detects and
-records this automatically, along with the measurement baseline: the session's log offset,
-git revision the implementer started from, and its starting context size.
+**in_flight** — implementer started working on the task. The daemon detects the first
+session-log growth past the dispatch offset and records this automatically, along with the
+measurement baseline: that dispatch log offset, the current git revision, and the context
+size at the offset.
 
 **committed_unverified** — implementer has committed its work to Git. The supervisor detects and
 records this automatically. As soon as you see this state, dispatching the next task to the next
@@ -159,8 +162,10 @@ previous commit has landed, reconciling the draft against the actual tree.
 5. Record it: `$SUP task new --files a.py,b.py --predicted-lines N < task.md` prints
    the task id; name the predicted files (the count is derived), so the supervisor can
    judge overlap for a reused implementer — `--predicted-files N` alone is the fallback
-   when the set is genuinely unknown. A dispatched task is immutable; corrections are a
-   later fix task.
+   when the set is genuinely unknown. Never edit a brief in place after dispatch. A
+   dispatched or in-flight task may instead be superseded with `$SUP task new --retry-of
+   <id> --reason "..." ... < task.md`, which aborts and interrupts the old task before
+   creating its replacement.
 
 Anything the spec does not settle is a question for the human, never invented.
 

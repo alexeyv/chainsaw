@@ -85,6 +85,7 @@ pub trait SessionRuntime {
   fn start(&self, session: StartSession<'_>) -> Result<StartedSession>;
   fn query(&self, session_id: &str) -> Result<Option<SessionQuery>>;
   fn prompt(&self, session_id: &str, text: &str) -> Result<()>;
+  fn interrupt(&self, session_id: &str) -> Result<()>;
   fn wait(&self, session_id: &str, timeout: Duration) -> Result<()>;
 }
 
@@ -219,6 +220,11 @@ impl SessionRuntime for HerdrSessionRuntime {
 
   fn prompt(&self, session_id: &str, text: &str) -> Result<()> {
     let _ = self.run(&["agent", "prompt", session_id, text])?;
+    Ok(())
+  }
+
+  fn interrupt(&self, session_id: &str) -> Result<()> {
+    let _ = self.request(&["agent", "send-keys", session_id, "esc"])?;
     Ok(())
   }
 
@@ -515,6 +521,21 @@ impl SessionRuntime for ZeroCostDummy {
     })
   }
 
+  fn interrupt(&self, session_id: &str) -> Result<()> {
+    self.with_state(|state| {
+      let session = Self::object_mut(state, "agents")?
+        .get_mut(session_id)
+        .with_context(|| format!("dummy session {session_id} does not exist"))?;
+      session["status"] = json!("idle");
+      session["queued"] = json!([]);
+      Self::operations_mut(state)?.push(json!({
+        "operation": "interrupt",
+        "session_id": session_id,
+      }));
+      Ok(())
+    })
+  }
+
   fn wait(&self, session_id: &str, timeout: Duration) -> Result<()> {
     self.with_state(|state| {
       Self::operations_mut(state)?.push(json!({
@@ -588,6 +609,8 @@ case "$1 $2" in
   if [ "$3" = malformed ]; then printf 'not json\n'; exit 0; fi
   printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"busy"}}}\n' ;;
 'agent prompt')
+  printf '{"result":{"delivered":true}}\n' ;;
+'agent send-keys')
   printf '{"result":{"delivered":true}}\n' ;;
 'agent wait')
   printf '{"result":{"status":"idle"}}\n' ;;
@@ -803,6 +826,67 @@ esac
         herdr.calls()[0],
         ["agent", "prompt", "worker", "do the thing"]
       );
+    }
+  }
+
+  mod interrupt {
+    use super::*;
+
+    #[test]
+    fn should_work() {
+      let herdr = FakeHerdr::new();
+
+      herdr
+        .runtime(Some("workspace-1"), "")
+        .interrupt("worker")
+        .unwrap();
+
+      assert_eq!(herdr.calls()[0], ["agent", "send-keys", "worker", "esc"]);
+    }
+
+    #[test]
+    fn should_clear_a_dummy_session_queue_and_make_it_idle() {
+      let sequence = NEXT_SHIM.fetch_add(1, Ordering::Relaxed);
+      let state_path = env::temp_dir().join(format!(
+        "chainsaw-dummy-interrupt-{}-{sequence}.json",
+        std::process::id()
+      ));
+      fs::write(
+        &state_path,
+        json!({
+          "agents": {
+            "worker": {
+              "session_id": "session-worker-1",
+              "status": "busy",
+              "run_dir": "/tmp/run",
+              "queued": ["stale work"]
+            }
+          },
+          "panes": {},
+          "sequence": 1,
+          "drop_prompts": 0,
+          "operations": []
+        })
+        .to_string(),
+      )
+      .unwrap();
+      let runtime = ZeroCostDummy::new(state_path.clone());
+
+      runtime.interrupt("worker").unwrap();
+
+      let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+      assert_eq!(state["agents"]["worker"]["status"], "idle");
+      assert_eq!(state["agents"]["worker"]["queued"], json!([]));
+      assert_eq!(
+        state["operations"],
+        json!([{"operation": "interrupt", "session_id": "worker"}])
+      );
+      fs::remove_file(state_path).unwrap();
+      fs::remove_file(env::temp_dir().join(format!(
+        "chainsaw-dummy-interrupt-{}-{sequence}.lock",
+        std::process::id()
+      )))
+      .unwrap();
     }
   }
 

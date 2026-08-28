@@ -147,6 +147,9 @@ pub enum TaskCommand {
     predicted_lines: i64,
     #[arg(long = "retry-of")]
     retry_of_task_id: Option<i64>,
+    /// Why an active predecessor is being aborted and superseded.
+    #[arg(long)]
+    reason: Option<String>,
   },
   /// Remedy a coordinator failure to observe an implementer commit.
   RecordCommit {

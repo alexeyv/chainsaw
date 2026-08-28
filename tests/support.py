@@ -268,9 +268,19 @@ class SupervisorContractCase(unittest.TestCase):
         task_id = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task_id))
+        self.observe_in_flight(task_id)
         sha = self.commit_with_trailer() if trailer else self.commit_file()
         self.record_commit("worker", sha)
         return task_id, sha
+
+    def observe_in_flight(self, task_id, name="worker"):
+        """Grow the implementer log and let the daemon record the flight baseline."""
+        self.append_text(name, "fixture work started")
+        daemon = self.start_daemon()
+        state = self.wait_for_state(f"{task_id} in_flight")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        return state
 
     def start_daemon(self, lead="lead", session_id=None):
         session_id = session_id or f"session-{lead}"

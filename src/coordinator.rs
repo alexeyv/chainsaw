@@ -80,12 +80,15 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         predicted_files,
         predicted_lines,
         retry_of_task_id,
+        reason,
       } => cmd_task_new(
         store,
+        runtime,
         predicted_files,
         predicted_lines,
         retry_of_task_id,
         files.as_deref(),
+        reason.as_deref(),
       ),
       TaskCommand::RecordCommit {
         task,
@@ -99,7 +102,7 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         reason,
       } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
     },
-    Command::Abort { task, reason } => cmd_abort(store, task, &reason),
+    Command::Abort { task, reason } => cmd_abort(store, runtime, task, &reason),
     Command::Dispatch {
       task,
       to,
@@ -572,21 +575,43 @@ fn task_snapshots_for_session(store: &Store, session_id: i64) -> Result<Vec<Task
 
 fn cmd_task_new(
   store: &Store,
+  runtime: &dyn SessionRuntime,
   mut predicted_files: Option<i64>,
   predicted_lines: i64,
   retry_of_task_id: Option<i64>,
   files: Option<&str>,
+  reason: Option<&str>,
 ) -> Result<()> {
   let mut text = String::new();
   std::io::stdin().read_to_string(&mut text)?;
   if text.trim().is_empty() {
     bail!("supervisor: task text on stdin is empty");
   }
-  if let Some(retry_of_task_id) = retry_of_task_id
-    && task_snapshot(store, retry_of_task_id)?.is_none_or(|task| task.state() != TaskState::Aborted)
-  {
-    bail!("supervisor: --retry-of {retry_of_task_id} is not an aborted task");
-  }
+  let active_retry = match retry_of_task_id {
+    Some(retry_of_task_id) => {
+      let predecessor = task_snapshot(store, retry_of_task_id)?.with_context(|| {
+        format!(
+          "supervisor: --retry-of {retry_of_task_id} is not aborted, dispatched, or in flight"
+        )
+      })?;
+      match predecessor.state() {
+        TaskState::Aborted => None,
+        TaskState::Dispatched | TaskState::InFlight => {
+          let reason = reason.filter(|reason| !reason.trim().is_empty()).with_context(|| {
+            format!(
+              "supervisor: --retry-of {retry_of_task_id} requires a non-empty --reason while the predecessor is {}",
+              predecessor.state()
+            )
+          })?;
+          Some((retry_of_task_id, reason))
+        }
+        _ => bail!(
+          "supervisor: --retry-of {retry_of_task_id} is not aborted, dispatched, or in flight"
+        ),
+      }
+    }
+    None => None,
+  };
   let file_list: Vec<_> = files
     .unwrap_or_default()
     .split(',')
@@ -608,6 +633,9 @@ fn cmd_task_new(
   let predicted_files = predicted_files.context("task file prediction was not validated")?;
   let predicted_file_list =
     (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
+  if let Some((retry_of_task_id, reason)) = active_retry {
+    abort_task(store, runtime, retry_of_task_id, reason)?;
+  }
   let transaction = store.write_transaction()?;
   let task = task::create(
     &transaction,
@@ -755,27 +783,22 @@ fn cmd_dispatch(
   let dispatch_reason = reason
     .map(str::to_owned)
     .or_else(|| reuse.then(|| format!("reuse of {implementer}")));
+  let log_offset = file_size(session_log(store, &session).as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
     task_id,
     session.id(),
+    log_offset as i64,
     reuse,
     dispatch_reason.as_deref(),
   )?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
-  let log = session_log(store, &session);
-  let offset = file_size(log.as_deref());
-  let base = context_before(log.as_deref(), offset);
-  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-  let transaction = store.write_transaction()?;
-  task::take_flight(&transaction, task_id, offset as i64, &head, base as i64)?;
-  transaction.commit()?;
   if reuse {
-    println!("task {task_id} in flight on {implementer} (reuse, context base {base})");
+    println!("task {task_id} dispatched to {implementer} (reuse)");
   } else {
-    println!("task {task_id} in flight on {implementer}");
+    println!("task {task_id} dispatched to {implementer}");
   }
   Ok(())
 }
@@ -805,17 +828,19 @@ fn new_commit_for(
   shas: &[String],
   base_head: Option<&str>,
 ) -> Result<Option<String>> {
+  let Some(base_head) = base_head else {
+    return Ok(None);
+  };
   for sha in shas.iter().rev() {
-    if base_head.is_some_and(|base| base.starts_with(sha)) {
+    if base_head.starts_with(sha) {
       continue;
     }
     if !git(store, &["cat-file", "-e", sha])?.status.success() {
       continue;
     }
-    if let Some(base) = base_head
-      && !git(store, &["merge-base", "--is-ancestor", base, sha])?
-        .status
-        .success()
+    if !git(store, &["merge-base", "--is-ancestor", base_head, sha])?
+      .status
+      .success()
     {
       continue;
     }
@@ -1092,7 +1117,12 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
   Ok(failures)
 }
 
-fn cmd_abort(store: &Store, task_id: i64, reason: &str) -> Result<()> {
+fn abort_task(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+  reason: &str,
+) -> Result<(i64, String)> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
@@ -1107,7 +1137,39 @@ fn cmd_abort(store: &Store, task_id: i64, reason: &str) -> Result<()> {
   task::abort(&transaction, task_id, reason)?;
   transaction.commit()?;
   store.event("aborted", &format!("task {task_id}: {reason}"))?;
+  if let Some(session_id) = task.session_id()
+    && let Some(session) = session_snapshot(store, session_id)?
+    && session.is_live()
+  {
+    let detail = format!("task {task_id} -> {}", session.name());
+    let outcome = runtime.interrupt(session.name()).and_then(|()| {
+      daemon_prompt(
+        store,
+        runtime,
+        session.name(),
+        &format!(
+          "supervisor: task {task_id} is aborted: {reason}. Stop, leave the tree clean, do not commit."
+        ),
+      )
+      .then_some(())
+      .with_context(|| format!("abort message did not reach {}", session.name()))
+    });
+    match outcome {
+      Ok(()) => store.event("abort-interrupt", &detail)?,
+      Err(error) => store.event("abort-unreachable", &format!("{detail}: {error}"))?,
+    }
+  }
   let failures = failures_in_lineage(store, task_id)?;
+  Ok((failures, dirty))
+}
+
+fn cmd_abort(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  task_id: i64,
+  reason: &str,
+) -> Result<()> {
+  let (failures, dirty) = abort_task(store, runtime, task_id, reason)?;
   let plural = if failures == 1 { "" } else { "s" };
   println!("task {task_id} aborted ({failures} abort{plural} on this task): {reason}");
   if !dirty.is_empty() {
@@ -1359,9 +1421,9 @@ fn cmd_state(store: &Store) -> Result<()> {
       .retry_of_task_id()
       .map_or_else(String::new, |id| format!("  retry of {id}"));
     let reuse = if task.is_session_reuse() {
-      format!(
-        "  reuse (context base {})",
-        task.context_size_start().unwrap_or_default()
+      task.context_size_start().map_or_else(
+        || "  reuse (awaiting context base)".to_owned(),
+        |context| format!("  reuse (context base {context})"),
       )
     } else {
       String::new()
@@ -1423,7 +1485,7 @@ fn cmd_state(store: &Store) -> Result<()> {
     println!("  (a human wait is open)");
   }
   let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary','commentary-wake') order by at desc limit 5",
+        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary','commentary-wake','abort-interrupt','abort-unreachable') order by at desc limit 5",
     )?;
   let events = statement.query_map([], |row| {
     Ok((
@@ -1693,6 +1755,24 @@ fn observe_implementer(
   let Some(task) = task else {
     return Ok(());
   };
+  if task.state() == TaskState::Dispatched {
+    let dispatch_offset = task.log_offset() as u64;
+    if file_size(log) <= dispatch_offset {
+      return Ok(());
+    }
+    let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+    let context = context_before(log, dispatch_offset);
+    let transaction = store.write_transaction()?;
+    task::take_flight(
+      &transaction,
+      task.id(),
+      dispatch_offset as i64,
+      &head,
+      context as i64,
+    )?;
+    transaction.commit()?;
+    return Ok(());
+  }
   let shas = log
     .map(|path| commits_in_log(path, task.log_offset() as u64))
     .unwrap_or_default();

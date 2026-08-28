@@ -18,7 +18,7 @@ fn draft(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
 /// A task dispatched to session 7, which the caller must have created.
 fn dispatched(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
   let task = draft(transaction, text)?;
-  dispatch(transaction, task.id(), 7, false, None)
+  dispatch(transaction, task.id(), 7, 0, false, None)
 }
 
 fn states_of(task: &Task) -> Vec<TaskState> {
@@ -343,7 +343,7 @@ mod tasks_for_session {
     let transaction = db.transaction()?;
     let first = dispatched(&transaction, "first target task")?;
     let other = draft(&transaction, "other session task")?;
-    dispatch(&transaction, other.id(), 8, false, None)?;
+    dispatch(&transaction, other.id(), 8, 0, false, None)?;
     let second = dispatched(&transaction, "second target task")?;
 
     assert_eq!(
@@ -430,11 +430,12 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, true, Some("reuse"))?;
+    let task = dispatch(&transaction, task.id(), 7, 42, true, Some("reuse"))?;
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::Dispatched);
     assert_eq!(task.session_id(), Some(7));
+    assert_eq!(task.log_offset(), 42);
     assert!(task.is_session_reuse());
     assert_eq!(task.reason(), Some("reuse"));
     assert_eq!(
@@ -451,7 +452,7 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, false, None)?;
+    let task = dispatch(&transaction, task.id(), 7, 0, false, None)?;
     transaction.commit()?;
 
     assert!(!task.is_session_reuse());
@@ -465,7 +466,7 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let error = dispatch(&transaction, task.id(), 7, false, None).unwrap_err();
+    let error = dispatch(&transaction, task.id(), 7, 0, false, None).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
@@ -716,7 +717,7 @@ mod advance {
     transaction.commit()?;
 
     let transaction = db.transaction()?;
-    dispatch(&transaction, task.id(), 7, false, None)?;
+    dispatch(&transaction, task.id(), 7, 0, false, None)?;
     transaction.rollback()?;
 
     let transaction = db.transaction()?;

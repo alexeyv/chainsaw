@@ -1,11 +1,12 @@
 """Behavioral contract for the supervisor's public CLI.
 
-Nothing in this module imports the coordinator implementation or reads its SQLite
-database. The same suite can therefore target a replacement executable by setting
-CHAINSAW_SUPERVISOR_COMMAND.
+Nothing in this module imports the coordinator implementation. It drives the CLI and
+reads SQLite only for durable details the CLI does not expose, so the suite can target
+a replacement executable by setting CHAINSAW_SUPERVISOR_COMMAND.
 """
 
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -49,7 +50,7 @@ class TaskContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "disagrees with --files")
 
-    def test_retry_must_reference_an_aborted_task(self):
+    def test_retry_must_reference_an_aborted_dispatched_or_in_flight_task(self):
         original = self.new_task()
 
         result = self.cli(
@@ -57,7 +58,7 @@ class TaskContractTests(SupervisorContractCase):
             "--retry-of", str(original), input_text="Retry it.",
         )
 
-        self.assert_failure(result, "is not an aborted task")
+        self.assert_failure(result, "is not aborted, dispatched, or in flight")
 
     def test_aborted_task_can_be_retried(self):
         original = self.new_task()
@@ -139,7 +140,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         self.assert_failure(result, "is the commentator, not an implementer")
         self.assertIn(f"{task} drafted", state.stdout)
 
-    def test_dispatch_delivers_task_and_contract_then_enters_flight(self):
+    def test_dispatch_delivers_task_and_contract_then_rests_as_dispatched(self):
         task = self.new_task(text="Implement normal dispatch behavior.")
         self.launch()
 
@@ -147,11 +148,40 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         state = self.assert_success(self.cli("state"))
         log = self.session_log("worker").read_text()
 
-        self.assertIn("task 1 in flight on worker", result.stdout)
-        self.assertIn("1 in_flight", state.stdout)
+        self.assertIn("task 1 dispatched to worker", result.stdout)
+        self.assertIn("1 dispatched", state.stdout)
         self.assertIn("Implement normal dispatch behavior.", log)
         self.assertIn("Verify the tree is clean; stop if dirty.", log)
         self.assertIn("git log -1", log)
+
+    def test_dispatch_rests_until_the_daemon_observes_implementer_log_growth(self):
+        task = self.new_task(text="Start only after dispatch returns.")
+        self.launch()
+
+        dispatched = self.assert_success(self.dispatch(task))
+        dispatch_state = self.assert_success(self.cli("state"))
+        dispatch_offset = self.session_log("worker").stat().st_size
+        observed_head = self.commit_file(
+            "between.txt", "between dispatch and observation\n",
+            "test: move head before observation",
+        )
+        self.append_usage("worker", input_tokens=17)
+
+        daemon = self.start_daemon()
+        flight_state = self.wait_for_state(f"{task} in_flight")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            recorded_offset, base_head = database.execute(
+                "select log_offset, base_head from tasks where id=?", (task,),
+            ).fetchone()
+
+        self.assertIn(f"task {task} dispatched to worker", dispatched.stdout)
+        self.assertIn(f"{task} dispatched", dispatch_state.stdout)
+        self.assertNotIn(f"{task} in_flight", dispatch_state.stdout)
+        self.assertIn(f"{task} in_flight", flight_state.stdout)
+        self.assertEqual(recorded_offset, dispatch_offset)
+        self.assertEqual(base_head, observed_head)
 
     def test_dispatch_requires_an_existing_session(self):
         task = self.new_task()
@@ -201,7 +231,101 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         state = self.assert_success(self.cli("state"))
 
         self.assert_failure(result, "supervisor: abort requires a non-empty --reason")
-        self.assertIn(f"{task} in_flight", state.stdout)
+        self.assertIn(f"{task} dispatched", state.stdout)
+
+    def test_abort_interrupts_and_informs_a_live_implementer(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.assert_success(
+            self.cli("abort", str(task), "--reason", "the brief is wrong")
+        )
+        state = self.assert_success(self.cli("state"))
+        operations = self.runtime_operations()
+
+        self.assertIn(f"task {task} aborted", result.stdout)
+        self.assertEqual(
+            [operation["operation"] for operation in operations[-4:]],
+            ["interrupt", "query", "prompt", "query"],
+        )
+        self.assertEqual(
+            next(
+                operation["text"] for operation in reversed(operations)
+                if operation["operation"] == "prompt"
+            ),
+            "supervisor: task 1 is aborted: the brief is wrong. Stop, leave "
+            "the tree clean, do not commit.",
+        )
+        self.assertIn("abort-interrupt task 1 -> worker", state.stdout)
+
+    def test_abort_succeeds_and_records_unreachable_when_the_session_is_gone(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        runtime_state = self.zero_cost_dummy_state()
+        del runtime_state["agents"]["worker"]
+        self.update_zero_cost_dummy(**runtime_state)
+
+        result = self.assert_success(
+            self.cli("abort", str(task), "--reason", "the session disappeared")
+        )
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn(f"task {task} aborted", result.stdout)
+        self.assertIn(f"{task} aborted", state.stdout)
+        self.assertIn("abort-unreachable task 1 -> worker", state.stdout)
+
+    def test_retry_of_a_dispatched_task_requires_a_reason_then_supersedes_it(self):
+        original = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(original))
+
+        missing_reason = self.cli(
+            "task", "new", "--files", "retry.py", "--predicted-lines", "5",
+            "--retry-of", str(original), input_text="Retry it.",
+        )
+        still_dispatched = self.assert_success(self.cli("state"))
+        retry = self.assert_success(self.cli(
+            "task", "new", "--files", "retry.py", "--predicted-lines", "5",
+            "--retry-of", str(original), "--reason", "correct the brief",
+            input_text="Retry it.",
+        ))
+        superseded = self.assert_success(self.cli("state"))
+
+        self.assert_failure(missing_reason, "requires a non-empty --reason")
+        self.assertIn(f"{original} dispatched", still_dispatched.stdout)
+        self.assertEqual(retry.stdout.strip(), "2")
+        self.assertIn(f"{original} aborted", superseded.stdout)
+        self.assertIn("2 drafted", superseded.stdout)
+        self.assertIn("retry of 1", superseded.stdout)
+
+    def test_retry_of_an_in_flight_task_aborts_interrupts_and_creates(self):
+        original = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(original))
+        self.append_usage("worker", input_tokens=17)
+        daemon = self.start_daemon()
+        self.wait_for_state(f"{original} in_flight")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        retry = self.assert_success(self.cli(
+            "task", "new", "--files", "retry.py", "--predicted-lines", "5",
+            "--retry-of", str(original), "--reason", "correct the brief",
+            input_text="Retry it.",
+        ))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(retry.stdout.strip(), "2")
+        self.assertIn(f"{original} aborted", state.stdout)
+        self.assertIn("2 drafted", state.stdout)
+        self.assertIn("retry of 1", state.stdout)
+        self.assertIn("abort-interrupt task 1 -> worker", state.stdout)
+        self.assertEqual(
+            [operation["operation"] for operation in self.runtime_operations()[-4:]],
+            ["interrupt", "query", "prompt", "query"],
+        )
 
 
 class VerificationContractTests(SupervisorContractCase):
@@ -222,6 +346,7 @@ class VerificationContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
         sha = self.commit_file()
 
         commit = self.assert_success(self.cli(
@@ -247,6 +372,7 @@ class VerificationContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
 
         missing = self.cli(
             "task", "record-commit", str(task), "deadbeef", "--force",
@@ -271,6 +397,7 @@ class VerificationContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
 
         result = self.cli(
             "task", "record-commit", str(task), unrelated_sha, "--force",
@@ -283,6 +410,7 @@ class VerificationContractTests(SupervisorContractCase):
         first = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(first))
+        self.observe_in_flight(first)
         sha = self.commit_file()
         self.assert_success(self.cli(
             "task", "record-commit", str(first), sha, "--force", "--reason",
@@ -399,6 +527,7 @@ class VerificationContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
         sha = self.commit_file()
         self.append_bash("worker", "git commit -m 'fixture commit'")
         timer = threading.Timer(
@@ -426,9 +555,9 @@ class ReuseContractTests(SupervisorContractCase):
         result = self.assert_success(self.dispatch(second, reuse=True))
         state = self.assert_success(self.cli("state"))
 
-        self.assertIn("reuse, context base", result.stdout)
-        self.assertIn("2 in_flight", state.stdout)
-        self.assertIn("reuse (context base", state.stdout)
+        self.assertIn("task 2 dispatched to worker (reuse)", result.stdout)
+        self.assertIn("2 dispatched", state.stdout)
+        self.assertIn("reuse (awaiting context base)", state.stdout)
 
     def test_reuse_flag_is_rejected_for_a_session_with_no_prior_task(self):
         task = self.new_task()
@@ -467,7 +596,7 @@ class ReuseContractTests(SupervisorContractCase):
         self.assert_success(self.launch())
         dispatched = self.assert_success(self.dispatch(second))
 
-        self.assertIn("task 2 in flight on worker", dispatched.stdout)
+        self.assertIn("task 2 dispatched to worker", dispatched.stdout)
 
     def test_session_over_configured_context_limit_cannot_be_reused(self):
         self.verified_first_task()
@@ -537,8 +666,8 @@ class ReuseContractTests(SupervisorContractCase):
 
         self.assert_success(result)
         self.assertIn("1 committed_unverified", state.stdout)
-        self.assertIn(f"{second} in_flight", state.stdout)
-        self.assertIn("task 2 in flight on replacement", result.stdout)
+        self.assertIn(f"{second} dispatched", state.stdout)
+        self.assertIn("task 2 dispatched to replacement", result.stdout)
 
     def test_accepting_with_a_reason_skips_the_gate_and_records_the_override(self):
         task, _ = self.prepare_committed_task()
@@ -568,6 +697,7 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         ))
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
         sha = self.commit_file()
         self.record_commit("worker", sha)
         self.assert_success(self.cli("accept", str(task)))
@@ -765,6 +895,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         task = self.new_task(lines=20)
         self.launch()
         self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
         sha = self.commit_file("work.txt", "one\ntwo\n")
         self.append_usage("worker", input_tokens=15, cache_read=40, cache_creation=5)
         self.record_commit("worker", sha)

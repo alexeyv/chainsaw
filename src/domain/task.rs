@@ -207,6 +207,8 @@ impl Task {
       .reason()
   }
 
+  /// Transcript byte offset immediately after dispatch. It remains the
+  /// measurement baseline when the daemon observes work and takes flight.
   pub fn log_offset(&self) -> i64 {
     self.log_offset
   }

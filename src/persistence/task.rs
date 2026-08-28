@@ -132,6 +132,7 @@ pub fn dispatch(
   transaction: &Transaction<'_>,
   id: i64,
   session_id: i64,
+  log_offset: i64,
   reuse: bool,
   reason: Option<&str>,
 ) -> Result<Task> {
@@ -142,8 +143,8 @@ pub fn dispatch(
     reason,
     |transaction| {
       transaction.execute(
-        "update tasks set session_id=?, is_session_reuse=? where id=?",
-        params![session_id, i64::from(reuse), id],
+        "update tasks set session_id=?, log_offset=?, is_session_reuse=? where id=?",
+        params![session_id, log_offset, i64::from(reuse), id],
       )?;
       Ok(())
     },
