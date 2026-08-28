@@ -11,7 +11,7 @@ struct TaskRow {
   predicted_lines: i64,
   session_id: Option<i64>,
   commit_sha: Option<String>,
-  created_at: f64,
+  created_at: i64,
   retry_of_task_id: Option<i64>,
   log_offset: i64,
   base_head: Option<String>,
@@ -28,7 +28,7 @@ pub fn create(
   retry_of_task_id: Option<i64>,
   predicted_file_list: Option<Vec<String>>,
 ) -> Result<Task> {
-  let created_at = Utc::now().timestamp_millis() as f64 / 1000.0;
+  let created_at = Utc::now().timestamp_millis();
   let stored_file_list = predicted_file_list.as_ref().map(|files| files.join(","));
   let id = transaction.query_row(
     "
@@ -259,7 +259,8 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.predicted_lines,
     row.session_id,
     row.commit_sha,
-    row.created_at,
+    DateTime::from_timestamp_millis(row.created_at)
+      .context("task created_at is outside the supported range")?,
     row.retry_of_task_id,
     row.log_offset,
     row.base_head,

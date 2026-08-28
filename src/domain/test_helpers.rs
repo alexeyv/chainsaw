@@ -230,7 +230,7 @@ pub struct TaskSpec {
   pub predicted_lines: i64,
   pub session_id: Option<i64>,
   pub commit_sha: Option<&'static str>,
-  pub created_at: f64,
+  pub created_at: DateTime<Utc>,
   pub retry_of_task_id: Option<i64>,
   pub log_offset: i64,
   pub base_head: Option<&'static str>,
@@ -249,7 +249,7 @@ pub fn drafted_task() -> TaskSpec {
     predicted_lines: 20,
     session_id: None,
     commit_sha: None,
-    created_at: 1_700_000_000.5,
+    created_at: created_at(),
     retry_of_task_id: None,
     log_offset: 0,
     base_head: None,
@@ -314,7 +314,7 @@ pub fn format_task(task: &Task) -> String {
     .collect::<Vec<_>>()
     .join("\n");
   format!(
-    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {:.3}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\nis_session_reuse: {}\ncontext_size_start: {}\nevents:\n{}",
+    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\nis_session_reuse: {}\ncontext_size_start: {}\nevents:\n{}",
     task.id(),
     task.text(),
     task.predicted_files(),
@@ -322,7 +322,7 @@ pub fn format_task(task: &Task) -> String {
     task.state(),
     format_option(task.session_id()),
     format_option_text(task.commit_sha()),
-    task.created_at(),
+    format_time(task.created_at()),
     format_option(task.retry_of_task_id()),
     format_option_text(task.reason()),
     task.log_offset(),

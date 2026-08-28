@@ -123,7 +123,7 @@ predicted_lines: 20
 state: drafted
 session_id: none
 commit_sha: none
-created_at: 1700000000.500
+created_at: 2023-11-14T22:13:20Z
 retry_of_task_id: none
 reason: none
 log_offset: 0
@@ -155,7 +155,7 @@ predicted_lines: 20
 state: accepted
 session_id: 7
 commit_sha: "abc123"
-created_at: 1700000000.500
+created_at: 2023-11-14T22:13:20Z
 retry_of_task_id: 2
 reason: "gate passed"
 log_offset: 100
@@ -285,21 +285,6 @@ events:
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "commit_sha cannot be blank");
-  }
-
-  #[test]
-  fn should_fail_when_created_at_is_negative_or_not_finite() {
-    for created_at in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-      let error = build(TaskSpec {
-        created_at,
-        ..drafted_task()
-      })
-      .unwrap_err();
-      assert_eq!(
-        error.to_string(),
-        "created_at must be finite and nonnegative"
-      );
-    }
   }
 
   #[test]

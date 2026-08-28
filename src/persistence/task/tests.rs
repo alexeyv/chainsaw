@@ -6,7 +6,7 @@ use super::{
   abort, accept, advance, all, create, dispatch, get, predecessor, record_commit, take_flight,
   tasks_for_session,
 };
-use crate::domain::test_helpers::{format_task, format_tasks};
+use crate::domain::test_helpers::{format_task, format_tasks, format_time, within};
 use crate::domain::{Task, TaskState};
 use crate::persistence::test_fixture::{database, row_count, session_row, task_row};
 
@@ -33,7 +33,7 @@ mod create {
     let mut db = database();
     let files = vec!["src/domain/task.rs".to_owned(), "src/store.rs".to_owned()];
 
-    let before = Utc::now().timestamp_millis() as f64 / 1000.0;
+    let before = Utc::now();
     let transaction = db.transaction()?;
     let task = create(
       &transaction,
@@ -44,7 +44,7 @@ mod create {
       Some(files.clone()),
     )?;
     transaction.commit()?;
-    let after = Utc::now().timestamp_millis() as f64 / 1000.0;
+    let after = Utc::now();
 
     let stored = db.query_row(
       "
@@ -58,7 +58,7 @@ mod create {
           row.get::<_, String>(0)?,
           row.get::<_, i64>(1)?,
           row.get::<_, i64>(2)?,
-          row.get::<_, f64>(3)?,
+          row.get::<_, i64>(3)?,
           row.get::<_, Option<i64>>(4)?,
           row.get::<_, Option<String>>(5)?,
         ))
@@ -70,8 +70,7 @@ mod create {
       |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
     )?;
 
-    assert!(task.created_at() >= before);
-    assert!(task.created_at() <= after);
+    assert!(within(task.created_at(), before, after));
     assert_eq!(
       format_task(&task),
       format!(
@@ -82,7 +81,7 @@ predicted_lines: 80
 state: drafted
 session_id: none
 commit_sha: none
-created_at: {:.3}
+created_at: {}
 retry_of_task_id: none
 reason: none
 log_offset: 0
@@ -92,7 +91,7 @@ is_session_reuse: false
 context_size_start: none
 events:
   1 drafted none"#,
-        task.created_at()
+        format_time(task.created_at())
       )
     );
     assert_eq!(
@@ -101,7 +100,7 @@ events:
         "materialize tasks through persistence".to_owned(),
         2,
         80,
-        task.created_at(),
+        task.created_at().timestamp_millis(),
         None,
         Some("src/domain/task.rs,src/store.rs".to_owned()),
       )

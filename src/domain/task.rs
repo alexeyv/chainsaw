@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
 use super::{
@@ -82,7 +83,7 @@ pub struct Task {
   predicted_lines: i64,
   session_id: Option<i64>,
   commit_sha: Option<String>,
-  created_at: f64,
+  created_at: DateTime<Utc>,
   retry_of_task_id: Option<i64>,
   log_offset: i64,
   base_head: Option<String>,
@@ -101,7 +102,7 @@ impl Task {
     predicted_lines: i64,
     session_id: Option<i64>,
     commit_sha: Option<String>,
-    created_at: f64,
+    created_at: DateTime<Utc>,
     retry_of_task_id: Option<i64>,
     log_offset: i64,
     base_head: Option<String>,
@@ -116,9 +117,6 @@ impl Task {
     require_nonnegative("predicted_lines", predicted_lines)?;
     require_optional_positive("session_id", session_id)?;
     require_optional_nonblank("commit_sha", commit_sha.as_deref())?;
-    if !created_at.is_finite() || created_at < 0.0 {
-      bail!("created_at must be finite and nonnegative");
-    }
     require_optional_positive("retry_of_task_id", retry_of_task_id)?;
     if retry_of_task_id == Some(id) {
       bail!("a task cannot retry itself");
@@ -190,7 +188,7 @@ impl Task {
     self.commit_sha.as_deref()
   }
 
-  pub fn created_at(&self) -> f64 {
+  pub fn created_at(&self) -> DateTime<Utc> {
     self.created_at
   }
 

@@ -462,7 +462,7 @@ fn cmd_prompt(
     params![name, text, now()],
   )?;
   let prompt_id = store.db.last_insert_rowid();
-  let prompt_landing_seconds = Settings::load(&store.run_dir)?.prompt_landing_seconds() as f64;
+  let prompt_landing_millis = Settings::load(&store.run_dir)?.prompt_landing_seconds() * 1000;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
@@ -475,7 +475,7 @@ fn cmd_prompt(
       [prompt_id],
     )?;
     let _ = runtime.prompt(name, text);
-    let deadline = now() + prompt_landing_seconds;
+    let deadline = now() + prompt_landing_millis;
     while now() < deadline {
       let _ = runtime.query(name);
       let path = session_log_named(store, name)?;
@@ -1195,19 +1195,19 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let stat = git_stdout(store, &["show", "--shortstat", "--format=", commit_sha])?;
   let actual_files = stat_number(&stat, "file");
   let actual_lines = stat_number(&stat, "insertion") + stat_number(&stat, "deletion");
-  let dispatched_at: Option<f64> = store
+  let dispatched_at: Option<i64> = store
     .db
     .query_row(
-      "select created_at / 1000.0 from task_events
+      "select created_at from task_events
        where task_id=? and state='dispatched' order by id desc limit 1",
       [task_id],
       |row| row.get(0),
     )
     .optional()?;
-  let committed_at: Option<f64> = store
+  let committed_at: Option<i64> = store
     .db
     .query_row(
-      "select created_at / 1000.0 from task_events
+      "select created_at from task_events
        where task_id=? and state='committed_unverified' order by id desc limit 1",
       [task_id],
       |row| row.get(0),
@@ -1215,7 +1215,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     .optional()?;
   let wall = dispatched_at
     .zip(committed_at)
-    .map(|(start, end)| end - start);
+    .map(|(start, end)| (end - start) as f64 / 1000.0);
   let log = match task.session_id() {
     Some(session_id) => match session_snapshot(store, session_id)? {
       Some(session) => session_log(store, &session),
@@ -1397,10 +1397,10 @@ fn cmd_state(store: &Store) -> Result<()> {
   for task in tasks {
     let mut statement = store
       .db
-      .prepare("select state,created_at / 1000.0 from task_events where task_id=? order by id")?;
+      .prepare("select state,created_at from task_events where task_id=? order by id")?;
     let log = statement
       .query_map([task.id()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
       })?
       .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     let mut timeline = TaskState::iter()
@@ -1411,10 +1411,7 @@ fn cmd_state(store: &Store) -> Result<()> {
       })
       .collect::<Vec<_>>();
     if let Some(delivered_at) = deliveries.get(&task.id()).copied().flatten() {
-      timeline.push(format!(
-        "commentary-delivered@{}",
-        clock_time(delivered_at as f64 / 1000.0)
-      ));
+      timeline.push(format!("commentary-delivered@{}", clock_time(delivered_at)));
     }
     let timeline = timeline.join(" ");
     let retry = task
@@ -1489,7 +1486,7 @@ fn cmd_state(store: &Store) -> Result<()> {
     )?;
   let events = statement.query_map([], |row| {
     Ok((
-      row.get::<_, f64>(0)?,
+      row.get::<_, i64>(0)?,
       row.get::<_, String>(1)?,
       row.get::<_, String>(2)?,
     ))
@@ -1501,40 +1498,38 @@ fn cmd_state(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn clock_time(timestamp: f64) -> String {
-  Local
-    .timestamp_opt(timestamp as i64, 0)
-    .single()
-    .map_or_else(
-      || "-".to_owned(),
-      |time| time.format("%H:%M:%S").to_string(),
-    )
+fn clock_time(millis: i64) -> String {
+  Local.timestamp_millis_opt(millis).single().map_or_else(
+    || "-".to_owned(),
+    |time| time.format("%H:%M:%S").to_string(),
+  )
 }
 
 fn print_time_summary(store: &Store) -> Result<()> {
-  let first: Option<f64> = store.db.query_row(
-    "select min(created_at) / 1000.0 from task_events",
-    [],
-    |row| row.get(0),
-  )?;
-  let mut busy = 0.0;
+  let first: Option<i64> =
+    store
+      .db
+      .query_row("select min(created_at) from task_events", [], |row| {
+        row.get(0)
+      })?;
+  let mut busy = 0;
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
   transaction.commit()?;
   for task in tasks {
-    let start: Option<f64> = store
+    let start: Option<i64> = store
       .db
       .query_row(
-        "select created_at / 1000.0 from task_events
+        "select created_at from task_events
          where task_id=? and state='dispatched' order by id desc limit 1",
         [task.id()],
         |row| row.get(0),
       )
       .optional()?;
-    let end: Option<f64> = store
+    let end: Option<i64> = store
             .db
             .query_row(
-                "select created_at / 1000.0 from task_events where task_id=? and state in ('committed_unverified','accepted','aborted') order by id limit 1",
+                "select created_at from task_events where task_id=? and state in ('committed_unverified','accepted','aborted') order by id limit 1",
                 [task.id()],
                 |row| row.get(0),
             )
@@ -1545,23 +1540,25 @@ fn print_time_summary(store: &Store) -> Result<()> {
   }
   let mut statement = store.db.prepare("select started,ended from human_waits")?;
   let waits = statement.query_map([], |row| {
-    Ok((row.get::<_, f64>(0)?, row.get::<_, Option<f64>>(1)?))
+    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
   })?;
-  let mut human = 0.0;
+  let mut human = 0;
   for wait in waits {
     let (start, end) = wait?;
     human += end.unwrap_or_else(now) - start;
   }
   if let Some(first) = first {
     let wall = now() - first;
-    let percentage = if wall == 0.0 {
+    let percentage = if wall == 0 {
       0.0
     } else {
-      100.0 * busy / wall
+      100.0 * busy as f64 / wall as f64
     };
     println!(
       "time  wall {}s  implementer-busy {}s ({percentage:.0}%)  waiting-on-human {}s",
-      wall as i64, busy as i64, human as i64
+      wall / 1000,
+      busy / 1000,
+      human / 1000
     );
   }
   Ok(())
