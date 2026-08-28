@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -26,7 +26,7 @@ create table task_events(
   task_id int not null references tasks(id), state text not null,
   reason text, created_at int not null);
 create table commentary_deliveries(
-  task_id int primary key references tasks(id), delivered_at int not null);
+  task_id int primary key references tasks(id), delivered_at int, woken_at int);
 create table prompts(id integer primary key, session text, text text,
   sent_at real, landed_at real, attempts int);
 create table calibrations(
@@ -48,7 +48,7 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started real, ended real);
 create table events(at real, kind text, detail text);
-pragma user_version=1;
+pragma user_version=2;
 "#;
 
 pub struct Store {
@@ -156,6 +156,7 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       }
       transaction.execute_batch(SCHEMA)?;
     }
+    1 => migrate_v1_to_v2(&transaction)?,
     SCHEMA_VERSION => {}
     version => bail!(
       "database schema version {version} is unsupported; expected {SCHEMA_VERSION}: remove the database and start a new run"
@@ -163,6 +164,21 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
   }
   transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
+  Ok(())
+}
+
+fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<()> {
+  transaction.execute_batch(
+    "
+      alter table commentary_deliveries rename to commentary_deliveries_v1;
+      create table commentary_deliveries(
+        task_id int primary key references tasks(id), delivered_at int, woken_at int);
+      insert into commentary_deliveries(task_id, delivered_at)
+        select task_id, delivered_at from commentary_deliveries_v1;
+      drop table commentary_deliveries_v1;
+      pragma user_version=2;
+      ",
+  )?;
   Ok(())
 }
 
@@ -292,13 +308,53 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
     assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
     assert_eq!(legacy_finding_columns, 0);
-    assert_eq!(commentary_delivery_columns, 2);
+    assert_eq!(commentary_delivery_columns, 3);
+    Ok(())
+  }
+
+  #[test]
+  fn upgrades_commentary_deliveries_from_version_one() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch(
+      "
+        create table tasks(id integer primary key);
+        create table commentary_deliveries(
+          task_id int primary key references tasks(id), delivered_at int not null);
+        insert into tasks(id) values(7);
+        insert into commentary_deliveries(task_id, delivered_at) values(7, 1234);
+        pragma user_version=1;
+        ",
+    )?;
+
+    initialize_schema(&db)?;
+
+    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    let delivery = db.query_row(
+      "select task_id, delivered_at, woken_at from commentary_deliveries",
+      [],
+      |row| {
+        Ok((
+          row.get::<_, i64>(0)?,
+          row.get::<_, Option<i64>>(1)?,
+          row.get::<_, Option<i64>>(2)?,
+        ))
+      },
+    )?;
+    let delivered_at_required = db.query_row(
+      "select \"notnull\" from pragma_table_info('commentary_deliveries') where name='delivered_at'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+
+    assert_eq!(version, 2);
+    assert_eq!(delivery, (7, Some(1234), None));
+    assert_eq!(delivered_at_required, 0);
     Ok(())
   }
 

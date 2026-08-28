@@ -12,7 +12,7 @@ use chrono::{Local, TimeZone, Utc};
 use fs2::FileExt;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
@@ -1423,7 +1423,7 @@ fn cmd_state(store: &Store) -> Result<()> {
     println!("  (a human wait is open)");
   }
   let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary') order by at desc limit 5",
+        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary','commentary-wake') order by at desc limit 5",
     )?;
   let events = statement.query_map([], |row| {
     Ok((
@@ -1725,22 +1725,40 @@ fn observe_commentator(
     ) && task.commit_sha().is_some()
       && commentary_delivery::delivered_at(&transaction, task.id())?.is_none()
     {
-      pending.push(task);
+      let woken_at = commentary_delivery::woken_at(&transaction, task.id())?;
+      pending.push((task, woken_at));
     }
   }
   transaction.commit()?;
-  if let Some(log) = log {
-    let text = fs::read_to_string(log).unwrap_or_default();
-    for task in pending {
-      let sha = task.commit_sha().unwrap_or_default();
-      let abbreviation = sha.get(..7).unwrap_or(sha);
-      if text.contains(abbreviation) {
-        let transaction = store.write_transaction()?;
-        let recorded = commentary_delivery::record(&transaction, task.id())?;
-        transaction.commit()?;
-        if recorded {
-          store.event("commentary-delivered", &format!("task {}", task.id()))?;
-        }
+  let text = log
+    .map(|log| fs::read_to_string(log).unwrap_or_default())
+    .unwrap_or_default();
+  for (task, woken_at) in pending {
+    let sha = task.commit_sha().unwrap_or_default();
+    let abbreviation = sha.get(..7).unwrap_or(sha);
+    if commentator_log_mentions(&text, abbreviation) {
+      let transaction = store.write_transaction()?;
+      let recorded = commentary_delivery::record(&transaction, task.id())?;
+      transaction.commit()?;
+      if recorded {
+        store.event("commentary-delivered", &format!("task {}", task.id()))?;
+      }
+    } else if woken_at.is_none()
+      && daemon_prompt(
+        store,
+        runtime,
+        session.name(),
+        &format!(
+          "supervisor: commit {sha} landed for task {}; review it from git",
+          task.id()
+        ),
+      )
+    {
+      let transaction = store.write_transaction()?;
+      let recorded = commentary_delivery::record_wake(&transaction, task.id())?;
+      transaction.commit()?;
+      if recorded {
+        store.event("commentary-wake", &format!("task {} {sha}", task.id()))?;
       }
     }
   }
@@ -1753,6 +1771,15 @@ fn observe_commentator(
     *compacting = false;
   }
   kick_if_stalled(store, runtime, session, quiet)
+}
+
+fn commentator_log_mentions(text: &str, needle: &str) -> bool {
+  text.lines().any(|line| {
+    serde_json::from_str::<Value>(line).is_ok_and(|entry| {
+      entry.get("type").and_then(Value::as_str) == Some("assistant")
+        && entry.to_string().contains(needle)
+    })
+  })
 }
 
 fn observe_lead(

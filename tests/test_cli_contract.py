@@ -7,6 +7,7 @@ CHAINSAW_SUPERVISOR_COMMAND.
 
 import json
 import threading
+import time
 from pathlib import Path
 
 from tests.support import SupervisorContractCase
@@ -831,24 +832,75 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn(sha[:10], state.stdout)
 
+    def test_daemon_wakes_the_commentator_once_for_a_pending_commit(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        wake = (
+            f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+        )
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentary-wake")
+        time.sleep(0.1)
+
+        self.assertIn(f"commentary-wake task {task} {sha[:10]}", state.stdout)
+        self.assertNotIn("commentary-delivered@", state.stdout)
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1)
+
+        self.append_text(commentator, f"Reviewed commit {sha[:7]}")
+        self.wait_for_state("commentary-delivered@")
+        time.sleep(0.1)
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1)
+
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+    def test_daemon_counts_a_queued_commentator_wake_as_sent_once(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.set_agent_status(commentator, "busy")
+        wake = (
+            f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+        )
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentary-wake")
+        time.sleep(0.1)
+
+        entries = [
+            json.loads(line)
+            for line in self.session_log(commentator).read_text().splitlines()
+        ]
+        queued = [
+            entry for entry in entries
+            if entry.get("type") == "queue-operation"
+            and entry.get("content") == wake
+        ]
+        self.assertIn(f"commentary-wake task {task} {sha[:10]}", state.stdout)
+        self.assertNotIn("commentary-delivered@", state.stdout)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1)
+
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
     def test_daemon_observes_commentator_ingestion(self):
         task, sha = self.prepare_committed_task()
         self.assert_success(self.cli("accept", str(task)))
-        self.assert_success(self.cli(
-            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
-        ))
-        commentator = next(
-            name for name in self.zero_cost_dummy_state()["agents"]
-            if name.startswith("commentator-")
-        )
+        commentator = self.start_commentator()
         self.append_text(commentator, f"Reviewed commit {sha[:10]}")
 
         daemon = self.start_daemon()
         state = self.wait_for_state("commentary-delivered@")
+        wakes = [
+            text for text in self.prompts_to(commentator)
+            if text.startswith("supervisor: commit ")
+        ]
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
 
         self.assertIn("1 accepted", state.stdout)
+        self.assertEqual(wakes, [])
 
     def test_stop_is_durable_and_ends_a_running_daemon(self):
         daemon = self.start_daemon()

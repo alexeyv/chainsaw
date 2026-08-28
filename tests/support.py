@@ -154,6 +154,15 @@ class SupervisorContractCase(unittest.TestCase):
     def launch(self, name="worker"):
         return self.assert_success(self.cli("launch", name))
 
+    def start_commentator(self):
+        self.assert_success(self.cli(
+            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
+        ))
+        return next(
+            name for name in self.zero_cost_dummy_state()["agents"]
+            if name.startswith("commentator-")
+        )
+
     def dispatch(self, task_id, name="worker", reuse=False):
         args = ["dispatch", str(task_id), "--to", name]
         if reuse:
@@ -173,6 +182,13 @@ class SupervisorContractCase(unittest.TestCase):
 
     def runtime_operations(self):
         return self.zero_cost_dummy_state()["operations"]
+
+    def prompts_to(self, name):
+        return [
+            operation["text"] for operation in self.runtime_operations()
+            if operation["operation"] == "prompt"
+            and operation["session_id"] == name
+        ]
 
     def set_agent_status(self, name, status):
         """Mark a session busy or idle; a busy one queues prompts instead of answering.

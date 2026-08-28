@@ -242,7 +242,9 @@ measured separately (`$SUP state` shows both).
    `$SUP state` shows each task's state and each session's measured context.
 6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
    chronological context and every still-unresolved finding. It narrates on its own
-   clock; never prompt it for a review. A precise finding normally becomes the next fix
+   clock; the supervisor alone wakes it with the commit sha and task id, which is a
+   trigger to review from git and the implementer log, not a finding or your opinion.
+   Never prompt it for a review. A precise finding normally becomes the next fix
    task; you alone decide, and the supervisor remains the authoritative review state.
    A fix task goes back to the session that wrote the commit it is about, when `state`
    shows that session idle with context headroom and the finding names a specified
