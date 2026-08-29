@@ -136,6 +136,11 @@ pub fn dispatch(
     id,
     TaskState::Dispatched,
     reason,
+    |current| {
+      same_fact(current, "session", current.session_id(), Some(session_id))?;
+      same_fact(current, "log offset", current.log_offset(), log_offset)?;
+      same_fact(current, "session reuse", current.is_session_reuse(), reuse)
+    },
     |transaction| {
       transaction.execute(
         "update tasks set session_id=?, log_offset=?, is_session_reuse=? where id=?",
@@ -153,13 +158,28 @@ pub fn take_flight(
   base_head: &str,
   context_size_start: i64,
 ) -> Result<Task> {
-  advance(transaction, id, TaskState::InFlight, None, |transaction| {
-    transaction.execute(
-      "update tasks set base_head=?, context_size_start=? where id=?",
-      params![base_head, context_size_start, id],
-    )?;
-    Ok(())
-  })
+  advance(
+    transaction,
+    id,
+    TaskState::InFlight,
+    None,
+    |current| {
+      same_fact(current, "base head", current.base_head(), Some(base_head))?;
+      same_fact(
+        current,
+        "context size start",
+        current.context_size_start(),
+        Some(context_size_start),
+      )
+    },
+    |transaction| {
+      transaction.execute(
+        "update tasks set base_head=?, context_size_start=? where id=?",
+        params![base_head, context_size_start, id],
+      )?;
+      Ok(())
+    },
+  )
 }
 
 pub fn record_commit(
@@ -173,6 +193,7 @@ pub fn record_commit(
     id,
     TaskState::CommittedUnverified,
     reason,
+    |current| same_fact(current, "commit", current.commit_sha(), Some(commit_sha)),
     |transaction| {
       transaction.execute(
         "update tasks set commit_sha=? where id=?",
@@ -184,9 +205,14 @@ pub fn record_commit(
 }
 
 pub fn accept(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
-  advance(transaction, id, TaskState::Accepted, Some(reason), |_| {
-    Ok(())
-  })
+  advance(
+    transaction,
+    id,
+    TaskState::Accepted,
+    Some(reason),
+    |_| Ok(()),
+    |_| Ok(()),
+  )
 }
 
 pub fn abort(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
@@ -196,21 +222,27 @@ pub fn abort(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Tas
     TaskState::Aborted,
     Some(reason),
     |_| Ok(()),
+    |_| Ok(()),
   )
 }
 
 /// Move a task forward to `next`, recording an optional reason for the move.
-/// Advancing to the state a task already occupies is a no-op that succeeds, so
-/// callers that re-observe the same fact do not have to guard against it.
-pub fn advance(
+/// Advancing to the state a task already occupies is idempotent: `same_fact`
+/// checks that what the caller re-observed is what was recorded, and then
+/// nothing is written; a differing observation is an error, never overwritten
+/// or dropped.
+fn advance(
   transaction: &Transaction<'_>,
   id: i64,
   next: TaskState,
   reason: Option<&str>,
+  same_fact: impl FnOnce(&Task) -> Result<()>,
   mutate: impl FnOnce(&Transaction<'_>) -> Result<()>,
 ) -> Result<Task> {
   let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
   if current.state() == next {
+    self::same_fact(&current, "reason", current.reason(), reason)?;
+    same_fact(&current)?;
     return Ok(current);
   }
   if !current.state().can_transition_to(next) {
@@ -222,6 +254,22 @@ pub fn advance(
   mutate(transaction)?;
   super::task_event::create(transaction, id, next, reason)?;
   get(transaction, id)?.with_context(|| format!("task {id} disappeared while becoming {next}"))
+}
+
+fn same_fact<T: PartialEq + std::fmt::Debug>(
+  current: &Task,
+  what: &str,
+  recorded: T,
+  observed: T,
+) -> Result<()> {
+  if recorded != observed {
+    bail!(
+      "task {} is already {} with {what} {recorded:?}, not {observed:?}",
+      current.id(),
+      current.state()
+    );
+  }
+  Ok(())
 }
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
