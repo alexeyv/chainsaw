@@ -32,8 +32,7 @@ resume from the logs and git after the last reviewed commit. Resolve the supervi
 client from this prompt's location:
 
 ```sh
-CHAINSAW_ROOT=$(realpath <directory containing this file>/../../..)
-SUP="$CHAINSAW_ROOT/target/debug/chainsaw --run-dir <run-directory>"
+SUP="$(realpath <directory containing this file>/../bin/chainsaw) --run-dir <run-directory>"
 ```
 
 The supervisor database and CLI are the only communication path for review context.

@@ -15,12 +15,11 @@ the commentator's findings — not implementation detail.
 2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
    ever started, so its session-log directory (`~/.claude/projects/<munged-path>/`)
    holds exactly this run. If logs already exist there, tell the human and stop.
-3. Resolve the project root and role path from this file's own location, not the run
-   directory: `CHAINSAW_ROOT=$(realpath <dir of this SKILL.md>/../..)` and
-   `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`. Run
-   `cargo build --manifest-path "$CHAINSAW_ROOT/Cargo.toml"`, then set
-   `SUPERVISOR="$CHAINSAW_ROOT/target/debug/chainsaw"`. Define the client invocation
-   once — `--run-dir` comes before the subcommand:
+3. Resolve the role path and the supervisor client from this file's own location, not
+   the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
+   and `SUPERVISOR=$(realpath <dir of this SKILL.md>/bin/chainsaw)`. The wrapper builds
+   the supervisor on first use, so no separate cargo step is needed. Define the client
+   invocation once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
    Start the supervisor once, as a background process:
    `$SUP daemon --lead <your-agent-name> --session-id <your-session-id> &`. Your

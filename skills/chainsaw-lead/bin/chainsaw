@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+if [ -f "$HERE/../supervisor/Cargo.toml" ]; then
+  CRATE=$(cd "$HERE/../supervisor" && pwd)
+else
+  CRATE=$(cd "$HERE/../../.." && pwd)
+fi
+
+BIN="$CRATE/target/debug/chainsaw"
+
+if [ ! -e "$BIN" ] || [ -n "$(find "$CRATE/src" "$CRATE/Cargo.toml" "$CRATE/Cargo.lock" -newer "$BIN")" ]; then
+  cargo build --quiet --manifest-path "$CRATE/Cargo.toml" 1>&2
+fi
+
+exec "$BIN" "$@"
