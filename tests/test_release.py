@@ -23,6 +23,15 @@ class ReleaseAssemblyTests(unittest.TestCase):
         self.assertTrue((supervisor / "rust-toolchain.toml").exists())
         self.assertTrue((supervisor / "src" / "main.rs").exists())
 
+    def test_leaves_test_sources_out_of_the_supervisor(self):
+        src = self.dist / "supervisor" / "src"
+        shipped = sorted(
+            str(path.relative_to(src))
+            for path in src.rglob("*.rs")
+            if path.name == "tests.rs" or path.name.startswith("test_")
+        )
+        self.assertEqual(shipped, [])
+
     def test_wrapper_is_present_and_executable(self):
         wrapper = self.dist / "bin" / "chainsaw"
         self.assertTrue(wrapper.exists())
