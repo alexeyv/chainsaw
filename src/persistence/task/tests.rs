@@ -191,6 +191,26 @@ events:
   }
 
   #[test]
+  fn should_store_no_list_when_the_predicted_file_list_is_empty() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    let task = create(&transaction, "a task", 0, 10, None, Some(Vec::new()))?;
+    transaction.commit()?;
+
+    assert_eq!(task.predicted_file_list(), None);
+    assert_eq!(
+      db.query_row(
+        "select predicted_file_list from tasks where id=?",
+        [task.id()],
+        |row| row.get::<_, Option<String>>(0),
+      )?,
+      None
+    );
+    Ok(())
+  }
+
+  #[test]
   fn should_fail_when_a_predicted_file_name_contains_the_separator() -> Result<()> {
     let mut db = database();
 

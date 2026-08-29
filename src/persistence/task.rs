@@ -50,6 +50,8 @@ pub fn create(
   {
     bail!("predicted file name {file:?} contains {FILE_LIST_SEPARATOR:?}");
   }
+  // An empty list would come back as one blank name; store it as no list.
+  let predicted_file_list = predicted_file_list.filter(|files| !files.is_empty());
   let created_at = Utc::now().timestamp_millis();
   let stored_file_list = predicted_file_list
     .as_ref()
