@@ -1118,7 +1118,7 @@ class BusySessionContractTests(SupervisorContractCase):
 
 
 class DottedRunDirectoryContractTests(SupervisorContractCase):
-    """Claude Code munges only path separators, so a dotted run directory keeps its dot."""
+    """Claude Code munges dots as well as path separators, so a dotted run directory loses its dot."""
 
     run_dir_name = "run.wt"
 
@@ -1139,8 +1139,8 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         )
 
         self.assertTrue(
-            announced.endswith("-run.wt"),
-            f"the run directory's dot was munged away: {announced}",
+            announced.endswith("-run-wt"),
+            f"the run directory's dot was not munged: {announced}",
         )
         self.assertTrue(Path(announced).is_dir(), announced)
 
