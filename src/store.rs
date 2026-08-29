@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -48,7 +48,7 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started int, ended int);
 create table events(at int, kind text, detail text);
-pragma user_version=3;
+pragma user_version=1;
 "#;
 
 pub struct Store {
@@ -160,11 +160,6 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       }
       transaction.execute_batch(SCHEMA)?;
     }
-    1 => {
-      migrate_v1_to_v2(&transaction)?;
-      migrate_v2_to_v3(&transaction)?;
-    }
-    2 => migrate_v2_to_v3(&transaction)?,
     SCHEMA_VERSION => {}
     version => bail!(
       "database schema version {version} is unsupported; expected {SCHEMA_VERSION}: remove the database and start a new run"
@@ -172,47 +167,6 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
   }
   transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
-  Ok(())
-}
-
-fn migrate_v1_to_v2(transaction: &Transaction<'_>) -> Result<()> {
-  transaction.execute_batch(
-    "
-      alter table commentary_deliveries rename to commentary_deliveries_v1;
-      create table commentary_deliveries(
-        task_id int primary key references tasks(id), delivered_at int, woken_at int);
-      insert into commentary_deliveries(task_id, delivered_at)
-        select task_id, delivered_at from commentary_deliveries_v1;
-      drop table commentary_deliveries_v1;
-      pragma user_version=2;
-      ",
-  )?;
-  Ok(())
-}
-
-/// Version 2 stored some timestamps as real seconds; every timestamp is now
-/// integer milliseconds. A real column keeps real affinity through an update, so
-/// each one is replaced by an int column rather than converted in place; the
-/// tables are never renamed, which would repoint foreign keys in other tables.
-fn migrate_v2_to_v3(transaction: &Transaction<'_>) -> Result<()> {
-  for (table, column) in [
-    ("tasks", "created_at"),
-    ("prompts", "sent_at"),
-    ("prompts", "landed_at"),
-    ("human_waits", "started"),
-    ("human_waits", "ended"),
-    ("events", "at"),
-  ] {
-    transaction.execute_batch(&format!(
-      "
-        alter table {table} add column {column}_millis int;
-        update {table} set {column}_millis=cast(round({column} * 1000) as int);
-        alter table {table} drop column {column};
-        alter table {table} rename column {column}_millis to {column};
-        "
-    ))?;
-  }
-  transaction.execute_batch("pragma user_version=3;")?;
   Ok(())
 }
 
@@ -349,95 +303,13 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 3);
+    assert_eq!(version, 1);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
     assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
     assert_eq!(legacy_finding_columns, 0);
     assert_eq!(commentary_delivery_columns, 3);
-    Ok(())
-  }
-
-  #[test]
-  fn upgrades_commentary_deliveries_from_version_one() -> Result<()> {
-    let db = Connection::open_in_memory()?;
-    db.execute_batch(
-      "
-        create table tasks(id integer primary key, created_at real);
-        create table commentary_deliveries(
-          task_id int primary key references tasks(id), delivered_at int not null);
-        create table prompts(id integer primary key, sent_at real, landed_at real);
-        create table human_waits(id integer primary key, started real, ended real);
-        create table events(at real, kind text, detail text);
-        insert into tasks(id, created_at) values(7, 1700000000.5);
-        insert into commentary_deliveries(task_id, delivered_at) values(7, 1234);
-        pragma user_version=1;
-        ",
-    )?;
-
-    initialize_schema(&db)?;
-
-    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
-    let delivery = db.query_row(
-      "select task_id, delivered_at, woken_at from commentary_deliveries",
-      [],
-      |row| {
-        Ok((
-          row.get::<_, i64>(0)?,
-          row.get::<_, Option<i64>>(1)?,
-          row.get::<_, Option<i64>>(2)?,
-        ))
-      },
-    )?;
-    let delivered_at_required = db.query_row(
-      "select \"notnull\" from pragma_table_info('commentary_deliveries') where name='delivered_at'",
-      [],
-      |row| row.get::<_, i64>(0),
-    )?;
-
-    assert_eq!(version, 3);
-    assert_eq!(delivery, (7, Some(1234), None));
-    assert_eq!(delivered_at_required, 0);
-    Ok(())
-  }
-
-  #[test]
-  fn converts_second_timestamps_to_milliseconds_from_version_two() -> Result<()> {
-    let db = Connection::open_in_memory()?;
-    db.execute_batch(
-      "
-        create table tasks(id integer primary key, created_at real);
-        create table prompts(id integer primary key, sent_at real, landed_at real);
-        create table human_waits(id integer primary key, started real, ended real);
-        create table events(at real, kind text, detail text);
-        insert into tasks(id, created_at) values(1, 1700000000.5);
-        insert into prompts(id, sent_at, landed_at) values(1, 1700000001.25, null);
-        insert into human_waits(id, started, ended) values(1, 1700000002.0, 1700000003.75);
-        insert into events(at, kind, detail) values(1700000004.999, 'kick', 'x');
-        pragma user_version=2;
-        ",
-    )?;
-
-    initialize_schema(&db)?;
-
-    let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
-    let task = db.query_row("select created_at from tasks", [], |row| {
-      row.get::<_, i64>(0)
-    })?;
-    let prompt = db.query_row("select sent_at, landed_at from prompts", [], |row| {
-      Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
-    })?;
-    let wait = db.query_row("select started, ended from human_waits", [], |row| {
-      Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let event = db.query_row("select at from events", [], |row| row.get::<_, i64>(0))?;
-
-    assert_eq!(version, 3);
-    assert_eq!(task, 1_700_000_000_500);
-    assert_eq!(prompt, (1_700_000_001_250, None));
-    assert_eq!(wait, (1_700_000_002_000, 1_700_000_003_750));
-    assert_eq!(event, 1_700_000_004_999);
     Ok(())
   }
 
