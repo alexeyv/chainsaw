@@ -16,6 +16,12 @@ the named directory holds no transcripts, look for the sibling under `~/.claude/
 whose name is the run directory with every `/` and `.` turned into `-`, say so in an
 observation, and use that.
 
+Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
+running for the whole run. Each line it prints names transcripts that grew since its
+last check; that wake is a catch-up on what the implementer did since your last look,
+not a review trigger. Keep a byte offset per transcript in your state and read from
+there on each wake.
+
 The lead's start message names the session-log directory and the run directory.
 Discover the spec, the decision records, and the conventions from the repository and the
 logs yourself. Keep durable state outside the repo at
