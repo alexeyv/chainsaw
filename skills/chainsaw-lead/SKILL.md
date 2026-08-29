@@ -293,7 +293,11 @@ When the user says to stop OR the supervisor says you reached 250k context, ask 
 
 1. Let the in-flight implementer finish.
 2. Wait for the commentator's findings on that commit.
-3. Write the continuation prompt to the run directory: HEAD, the gate command and
+3. Write the continuation prompt to the run directory. Its first line is an
+   instruction, not state: "Invoke the `chainsaw-lead` skill and read it in full before
+   any other tool call; this file is a state snapshot, not the process." A lead that
+   resumed from a continuation without the skill fired implementers as sub-agents and
+   in parallel. Then: HEAD, the gate command and
    exact numbers, done/next derived from git not remembered, the exact observation
    cursor, every unresolved finding keyed by its stable number in full, resolved
    findings and their reasons, open questions, traps hit.

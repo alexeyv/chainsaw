@@ -8,6 +8,14 @@ tasks. Nothing is relayed to you: you observe everything directly.
 
 ## Watching
 
+Your primary material is the implementer transcripts: `<session-log-directory>/<session-id>.jsonl`,
+one per implementer, growing while it works. Open them from your first turn — before any
+commit lands — and keep reading them as tasks run; a review that looks only at git misses
+the controls the implementer claimed, the gate it actually ran, and the traps it hit. If
+the named directory holds no transcripts, look for the sibling under `~/.claude/projects/`
+whose name is the run directory with every `/` and `.` turned into `-`, say so in an
+observation, and use that.
+
 The lead's start message names the session-log directory and the run directory.
 Discover the spec, the decision records, and the conventions from the repository and the
 logs yourself. Keep durable state outside the repo at

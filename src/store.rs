@@ -59,9 +59,14 @@ pub struct Store {
 }
 
 /// Claude Code names a project directory after the session's cwd, replacing
-/// separators with dashes and nothing else. Dots survive.
+/// both separators and dots with dashes: `/Users/alex/src/ui.wt/run` becomes
+/// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
+/// dots put the database beside no transcript at all, and the commentator's
+/// start message named a directory holding nothing (run of 2026-08-28).
 fn project_directory_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir.to_string_lossy().replace('/', "-")
+  canonical_run_dir
+    .to_string_lossy()
+    .replace(['/', '.'], "-")
 }
 
 /// Where Claude Code keeps a session's transcripts. The supervisor's own database
@@ -243,11 +248,18 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_dots_when_the_run_directory_is_dotted() {
+    fn should_dash_dots_when_the_run_directory_is_dotted() {
+      // Observed 2026-08-28: Claude Code wrote the run's transcripts under
+      // -Users-alex-src-ui-wt-<run>, not -Users-alex-src-ui.wt-<run>.
       assert_eq!(
         project_directory_name(Path::new("/Users/a/src/ui.wt/refactor")),
-        "-Users-a-src-ui.wt-refactor"
+        "-Users-a-src-ui-wt-refactor"
       );
+    }
+
+    #[test]
+    fn should_dash_a_leading_dot_directory() {
+      assert_eq!(project_directory_name(Path::new("/x/.bare")), "-x--bare");
     }
   }
 
