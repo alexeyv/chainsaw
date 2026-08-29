@@ -573,18 +573,36 @@ mod record_commit {
   }
 
   #[test]
-  fn should_keep_the_first_commit_when_recorded_again() -> Result<()> {
+  fn should_record_nothing_when_the_same_commit_is_recorded_again() -> Result<()> {
     let mut db = database();
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "commit once")?;
     let first = record_commit(&transaction, task.id(), "first123", None)?;
 
-    let again = record_commit(&transaction, task.id(), "second456", None)?;
+    let again = record_commit(&transaction, task.id(), "first123", None)?;
     transaction.commit()?;
 
     assert_eq!(format_task(&again), format_task(&first));
-    assert_eq!(again.commit_sha(), Some("first123"));
+    assert_eq!(row_count(&db, "task_events")?, 3);
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_a_different_commit_is_recorded_again() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "commit once")?;
+    record_commit(&transaction, task.id(), "first123", None)?;
+
+    let error = record_commit(&transaction, task.id(), "second456", None).unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is already committed_unverified with commit Some(\"first123\"), not Some(\"second456\")"
+    );
     Ok(())
   }
 }
@@ -718,6 +736,7 @@ mod advance {
       task.id(),
       TaskState::Dispatched,
       Some("by hand"),
+      |_| Ok(()),
       |transaction| {
         transaction.execute("update tasks set session_id=7 where id=1", [])?;
         Ok(())
@@ -741,13 +760,56 @@ mod advance {
       &transaction,
       task.id(),
       TaskState::Drafted,
-      Some("ignored"),
+      None,
+      |_| Ok(()),
       |_| panic!("mutation must not run"),
     )?;
     transaction.commit()?;
 
     assert_eq!(format_task(&same), format_task(&task));
     assert_eq!(row_count(&db, "task_events")?, 1);
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_reason_differs_in_the_same_state() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let task = draft(&transaction, "stay drafted")?;
+
+    let error = advance(
+      &transaction,
+      task.id(),
+      TaskState::Drafted,
+      Some("another story"),
+      |_| Ok(()),
+      |_| panic!("mutation must not run"),
+    )
+    .unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is already drafted with reason None, not Some(\"another story\")"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_fact_differs_in_the_same_state() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    session_row(&db, 8)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "dispatched once")?;
+
+    let error = dispatch(&transaction, task.id(), 8, 0, false, None).unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is already dispatched with session Some(7), not Some(8)"
+    );
     Ok(())
   }
 
@@ -795,7 +857,15 @@ mod advance {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error = advance(&transaction, 9, TaskState::Aborted, None, |_| Ok(())).unwrap_err();
+    let error = advance(
+      &transaction,
+      9,
+      TaskState::Aborted,
+      None,
+      |_| Ok(()),
+      |_| Ok(()),
+    )
+    .unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "task 9 is missing");
@@ -813,6 +883,7 @@ mod advance {
       task.id(),
       TaskState::Aborted,
       Some("why"),
+      |_| Ok(()),
       |_| anyhow::bail!("mutation refused"),
     )
     .unwrap_err();
@@ -830,9 +901,14 @@ mod advance {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "no session")?;
 
-    let error = advance(&transaction, task.id(), TaskState::InFlight, None, |_| {
-      Ok(())
-    })
+    let error = advance(
+      &transaction,
+      task.id(),
+      TaskState::InFlight,
+      None,
+      |_| Ok(()),
+      |_| Ok(()),
+    )
     .unwrap_err();
     transaction.rollback()?;
 
