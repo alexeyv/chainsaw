@@ -146,17 +146,17 @@ pub fn dispatch(
   )
 }
 
+/// The dispatch `log_offset` stays as the measurement baseline.
 pub fn take_flight(
   transaction: &Transaction<'_>,
   id: i64,
-  log_offset: i64,
   base_head: &str,
   context_size_start: i64,
 ) -> Result<Task> {
   advance(transaction, id, TaskState::InFlight, None, |transaction| {
     transaction.execute(
-      "update tasks set log_offset=?, base_head=?, context_size_start=? where id=?",
-      params![log_offset, base_head, context_size_start, id],
+      "update tasks set base_head=?, context_size_start=? where id=?",
+      params![base_head, context_size_start, id],
     )?;
     Ok(())
   })

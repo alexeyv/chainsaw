@@ -1894,13 +1894,7 @@ fn observe_implementer(
     let head = git_stdout(store, &["rev-parse", "HEAD"])?;
     let context = context_before(log, dispatch_offset);
     let transaction = store.write_transaction()?;
-    task::take_flight(
-      &transaction,
-      task.id(),
-      dispatch_offset as i64,
-      &head,
-      context as i64,
-    )?;
+    task::take_flight(&transaction, task.id(), &head, context as i64)?;
     transaction.commit()?;
     return Ok(());
   }

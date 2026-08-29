@@ -524,9 +524,10 @@ mod take_flight {
     let mut db = database();
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
-    let task = dispatched(&transaction, "fly")?;
+    let task = draft(&transaction, "fly")?;
+    let task = dispatch(&transaction, task.id(), 7, 42, false, None)?;
 
-    let task = take_flight(&transaction, task.id(), 42, "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", 900)?;
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::InFlight);
@@ -543,7 +544,7 @@ mod take_flight {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "fly")?;
 
-    let error = take_flight(&transaction, task.id(), 42, "base123", 900).unwrap_err();
+    let error = take_flight(&transaction, task.id(), "base123", 900).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "InFlight task requires a session");
@@ -560,7 +561,7 @@ mod record_commit {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "commit")?;
-    let task = take_flight(&transaction, task.id(), 42, "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", 900)?;
 
     let task = record_commit(&transaction, task.id(), "landed123", Some("hooks ran"))?;
     transaction.commit()?;
@@ -597,7 +598,7 @@ mod accept {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "accept me")?;
-    let task = take_flight(&transaction, task.id(), 42, "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", 900)?;
     let task = record_commit(&transaction, task.id(), "landed123", None)?;
 
     let task = accept(&transaction, task.id(), "gate passed")?;
