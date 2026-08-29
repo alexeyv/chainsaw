@@ -20,7 +20,7 @@ use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskState};
 use crate::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
-  latest_assistant_text, prompt_landed,
+  format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
@@ -141,6 +141,7 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
       println!("{}", store.logs_dir.display());
       Ok(())
     }
+    Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(store, interval_ms),
     Command::Context { name } => cmd_context(store, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
@@ -1562,6 +1563,25 @@ fn print_time_summary(store: &Store) -> Result<()> {
     );
   }
   Ok(())
+}
+
+/// Runs until killed; the commentator drives it under Claude Code's Monitor
+/// tool, and each printed line is one wake. A wake is a catch-up on what the
+/// implementer did since the commentator's last look, not a review trigger;
+/// reviews are triggered by commits.
+fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
+  use std::io::Write;
+
+  let mut before = transcript_sizes(&store.logs_dir);
+  loop {
+    std::thread::sleep(Duration::from_millis(interval_ms));
+    let after = transcript_sizes(&store.logs_dir);
+    if let Some(line) = format_growth(&transcript_growth(&before, &after)) {
+      println!("{line}");
+      std::io::stdout().flush()?;
+    }
+    before = after;
+  }
 }
 
 fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {

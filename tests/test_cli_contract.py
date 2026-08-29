@@ -8,6 +8,7 @@ a replacement executable by setting CHAINSAW_SUPERVISOR_COMMAND.
 import json
 import sqlite3
 import threading
+import subprocess
 import time
 from pathlib import Path
 
@@ -1157,3 +1158,41 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+
+class WatchTranscriptsContractTests(SupervisorContractCase):
+    """`watch-transcripts` prints one line per interval naming transcripts that grew."""
+
+    def test_reports_growth_of_existing_and_new_transcripts_once_per_interval(self):
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        existing = self.logs_dir / "impl-1.jsonl"
+        existing.write_text("{}\n")
+        command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
+                   "watch-transcripts", "--interval-ms", "200"]
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
+        )
+        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.kill)
+
+        time.sleep(0.1)
+        with existing.open("a") as transcript:
+            transcript.write("{\"more\":1}\n")
+        (self.logs_dir / "impl-2.jsonl").write_text("{}\n")
+
+        line = process.stdout.readline()
+        self.assertEqual(line, "transcripts grew: impl-1 +11, impl-2 +3\n")
+
+    def test_stays_silent_while_nothing_grows(self):
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / "impl-1.jsonl").write_text("{}\n")
+        command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
+                   "watch-transcripts", "--interval-ms", "50"]
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
+        )
+
+        time.sleep(0.4)
+        process.kill()
+        stdout, _ = process.communicate(timeout=5)
+        self.assertEqual(stdout, "")

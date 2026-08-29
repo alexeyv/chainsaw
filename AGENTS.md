@@ -12,14 +12,12 @@ Agentic software development process, minimizing downtime between coding session
 - Lead prompt: `skills/chainsaw-lead/SKILL.md`
 - Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
 - Supervisor binary: `target/debug/chainsaw`, built from `src/`
-- Context probe: `tools/bin/context-probe` built from `tools/context-probe.cc`
 - How to write tests: `tests/AGENTS.md` 
 
 ## Running and verifying
 
 - `--run-dir` is a parent flag and must precede the subcommand: `target/debug/chainsaw --run-dir DIR <subcommand>`
 - Build the supervisor with `cargo build`.
-- Compile the probe with `mkdir -p tools/bin && clang++ -o tools/bin/context-probe tools/context-probe.cc` — no Makefile.
 
 ## Quality gate
 
@@ -30,8 +28,6 @@ cargo fmt --check
 cargo clippy --quiet --all-targets --all-features --locked -- -D warnings
 cargo test --quiet --locked
 python3 -B -m unittest discover -s tests -q
-mkdir -p tools/bin
-clang++ -o tools/bin/context-probe tools/context-probe.cc
 ```
 
 How tests should be written is in `tests/AGENTS.md`.

@@ -64,9 +64,7 @@ pub struct Store {
 /// dots put the database beside no transcript at all, and the commentator's
 /// start message named a directory holding nothing (run of 2026-08-28).
 fn project_directory_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir
-    .to_string_lossy()
-    .replace(['/', '.'], "-")
+  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
 }
 
 /// Where Claude Code keeps a session's transcripts. The supervisor's own database

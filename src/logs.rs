@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -76,6 +76,55 @@ fn usage_of_line(line: &str) -> Option<u64> {
 
 fn token_field(usage: &Value, key: &str) -> u64 {
   usage.get(key).and_then(Value::as_u64).unwrap_or_default()
+}
+
+/// Byte size of every transcript in the directory, keyed by session id.
+pub fn transcript_sizes(dir: &Path) -> BTreeMap<String, u64> {
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    return BTreeMap::new();
+  };
+  entries
+    .filter_map(Result::ok)
+    .filter_map(|entry| {
+      let path = entry.path();
+      let name = path.file_stem()?.to_str()?.to_owned();
+      (path.extension()?.to_str()? == "jsonl").then(|| (name, file_size(Some(&path))))
+    })
+    .collect()
+}
+
+/// Which transcripts grew between two size snapshots, and by how many bytes.
+/// A transcript that did not exist before counts as growth from zero.
+///
+/// This is the commentator's wake signal. A watch keyed on file creation sees
+/// a new implementer's transcript appear and is then blind while it fills; a
+/// watch keyed on modification fires on every appended line, hundreds of
+/// times per task. Comparing snapshots on a coarse cadence reports only what
+/// grew since the last look, at most once per interval.
+pub fn transcript_growth(
+  before: &BTreeMap<String, u64>,
+  after: &BTreeMap<String, u64>,
+) -> Vec<(String, u64)> {
+  after
+    .iter()
+    .filter_map(|(name, &size)| {
+      let previous = before.get(name).copied().unwrap_or(0);
+      (size > previous).then(|| (name.clone(), size - previous))
+    })
+    .collect()
+}
+
+/// One wake line, or None when nothing grew: `transcripts grew: a +5, b +2`.
+pub fn format_growth(growth: &[(String, u64)]) -> Option<String> {
+  if growth.is_empty() {
+    return None;
+  }
+  let parts = growth
+    .iter()
+    .map(|(name, delta)| format!("{name} +{delta}"))
+    .collect::<Vec<_>>()
+    .join(", ");
+  Some(format!("transcripts grew: {parts}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,7 +283,69 @@ mod tests {
   use std::fs;
   use std::sync::atomic::{AtomicU64, Ordering};
 
-  use super::{PromptLanding, prompt_landed, usage_of_line};
+  use std::collections::BTreeMap;
+
+  use super::{PromptLanding, format_growth, prompt_landed, transcript_growth, usage_of_line};
+
+  fn sizes(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
+    pairs
+      .iter()
+      .map(|(name, size)| ((*name).to_owned(), *size))
+      .collect()
+  }
+
+  mod transcript_growth {
+    use super::*;
+
+    #[test]
+    fn should_work() {
+      let before = sizes(&[("a", 10), ("b", 20)]);
+      let after = sizes(&[("a", 15), ("b", 20)]);
+
+      assert_eq!(
+        format!("{:?}", transcript_growth(&before, &after)),
+        r#"[("a", 5)]"#
+      );
+    }
+
+    #[test]
+    fn should_count_a_new_transcript_as_growth_from_zero() {
+      let before = sizes(&[("a", 10)]);
+      let after = sizes(&[("a", 10), ("b", 7)]);
+
+      assert_eq!(
+        format!("{:?}", transcript_growth(&before, &after)),
+        r#"[("b", 7)]"#
+      );
+    }
+
+    #[test]
+    fn should_ignore_a_transcript_that_shrank_or_vanished() {
+      let before = sizes(&[("a", 10), ("b", 20)]);
+      let after = sizes(&[("a", 4)]);
+
+      assert_eq!(format!("{:?}", transcript_growth(&before, &after)), "[]");
+    }
+  }
+
+  mod format_growth {
+    use super::*;
+
+    #[test]
+    fn should_work() {
+      let growth = vec![("a".to_owned(), 5), ("b".to_owned(), 2)];
+
+      assert_eq!(
+        format_growth(&growth).as_deref(),
+        Some("transcripts grew: a +5, b +2")
+      );
+    }
+
+    #[test]
+    fn should_be_silent_when_nothing_grew() {
+      assert_eq!(format_growth(&[]), None);
+    }
+  }
 
   fn landing_in(transcript: &str, needle: &str) -> Option<PromptLanding> {
     static NEXT_TRANSCRIPT: AtomicU64 = AtomicU64::new(0);

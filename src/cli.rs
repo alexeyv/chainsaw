@@ -127,6 +127,11 @@ pub enum Command {
   State,
   /// Print the directory holding this run's session transcripts.
   LogsDir,
+  /// Print a line whenever session transcripts grow, paced to one check per interval.
+  WatchTranscripts {
+    #[arg(long, default_value_t = 120_000)]
+    interval_ms: u64,
+  },
   /// Print measured context use.
   Context { name: Option<String> },
   /// Open or close a human-wait interval.
