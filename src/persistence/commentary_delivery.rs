@@ -1,5 +1,5 @@
-use anyhow::Result;
-use chrono::Utc;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 pub fn record(transaction: &Transaction<'_>, task_id: i64) -> Result<bool> {
@@ -13,16 +13,8 @@ pub fn record(transaction: &Transaction<'_>, task_id: i64) -> Result<bool> {
   Ok(changed == 1)
 }
 
-pub fn delivered_at(transaction: &Transaction<'_>, task_id: i64) -> Result<Option<i64>> {
-  transaction
-    .query_row(
-      "select delivered_at from commentary_deliveries where task_id=?",
-      [task_id],
-      |row| row.get::<_, Option<i64>>(0),
-    )
-    .optional()
-    .map(Option::flatten)
-    .map_err(Into::into)
+pub fn delivered_at(transaction: &Transaction<'_>, task_id: i64) -> Result<Option<DateTime<Utc>>> {
+  timestamp(transaction, "delivered_at", task_id)
 }
 
 pub fn record_wake(transaction: &Transaction<'_>, task_id: i64) -> Result<bool> {
@@ -36,16 +28,28 @@ pub fn record_wake(transaction: &Transaction<'_>, task_id: i64) -> Result<bool> 
   Ok(changed == 1)
 }
 
-pub fn woken_at(transaction: &Transaction<'_>, task_id: i64) -> Result<Option<i64>> {
+pub fn woken_at(transaction: &Transaction<'_>, task_id: i64) -> Result<Option<DateTime<Utc>>> {
+  timestamp(transaction, "woken_at", task_id)
+}
+
+fn timestamp(
+  transaction: &Transaction<'_>,
+  column: &str,
+  task_id: i64,
+) -> Result<Option<DateTime<Utc>>> {
   transaction
     .query_row(
-      "select woken_at from commentary_deliveries where task_id=?",
+      &format!("select {column} from commentary_deliveries where task_id=?"),
       [task_id],
       |row| row.get::<_, Option<i64>>(0),
     )
-    .optional()
-    .map(Option::flatten)
-    .map_err(Into::into)
+    .optional()?
+    .flatten()
+    .map(|millis| {
+      DateTime::from_timestamp_millis(millis)
+        .with_context(|| format!("commentary delivery {column} is outside the supported range"))
+    })
+    .transpose()
 }
 
 #[cfg(test)]

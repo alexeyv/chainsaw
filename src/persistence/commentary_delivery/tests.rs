@@ -21,6 +21,7 @@ mod record {
 
     assert!(recorded);
     let stored = stored.expect("delivery timestamp");
+    let stored = stored.timestamp_millis();
     assert!(stored >= before && stored <= after);
     Ok(())
   }
@@ -106,7 +107,7 @@ mod delivered_at {
       [],
       |row| row.get(0),
     )?;
-    assert_eq!(stored, Some(raw));
+    assert_eq!(stored.map(|at| at.timestamp_millis()), Some(raw));
     Ok(())
   }
 
@@ -151,6 +152,7 @@ mod record_wake {
 
     assert!(recorded);
     let stored = stored.expect("wake timestamp");
+    let stored = stored.timestamp_millis();
     assert!(stored >= before && stored <= after);
     assert_eq!(row_count(&db, "commentary_deliveries")?, 1);
     Ok(())
@@ -218,7 +220,7 @@ mod woken_at {
       [],
       |row| row.get(0),
     )?;
-    assert_eq!(stored, Some(raw));
+    assert_eq!(stored.map(|at| at.timestamp_millis()), Some(raw));
     Ok(())
   }
 

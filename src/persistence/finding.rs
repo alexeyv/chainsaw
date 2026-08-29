@@ -22,17 +22,15 @@ const SELECT: &str = "
 ";
 
 pub fn register(transaction: &Transaction<'_>, task_id: i64, description: &str) -> Result<Finding> {
-  let created_at = Utc::now().timestamp_millis();
+  let created_at = Utc::now();
   let id = transaction.query_row(
     "
       insert into findings(task_id, description, created_at)
       values (?1, ?2, ?3) returning id
       ",
-    params![task_id, description, created_at],
+    params![task_id, description, created_at.timestamp_millis()],
     |row| row.get(0),
   )?;
-  let created_at = DateTime::from_timestamp_millis(created_at)
-    .expect("current timestamp is inside the supported range");
   Finding::registered(id, task_id, description.to_owned(), created_at)
 }
 
@@ -46,7 +44,7 @@ pub fn resolve(
   if finding.is_resolved() {
     bail!("finding {} is already resolved", finding.id());
   }
-  let resolved_at = Utc::now().timestamp_millis();
+  let resolved_at = Utc::now();
   let candidate = Finding::from_record(
     finding.id(),
     finding.task_id(),
@@ -55,7 +53,7 @@ pub fn resolve(
     Some(verdict_reason.to_owned()),
     fix_task_id,
     finding.created_at(),
-    DateTime::from_timestamp_millis(resolved_at),
+    Some(resolved_at),
   )?;
   let changed = transaction.execute(
     "
@@ -67,7 +65,7 @@ pub fn resolve(
       verdict.as_str(),
       verdict_reason,
       fix_task_id,
-      resolved_at,
+      resolved_at.timestamp_millis(),
       finding.id()
     ],
   )?;

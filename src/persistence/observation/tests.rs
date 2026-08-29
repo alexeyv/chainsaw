@@ -123,7 +123,7 @@ mod after {
     transaction.commit()?;
 
     assert_eq!(
-      format_observations(&after(&db, first.id(), None)?),
+      format_observations(&after(&db.unchecked_transaction()?, first.id(), None)?),
       format_observations(&[second, third])
     );
     Ok(())
@@ -138,7 +138,7 @@ mod after {
     transaction.commit()?;
 
     assert_eq!(
-      format_observations(&after(&db, 0, None)?),
+      format_observations(&after(&db.unchecked_transaction()?, 0, None)?),
       format_observations(&[first, second])
     );
     Ok(())
@@ -151,7 +151,10 @@ mod after {
     let only = create(&transaction, None, "only")?;
     transaction.commit()?;
 
-    assert_eq!(after(&db, only.id(), None)?, Vec::new());
+    assert_eq!(
+      after(&db.unchecked_transaction()?, only.id(), None)?,
+      Vec::new()
+    );
     Ok(())
   }
 
@@ -168,7 +171,7 @@ mod after {
     transaction.commit()?;
 
     assert_eq!(
-      format_observations(&after(&db, 0, Some(5))?),
+      format_observations(&after(&db.unchecked_transaction()?, 0, Some(5))?),
       format_observations(&[relevant, run_wide])
     );
     Ok(())

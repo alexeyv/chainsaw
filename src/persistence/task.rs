@@ -20,6 +20,21 @@ struct TaskRow {
   context_size_start: Option<i64>,
 }
 
+const SELECT: &str = "
+  select id, text, predicted_files, predicted_lines, session_id,
+         commit_sha, created_at, retry_of_task_id, log_offset,
+         base_head, predicted_file_list, is_session_reuse,
+         context_size_start
+  from tasks
+";
+
+/// Predicted file names are stored joined by this; a name containing it would
+/// split into two on the way back and make the task unreadable.
+const FILE_LIST_SEPARATOR: char = ',';
+
+/// Inserts first because `Task` needs the ids the insert returns; the final
+/// `get` validates, and a failure aborts the caller's transaction, so no
+/// unvalidated task is ever visible.
 pub fn create(
   transaction: &Transaction<'_>,
   text: &str,
@@ -28,8 +43,17 @@ pub fn create(
   retry_of_task_id: Option<i64>,
   predicted_file_list: Option<Vec<String>>,
 ) -> Result<Task> {
+  if let Some(file) = predicted_file_list
+    .iter()
+    .flatten()
+    .find(|file| file.contains(FILE_LIST_SEPARATOR))
+  {
+    bail!("predicted file name {file:?} contains {FILE_LIST_SEPARATOR:?}");
+  }
   let created_at = Utc::now().timestamp_millis();
-  let stored_file_list = predicted_file_list.as_ref().map(|files| files.join(","));
+  let stored_file_list = predicted_file_list
+    .as_ref()
+    .map(|files| files.join(&FILE_LIST_SEPARATOR.to_string()));
   let id = transaction.query_row(
     "
       insert into tasks(
@@ -54,32 +78,14 @@ pub fn create(
 
 pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
   let row = transaction
-    .query_row(
-      "
-        select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, log_offset,
-               base_head, predicted_file_list, is_session_reuse,
-               context_size_start
-        from tasks where id=?
-        ",
-      [id],
-      task_row,
-    )
+    .query_row(&format!("{SELECT} where id=?"), [id], task_row)
     .optional()?;
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
 pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Task>> {
   let rows = {
-    let mut statement = transaction.prepare(
-      "
-        select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, log_offset,
-               base_head, predicted_file_list, is_session_reuse,
-               context_size_start
-        from tasks order by id asc
-        ",
-    )?;
+    let mut statement = transaction.prepare(&format!("{SELECT} order by id asc"))?;
     statement
       .query_map([], task_row)?
       .collect::<rusqlite::Result<Vec<_>>>()?
@@ -92,15 +98,8 @@ pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Task>> {
 
 pub fn tasks_for_session(transaction: &Transaction<'_>, session_id: i64) -> Result<Vec<Task>> {
   let rows = {
-    let mut statement = transaction.prepare(
-      "
-        select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, log_offset,
-               base_head, predicted_file_list, is_session_reuse,
-               context_size_start
-        from tasks where session_id=? order by id asc
-        ",
-    )?;
+    let mut statement =
+      transaction.prepare(&format!("{SELECT} where session_id=? order by id asc"))?;
     statement
       .query_map([session_id], task_row)?
       .collect::<rusqlite::Result<Vec<_>>>()?
@@ -114,13 +113,7 @@ pub fn tasks_for_session(transaction: &Transaction<'_>, session_id: i64) -> Resu
 pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task>> {
   let row = transaction
     .query_row(
-      "
-        select id, text, predicted_files, predicted_lines, session_id,
-               commit_sha, created_at, retry_of_task_id, log_offset,
-               base_head, predicted_file_list, is_session_reuse,
-               context_size_start
-        from tasks where id < ? order by id desc limit 1
-        ",
+      &format!("{SELECT} where id < ? order by id desc limit 1"),
       [id],
       task_row,
     )
@@ -232,7 +225,12 @@ pub fn advance(
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
   let predicted_file_list = row
     .get::<_, Option<String>>("predicted_file_list")?
-    .map(|files| files.split(',').map(str::to_owned).collect());
+    .map(|files| {
+      files
+        .split(FILE_LIST_SEPARATOR)
+        .map(str::to_owned)
+        .collect()
+    });
   Ok(TaskRow {
     id: row.get("id")?,
     text: row.get("text")?,

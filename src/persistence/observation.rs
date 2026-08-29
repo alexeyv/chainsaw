@@ -1,8 +1,15 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Transaction, params};
 
 use crate::domain::Observation;
+
+struct ObservationRow {
+  id: i64,
+  task_id: Option<i64>,
+  text: String,
+  created_at: i64,
+}
 
 pub fn create(
   transaction: &Transaction<'_>,
@@ -18,15 +25,20 @@ pub fn create(
     params![task_id, text, created_at],
     |row| row.get(0),
   )?;
-  materialize(id, task_id, text.to_owned(), created_at)
+  materialize(ObservationRow {
+    id,
+    task_id,
+    text: text.to_owned(),
+    created_at,
+  })
 }
 
 pub fn after(
-  db: &Connection,
+  transaction: &Transaction<'_>,
   observation_id: i64,
   task_id: Option<i64>,
 ) -> Result<Vec<Observation>> {
-  let mut statement = db.prepare(
+  let mut statement = transaction.prepare(
     "
       select id, task_id, text, created_at
       from observations
@@ -34,31 +46,23 @@ pub fn after(
       order by id
       ",
   )?;
-  let rows = statement.query_map(params![observation_id, task_id], |row| {
-    Ok((
-      row.get::<_, i64>(0)?,
-      row.get::<_, Option<i64>>(1)?,
-      row.get::<_, String>(2)?,
-      row.get::<_, i64>(3)?,
-    ))
-  })?;
-  rows
-    .map(|row| {
-      let (id, task_id, text, created_at) = row?;
-      materialize(id, task_id, text, created_at)
-    })
-    .collect()
+  let rows = statement.query_map(params![observation_id, task_id], observation_row)?;
+  rows.map(|row| materialize(row?)).collect()
 }
 
-fn materialize(
-  id: i64,
-  task_id: Option<i64>,
-  text: String,
-  created_at: i64,
-) -> Result<Observation> {
-  let created_at = DateTime::from_timestamp_millis(created_at)
+fn observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRow> {
+  Ok(ObservationRow {
+    id: row.get("id")?,
+    task_id: row.get("task_id")?,
+    text: row.get("text")?,
+    created_at: row.get("created_at")?,
+  })
+}
+
+fn materialize(row: ObservationRow) -> Result<Observation> {
+  let created_at = DateTime::from_timestamp_millis(row.created_at)
     .context("observation created_at is outside the supported range")?;
-  Observation::new(id, task_id, text, created_at)
+  Observation::new(row.id, row.task_id, row.text, created_at)
 }
 
 #[cfg(test)]

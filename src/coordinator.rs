@@ -17,7 +17,7 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{FindingVerdict, Role, Session, Task, TaskState};
+use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
 use crate::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
   format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
@@ -1319,24 +1319,10 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let stat = git_stdout(store, &["show", "--shortstat", "--format=", commit_sha])?;
   let actual_files = stat_number(&stat, "file");
   let actual_lines = stat_number(&stat, "insertion") + stat_number(&stat, "deletion");
-  let dispatched_at: Option<i64> = store
-    .db
-    .query_row(
-      "select created_at from task_events
-       where task_id=? and state='dispatched' order by id desc limit 1",
-      [task_id],
-      |row| row.get(0),
-    )
-    .optional()?;
-  let committed_at: Option<i64> = store
-    .db
-    .query_row(
-      "select created_at from task_events
-       where task_id=? and state='committed_unverified' order by id desc limit 1",
-      [task_id],
-      |row| row.get(0),
-    )
-    .optional()?;
+  let dispatched_at = last_event_at(&task, |event| event.state() == TaskState::Dispatched);
+  let committed_at = last_event_at(&task, |event| {
+    event.state() == TaskState::CommittedUnverified
+  });
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| (end - start) as f64 / 1000.0);
@@ -1526,23 +1512,17 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     .collect::<Result<HashMap<_, _>>>()?;
   transaction.commit()?;
   for task in tasks {
-    let mut statement = store
-      .db
-      .prepare("select state,created_at from task_events where task_id=? order by id")?;
-    let log = statement
-      .query_map([task.id()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-      })?
-      .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     let mut timeline = TaskState::iter()
       .filter_map(|state| {
-        log
-          .get(state.as_str())
-          .map(|timestamp| format!("{state}@{}", clock_time(*timestamp)))
+        last_event_at(&task, |event| event.state() == state)
+          .map(|at| format!("{state}@{}", clock_time(at)))
       })
       .collect::<Vec<_>>();
     if let Some(delivered_at) = deliveries.get(&task.id()).copied().flatten() {
-      timeline.push(format!("commentary-delivered@{}", clock_time(delivered_at)));
+      timeline.push(format!(
+        "commentary-delivered@{}",
+        clock_time(delivered_at.timestamp_millis())
+      ));
     }
     let timeline = timeline.join(" ");
     let retry = task
@@ -1629,6 +1609,16 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
   Ok(())
 }
 
+/// Millisecond timestamp of the newest event of `task` that `matches`.
+fn last_event_at(task: &Task, matches: impl Fn(&TaskEvent) -> bool) -> Option<i64> {
+  task
+    .events()
+    .iter()
+    .rev()
+    .find(|event| matches(event))
+    .map(|event| event.created_at().timestamp_millis())
+}
+
 fn clock_time(millis: i64) -> String {
   Local.timestamp_millis_opt(millis).single().map_or_else(
     || "-".to_owned(),
@@ -1637,34 +1627,27 @@ fn clock_time(millis: i64) -> String {
 }
 
 fn print_time_summary(store: &Store) -> Result<()> {
-  let first: Option<i64> =
-    store
-      .db
-      .query_row("select min(created_at) from task_events", [], |row| {
-        row.get(0)
-      })?;
-  let mut busy = 0;
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
   transaction.commit()?;
-  for task in tasks {
-    let start: Option<i64> = store
-      .db
-      .query_row(
-        "select created_at from task_events
-         where task_id=? and state='dispatched' order by id desc limit 1",
-        [task.id()],
-        |row| row.get(0),
-      )
-      .optional()?;
-    let end: Option<i64> = store
-            .db
-            .query_row(
-                "select created_at from task_events where task_id=? and state in ('committed_unverified','accepted','aborted') order by id limit 1",
-                [task.id()],
-                |row| row.get(0),
-            )
-            .optional()?;
+  let first = tasks
+    .iter()
+    .flat_map(|task| task.events())
+    .map(|event| event.created_at().timestamp_millis())
+    .min();
+  let mut busy = 0;
+  for task in &tasks {
+    let start = last_event_at(task, |event| event.state() == TaskState::Dispatched);
+    let end = task
+      .events()
+      .iter()
+      .find(|event| {
+        matches!(
+          event.state(),
+          TaskState::CommittedUnverified | TaskState::Accepted | TaskState::Aborted
+        )
+      })
+      .map(|event| event.created_at().timestamp_millis());
     if let Some(start) = start {
       busy += end.unwrap_or_else(now) - start;
     }

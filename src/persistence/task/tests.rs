@@ -191,6 +191,29 @@ events:
   }
 
   #[test]
+  fn should_fail_when_a_predicted_file_name_contains_the_separator() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    let error = create(
+      &transaction,
+      "a task",
+      1,
+      10,
+      None,
+      Some(vec!["a,b.rs".to_owned()]),
+    )
+    .unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "predicted file name \"a,b.rs\" contains ','"
+    );
+    Ok(())
+  }
+
+  #[test]
   fn should_fail_when_the_retried_task_does_not_exist() -> Result<()> {
     let mut db = database();
 
