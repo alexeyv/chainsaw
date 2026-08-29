@@ -34,6 +34,9 @@ const COMMIT_UNATTENDED_SECONDS: i64 = 300;
 /// Task monitors read state every few seconds; this much silence while a task
 /// is out means nothing is watching.
 const STATE_UNREAD_SECONDS: i64 = 120;
+/// The daemon stamps `daemon-seen` on every poll; silence this long means no
+/// daemon is running, whether it never started, was stopped, or died.
+const DAEMON_SILENT_SECONDS: i64 = 30;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
@@ -131,10 +134,21 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
       ));
     }
   }
-  if store.cfg("stopped")?.as_deref() == Some("1") {
-    warnings.push(
-      "the daemon is stopped: nothing observes implementers until it is started again".to_owned(),
-    );
+  let seen = store
+    .cfg("daemon-seen")?
+    .and_then(|value| value.parse::<i64>().ok());
+  let absent = match seen {
+    Some(seen) if (timestamp - seen) / 1000 <= DAEMON_SILENT_SECONDS => None,
+    Some(seen) => Some(format!(
+      "no daemon has polled for {}",
+      duration_text((timestamp - seen) / 1000)
+    )),
+    None => Some("no daemon has run for this run".to_owned()),
+  };
+  if let Some(absent) = absent {
+    warnings.push(format!(
+      "{absent}: nothing observes sessions until `daemon` is started"
+    ));
   }
   Ok(warnings)
 }
@@ -1772,6 +1786,7 @@ fn daemon(
   let mut compacting = false;
   while store.cfg("stopped")?.as_deref() != Some("1") {
     let timestamp = Utc::now();
+    store.set_cfg("daemon-seen", &now().to_string())?;
     for session in session_snapshots(store)?
       .into_iter()
       .filter(Session::is_live)

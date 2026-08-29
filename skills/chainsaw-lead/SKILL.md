@@ -255,7 +255,7 @@ measured separately (`$SUP state` shows both).
    which is the line to watch for `<task-id> committed_unverified`. Every command you
    run ends with `WARNING:` lines on stderr when a measured fact needs you: your
    context near or past 250k, a commit unjudged for five minutes, no state read for
-   two minutes while a task is out, the daemon stopped. Act on them when they appear;
+   two minutes while a task is out, no daemon polling. Act on them when they appear;
    nothing is pushed at you.
 6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
    chronological context and every still-unresolved finding. It narrates on its own

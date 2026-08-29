@@ -1267,20 +1267,24 @@ class StandingWarningTests(SupervisorContractCase):
             f"is a monitor armed on `state --task {task}`?",
             never.stderr,
         )
-        self.assertEqual(watched.stderr, "")
+        self.assertNotIn("state read", watched.stderr)
         self.assertIn(
             f"WARNING: no state read for 6m while task {task} is out: "
             f"is a monitor armed on `state --task {task}`?",
             silent.stderr,
         )
-        self.assertEqual(nothing_out.stderr, "")
+        self.assertNotIn("state read", nothing_out.stderr)
 
-    def test_a_stopped_daemon_is_flagged_until_it_starts_again(self):
+    def test_an_absent_daemon_is_flagged_until_one_polls_again(self):
+        never = self.assert_success(self.cli("state"))
         daemon = self.start_daemon()
         self.wait_for_state("context UNAVAILABLE")
         running = self.assert_success(self.cli("state"))
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
+        self.write_supervisor_db(
+            f"update config set value={self.FIVE_MINUTES_AGO} where key='daemon-seen'",
+        )
         stopped = self.assert_success(self.cli("state"))
         restarted = self.start_daemon()
         self.wait_for_state("context UNAVAILABLE")
@@ -1288,13 +1292,11 @@ class StandingWarningTests(SupervisorContractCase):
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
 
-        self.assertNotIn("daemon is stopped", running.stderr)
-        self.assertIn(
-            "WARNING: the daemon is stopped: nothing observes implementers "
-            "until it is started again",
-            stopped.stderr,
-        )
-        self.assertNotIn("daemon is stopped", again.stderr)
+        suffix = ": nothing observes sessions until `daemon` is started"
+        self.assertIn(f"WARNING: no daemon has run for this run{suffix}", never.stderr)
+        self.assertNotIn("daemon", running.stderr)
+        self.assertIn(f"WARNING: no daemon has polled for 6m{suffix}", stopped.stderr)
+        self.assertNotIn("daemon", again.stderr)
 
     def test_lead_context_is_announced_near_and_past_the_stop_threshold(self):
         self.write_lead_log(210_000)
