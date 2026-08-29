@@ -28,6 +28,12 @@ use crate::settings::Settings;
 use crate::store::{Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
+const LEAD_WARN_TOKENS: i64 = 200_000;
+/// A commit the lead has not judged after this long is being missed.
+const COMMIT_UNATTENDED_SECONDS: i64 = 300;
+/// Task monitors read state every few seconds; this much silence while a task
+/// is out means nothing is watching.
+const STATE_UNREAD_SECONDS: i64 = 120;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
@@ -38,6 +44,110 @@ const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
 pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
+  let lead_facing = is_lead_facing(&command);
+  run(store, runtime, command)?;
+  if lead_facing {
+    for warning in standing_warnings(store)? {
+      eprintln!("WARNING: {warning}");
+    }
+  }
+  Ok(())
+}
+
+/// Commands whose output the lead reads. The daemon and the commentator's
+/// watch never return; the rest print a value the lead pipes somewhere.
+fn is_lead_facing(command: &Command) -> bool {
+  !matches!(
+    command,
+    Command::Daemon { .. }
+      | Command::WatchTranscripts { .. }
+      | Command::LogsDir
+      | Command::Context { .. }
+      | Command::Config { .. }
+      | Command::Stop
+  )
+}
+
+/// Facts the lead must act on, printed after every lead-facing command so
+/// they do not depend on the lead remembering the skill. Each one is measured
+/// from the store, never inferred from what the lead said.
+fn standing_warnings(store: &Store) -> Result<Vec<String>> {
+  let mut warnings = Vec::new();
+  let timestamp = now();
+  if let Some(lead) = session_snapshots(store)?
+    .into_iter()
+    .find(|session| session.role() == Role::Lead && session.is_live())
+  {
+    let context = lead.context();
+    if context > LEAD_STOP_TOKENS {
+      warnings.push(format!(
+        "lead context {context} is past {LEAD_STOP_TOKENS}: stop the run per the skill's Stopping section"
+      ));
+    } else if context > LEAD_WARN_TOKENS {
+      warnings.push(format!("lead context {context} of {LEAD_STOP_TOKENS}"));
+    }
+  }
+  let transaction = store.db.unchecked_transaction()?;
+  let tasks = task::all(&transaction)?;
+  transaction.commit()?;
+  for task in &tasks {
+    if task.state() != TaskState::CommittedUnverified {
+      continue;
+    }
+    let since = task
+      .events()
+      .iter()
+      .find(|event| event.state() == TaskState::CommittedUnverified)
+      .map_or(timestamp, |event| event.created_at().timestamp_millis());
+    let age = (timestamp - since) / 1000;
+    if age > COMMIT_UNATTENDED_SECONDS {
+      warnings.push(format!(
+        "task {} committed_unverified for {}, not accepted or aborted",
+        task.id(),
+        duration_text(age)
+      ));
+    }
+  }
+  let out: Vec<i64> = tasks
+    .iter()
+    .filter(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
+    .map(Task::id)
+    .collect();
+  if let Some(task_id) = out.first() {
+    let last_read = store
+      .cfg("last-state-read")?
+      .and_then(|value| value.parse::<i64>().ok());
+    let unread = match last_read {
+      Some(read) if (timestamp - read) / 1000 <= STATE_UNREAD_SECONDS => None,
+      Some(read) => Some(format!(
+        "no state read for {}",
+        duration_text((timestamp - read) / 1000)
+      )),
+      None => Some("state has never been read".to_owned()),
+    };
+    if let Some(unread) = unread {
+      warnings.push(format!(
+        "{unread} while task {task_id} is out: is a monitor armed on `state --task {task_id}`?"
+      ));
+    }
+  }
+  if store.cfg("stopped")?.as_deref() == Some("1") {
+    warnings.push(
+      "the daemon is stopped: nothing observes implementers until it is started again".to_owned(),
+    );
+  }
+  Ok(warnings)
+}
+
+fn duration_text(seconds: i64) -> String {
+  if seconds < 60 {
+    format!("{seconds}s")
+  } else {
+    format!("{}m", seconds / 60)
+  }
+}
+
+fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
@@ -136,7 +246,7 @@ pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) ->
         Ok(())
       }
     }
-    Command::State => cmd_state(store),
+    Command::State { task } => cmd_state(store, task),
     Command::LogsDir => {
       println!("{}", store.logs_dir.display());
       Ok(())
@@ -796,11 +906,10 @@ fn cmd_dispatch(
   )?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
-  if reuse {
-    println!("task {task_id} dispatched to {implementer} (reuse)");
-  } else {
-    println!("task {task_id} dispatched to {implementer}");
-  }
+  let reuse_note = if reuse { " (reuse)" } else { "" };
+  println!(
+    "task {task_id} dispatched to {implementer}{reuse_note}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
+  );
   Ok(())
 }
 
@@ -1381,7 +1490,14 @@ fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result
   task::get(transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))
 }
 
-fn cmd_state(store: &Store) -> Result<()> {
+fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
+  store.set_cfg("last-state-read", &now().to_string())?;
+  if let Some(task_id) = only_task {
+    let task =
+      task_snapshot(store, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))?;
+    println!("{task_id} {}", task.state());
+    return Ok(());
+  }
   println!("tasks");
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
@@ -1705,7 +1821,7 @@ fn daemon(
             &mut compacting,
           )?;
         }
-        Role::Lead => observe_lead(store, runtime, name, context)?,
+        Role::Lead => observe_lead(store, context)?,
       }
     }
     thread::sleep(poll_interval);
@@ -1879,25 +1995,14 @@ fn commentator_log_mentions(text: &str, needle: &str) -> bool {
   })
 }
 
-fn observe_lead(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  name: &str,
-  context: i64,
-) -> Result<()> {
-  if context > LEAD_STOP_TOKENS && store.cfg("lead-told-stop")?.as_deref() != Some("1") {
-    let landed = daemon_prompt(
-      store,
-      runtime,
-      name,
-      &format!(
-        "supervisor: your context is {context} tokens, past {LEAD_STOP_TOKENS}. Stop the run per the skill's Stopping section: the human must ask them plainly whether to end the run for good, then let the in-flight implementer finish, wait for the commentator on that commit, write the continuation prompt, then stop."
-      ),
-    );
-    if landed {
-      store.set_cfg("lead-told-stop", "1")?;
-      store.event("stop-lead", &format!("context {context}"))?;
-    }
+/// Records the lead crossing its stop threshold once. Nothing is pushed at
+/// the lead: an unsolicited prompt mid-thought is a context switch it did not
+/// choose. The warning printed after every lead-facing command carries the
+/// same fact at the moment the lead is already reading output.
+fn observe_lead(store: &Store, context: i64) -> Result<()> {
+  if context > LEAD_STOP_TOKENS && store.cfg("lead-over-limit")?.as_deref() != Some("1") {
+    store.set_cfg("lead-over-limit", "1")?;
+    store.event("stop-lead", &format!("context {context}"))?;
   }
   Ok(())
 }

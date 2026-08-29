@@ -124,7 +124,11 @@ pub enum Command {
     value: Option<String>,
   },
   /// Print current run state.
-  State,
+  State {
+    /// Print only this task's id and state name, one line, nothing else.
+    #[arg(long)]
+    task: Option<i64>,
+  },
   /// Print the directory holding this run's session transcripts.
   LogsDir,
   /// Print a line whenever session transcripts grow, paced to one check per interval.

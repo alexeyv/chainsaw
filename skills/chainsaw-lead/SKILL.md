@@ -1,6 +1,6 @@
 ---
 name: chainsaw-lead
-description: Lead a chainsaw run — decompose a spec into tasks sized for one implementer session each, dispatch them one at a time through the supervisor into fresh Herdr sessions, pre-populate the next implementer while the current one works, route commentator findings into fix tasks, and stop cleanly on request or when the supervisor says your context passed 250k. Use when the user says "run chainsaw" or "chainsaw this spec".
+description: Lead a chainsaw run — decompose a spec into tasks sized for one implementer session each, dispatch them one at a time through the supervisor into fresh Herdr sessions, pre-populate the next implementer while the current one works, route commentator findings into fix tasks, and stop cleanly on request or when a supervisor command's output says your context passed 250k. Use when the user says "run chainsaw" or "chainsaw this spec".
 ---
 
 # Chainsaw lead
@@ -250,7 +250,13 @@ measured separately (`$SUP state` shows both).
    describes the task, not the session's total. If predictions are far out, size smaller
    from here on.
 5. Progress signals come from the supervisor, never self-reports:
-   `$SUP state` shows each task's state and each session's measured context.
+   `$SUP state` shows each task's state and each session's measured context;
+   `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else,
+   which is the line to watch for `<task-id> committed_unverified`. Every command you
+   run ends with `WARNING:` lines on stderr when a measured fact needs you: your
+   context near or past 250k, a commit unjudged for five minutes, no state read for
+   two minutes while a task is out, the daemon stopped. Act on them when they appear;
+   nothing is pushed at you.
 6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
    chronological context and every still-unresolved finding. It narrates on its own
    clock; the supervisor alone wakes it with the commit sha and task id, which is a
@@ -289,7 +295,7 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task.
 
 ## Stopping
 
-When the user says to stop OR the supervisor says you reached 250k context, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Then, in order:
+When the user says to stop OR a supervisor command's output warns that your context is past 250k, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Then, in order:
 
 1. Let the in-flight implementer finish.
 2. Wait for the commentator's findings on that commit.

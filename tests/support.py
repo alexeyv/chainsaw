@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -87,6 +88,20 @@ class SupervisorContractCase(unittest.TestCase):
             self.assert_success(result)
             self._logs_dirs[run_dir] = Path(result.stdout.strip())
         return self._logs_dirs[run_dir]
+
+    def write_supervisor_db(self, sql, *params):
+        """Move a durable fact the CLI cannot, such as a timestamp into the past."""
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            database.execute(sql, params)
+
+    def write_lead_log(self, context, session_id="session-lead"):
+        """Give the lead a transcript whose last turn carried this much context."""
+        log = self.logs_dir / f"{session_id}.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"usage": {"input_tokens": context}},
+        }) + "\n")
 
     def cli(self, *args, input_text=None, timeout=30):
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir), *map(str, args)]

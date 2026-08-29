@@ -1196,3 +1196,138 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         process.kill()
         stdout, _ = process.communicate(timeout=5)
         self.assertEqual(stdout, "")
+
+
+class StandingWarningTests(SupervisorContractCase):
+    """Facts the lead must act on ride on the stderr of every command it runs."""
+
+    FIVE_MINUTES_AGO = "(strftime('%s','now') - 360) * 1000"
+
+    def test_state_for_one_task_prints_only_its_id_and_state_name(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.assert_success(self.cli("state", "--task", str(task)))
+        missing = self.assert_failure(self.cli("state", "--task", "9"), "no task 9")
+
+        self.assertEqual(result.stdout, f"{task} dispatched\n")
+        self.assertNotIn("dispatched@", result.stdout)
+        self.assertEqual(missing.stdout, "")
+
+    def test_dispatch_names_the_line_a_monitor_should_wait_for(self):
+        task = self.new_task()
+        self.launch()
+
+        result = self.assert_success(self.dispatch(task))
+
+        self.assertEqual(
+            result.stdout,
+            f"task {task} dispatched to worker; watch `state --task {task}` — "
+            f"it prints `{task} committed_unverified` when the commit lands\n",
+        )
+
+    def test_a_commit_left_unjudged_for_five_minutes_is_flagged(self):
+        task, _ = self.prepare_committed_task()
+        daemon = self.start_daemon()
+        self.wait_for_state(f"{task} committed_unverified")
+        fresh = self.assert_success(self.cli("state"))
+        self.write_supervisor_db(
+            f"update task_events set created_at={self.FIVE_MINUTES_AGO} "
+            "where state='committed_unverified'",
+        )
+        stale = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("accept", str(task)))
+        judged = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertNotIn("committed_unverified for", fresh.stderr)
+        self.assertIn(
+            f"WARNING: task {task} committed_unverified for 6m, not accepted or aborted",
+            stale.stderr,
+        )
+        self.assertNotIn("committed_unverified for", judged.stderr)
+
+    def test_silence_on_state_while_a_task_is_out_asks_about_the_monitor(self):
+        task = self.new_task()
+        self.launch()
+        never = self.assert_success(self.dispatch(task))
+        self.assert_success(self.cli("state"))
+        watched = self.assert_success(self.cli("observe", "watching"))
+        self.write_supervisor_db(
+            f"update config set value={self.FIVE_MINUTES_AGO} where key='last-state-read'",
+        )
+        silent = self.assert_success(self.cli("observe", "still here"))
+        self.assert_success(self.cli("abort", str(task), "--reason", "fixture"))
+        nothing_out = self.assert_success(self.cli("observe", "nothing out"))
+
+        self.assertIn(
+            f"WARNING: state has never been read while task {task} is out: "
+            f"is a monitor armed on `state --task {task}`?",
+            never.stderr,
+        )
+        self.assertEqual(watched.stderr, "")
+        self.assertIn(
+            f"WARNING: no state read for 6m while task {task} is out: "
+            f"is a monitor armed on `state --task {task}`?",
+            silent.stderr,
+        )
+        self.assertEqual(nothing_out.stderr, "")
+
+    def test_a_stopped_daemon_is_flagged_until_it_starts_again(self):
+        daemon = self.start_daemon()
+        self.wait_for_state("context UNAVAILABLE")
+        running = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        stopped = self.assert_success(self.cli("state"))
+        restarted = self.start_daemon()
+        self.wait_for_state("context UNAVAILABLE")
+        again = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("stop"))
+        restarted.wait(timeout=10)
+
+        self.assertNotIn("daemon is stopped", running.stderr)
+        self.assertIn(
+            "WARNING: the daemon is stopped: nothing observes implementers "
+            "until it is started again",
+            stopped.stderr,
+        )
+        self.assertNotIn("daemon is stopped", again.stderr)
+
+    def test_lead_context_is_announced_near_and_past_the_stop_threshold(self):
+        self.write_lead_log(210_000)
+        daemon = self.start_daemon()
+        self.wait_for_state("context  210000")
+        near = self.assert_success(self.cli("state"))
+        self.write_lead_log(260_000)
+        self.wait_for_state("context  260000")
+        past = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            events = database.execute(
+                "select detail from events where kind='stop-lead'",
+            ).fetchall()
+
+        self.assertIn("WARNING: lead context 210000 of 250000", near.stderr)
+        self.assertNotIn("past 250000", near.stderr)
+        self.assertIn(
+            "WARNING: lead context 260000 is past 250000: stop the run per the "
+            "skill's Stopping section",
+            past.stderr,
+        )
+        self.assertEqual(events, [("context 260000",)])
+        # The runtime was never touched: no prompt was pushed at the lead.
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_the_poll_json_stays_clean_while_a_warning_is_printed(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.assert_success(self.cli("poll"))
+
+        self.assertIn("WARNING:", result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
