@@ -2,11 +2,16 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+SKILL=$(cd "$HERE/.." && pwd)
+REPO_CANDIDATE=$(cd "$SKILL/../.." && pwd)
 
-if [ -f "$HERE/../supervisor/Cargo.toml" ]; then
-  CRATE=$(cd "$HERE/../supervisor" && pwd)
+if [ -f "$REPO_CANDIDATE/Cargo.toml" ] && [ -f "$REPO_CANDIDATE/skills/chainsaw-lead/SKILL.md" ]; then
+  CRATE="$REPO_CANDIDATE"
+elif [ -f "$SKILL/supervisor/Cargo.toml" ]; then
+  CRATE="$SKILL/supervisor"
 else
-  CRATE=$(cd "$HERE/../../.." && pwd)
+  echo "chainsaw: cannot find supervisor crate" >&2
+  exit 1
 fi
 
 BIN="$CRATE/target/debug/chainsaw"

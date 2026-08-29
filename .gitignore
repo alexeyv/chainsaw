@@ -6,3 +6,6 @@ _planning/
 .claude/
 .agents/
 skills-lock.json
+
+# Ship supervisor sources in skills/; never the cargo build or binaries.
+skills/**/target/

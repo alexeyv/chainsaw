@@ -2,15 +2,13 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT="$ROOT/dist/skills/chainsaw-lead"
+SKILL="$ROOT/skills/chainsaw-lead"
+OUT="$SKILL/supervisor"
 
-rm -rf "$ROOT/dist"
+rm -rf "$OUT"
 mkdir -p "$OUT"
+cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/rust-toolchain.toml" "$OUT/"
+rsync -a --exclude tests.rs --exclude 'test_*.rs' "$ROOT/src/" "$OUT/src/"
+printf '%s\n' /target >"$OUT/.gitignore"
 
-cp -R "$ROOT/skills/chainsaw-lead/." "$OUT/"
-
-mkdir -p "$OUT/supervisor"
-cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/rust-toolchain.toml" "$OUT/supervisor/"
-rsync -a --exclude tests.rs --exclude 'test_*.rs' "$ROOT/src/" "$OUT/supervisor/src/"
-
-echo "Assembled skill at $OUT (install with: npx skills add ./dist --agent claude-code)"
+echo "Supervisor sources synced to $OUT (install with: npx skills add alexeyv/chainsaw)"
