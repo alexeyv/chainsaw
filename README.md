@@ -12,7 +12,7 @@ Chainsaw is an attempt to cure the context switching. Here is how it works:
 
 **Lead** cuts the work into tasks one session can finish, and keeps handing them out so that some LLM session is always writing code.
 
-**Implementers** wrote the code. Well, one of them is. The next is already reading the files it'll need. Frst implementer commits, lead hands the next one its own task, and warms up another.
+**Implementers** write the code. Well, one of them does. The next is already reading the files it'll need. The first implementer commits, the lead hands the next one its own task, and warms up another.
 
 **Commentator** watches the commits and the session logs. Anything wrong or just weird goes to the lead, which can turn it into the next task.
 
@@ -24,7 +24,7 @@ When the run is over — say, ten stories later — the lead hands you a continu
 
 ## Install
 
-Requires [Herdr](https://herdr.dev). Then:
+Requires [Herdr](https://herdr.dev) and a Rust toolchain (the supervisor builds itself on first use). Then:
 
 ```sh
 npx skills add alexeyv/chainsaw
