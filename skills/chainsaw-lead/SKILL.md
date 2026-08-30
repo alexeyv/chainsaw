@@ -21,8 +21,9 @@ the commentator's findings — not implementation detail.
    the supervisor on first use, so no separate cargo step is needed. Define the client
    invocation once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
-   Start the supervisor once, as a background process:
-   `$SUP daemon --lead <your-agent-name> --session-id <your-session-id> &`. Your
+   First name your pane and tab: `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`.
+   Then start the supervisor once, as a background process:
+   `$SUP daemon --lead lead --session-id <your-session-id> &`. Your
    session id is the UUID that names your scratchpad directory (the path ends in
    `<uuid>/scratchpad`); it also names your transcript, which the daemon reads.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
