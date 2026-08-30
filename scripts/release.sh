@@ -11,6 +11,9 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/rust-toolchain.toml" "$OUT/"
 rsync -a --exclude tests.rs --exclude 'test_*.rs' "$ROOT/src/" "$OUT/src/"
+# rsync creates a directory before the excludes empty it; a module directory that
+# held only tests leaves nothing behind, and git does not track empty directories.
+find "$OUT/src" -type d -empty -delete
 printf '%s\n' /target >"$OUT/.gitignore"
 
 echo "Supervisor sources synced to $OUT (install with: npx skills add alexeyv/chainsaw)"

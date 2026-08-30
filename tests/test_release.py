@@ -78,6 +78,16 @@ class ReleaseAssemblyTests(unittest.TestCase):
         }
         self.assertEqual(shipped_files, expected_files)
 
+    def test_leaves_no_empty_directories_behind(self):
+        """Git does not track empty directories, so one here means the checked-in tree
+        and an installed copy differ."""
+        empty = sorted(
+            str(path.relative_to(self.assembled))
+            for path in self.assembled.rglob("*")
+            if path.is_dir() and not any(path.iterdir())
+        )
+        self.assertEqual(empty, [])
+
     def test_leaves_test_sources_out_of_the_supervisor(self):
         src = self.assembled / "src"
         shipped = sorted(
