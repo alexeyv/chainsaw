@@ -28,8 +28,9 @@ the commentator's findings — not implementation detail.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
    from yours.
 
-5. Models are set explicitly per role; the supervisor's defaults are in
-   `DEFAULTS.md`.
+5. The supervisor launches implementers and the commentator with `--model opus
+   --effort high` (hardcoded in the supervisor's `session_runtime.rs`); the lead runs
+   on whatever model the human started this session with.
 
 ## Basics
 Every role is a visible interactive session in its own pane or tab, addressable by
