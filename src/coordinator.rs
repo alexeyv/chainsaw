@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -1682,19 +1682,35 @@ fn print_time_summary(store: &Store) -> Result<()> {
 /// tool, and each printed line is one wake. A wake is a catch-up on what the
 /// implementer did since the commentator's last look, not a review trigger;
 /// reviews are triggered by commits.
+///
+/// Only implementer transcripts count. The commentator's own transcript grows
+/// on every wake, so watching it would wake the commentator for the sole
+/// reason that it was just woken; the lead's transcript is not its material
+/// either.
 fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
   use std::io::Write;
 
-  let mut before = transcript_sizes(&store.logs_dir);
+  let mut before = implementer_transcript_sizes(store)?;
   loop {
     std::thread::sleep(Duration::from_millis(interval_ms));
-    let after = transcript_sizes(&store.logs_dir);
+    let after = implementer_transcript_sizes(store)?;
     if let Some(line) = format_growth(&transcript_growth(&before, &after)) {
       println!("{line}");
       std::io::stdout().flush()?;
     }
     before = after;
   }
+}
+
+fn implementer_transcript_sizes(store: &Store) -> Result<BTreeMap<String, u64>> {
+  let excluded: HashSet<String> = session_snapshots(store)?
+    .into_iter()
+    .filter(|session| session.role() != Role::Implementer)
+    .map(|session| session.external_session_id().to_owned())
+    .collect();
+  let mut sizes = transcript_sizes(&store.logs_dir);
+  sizes.retain(|name, _| !excluded.contains(name));
+  Ok(sizes)
 }
 
 fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {

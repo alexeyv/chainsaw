@@ -1183,6 +1183,29 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         line = process.stdout.readline()
         self.assertEqual(line, "transcripts grew: impl-1 +11, impl-2 +3\n")
 
+    def test_ignores_the_commentators_own_transcript(self):
+        """Each wake appends to the commentator's transcript; reporting that growth
+        would wake it again for no other reason than having been woken."""
+        commentator = self.start_commentator()
+        self.launch("worker")
+        self.append_text(commentator, "reviewing")
+        self.append_text("worker", "working")
+        command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
+                   "watch-transcripts", "--interval-ms", "200"]
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
+        )
+        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.kill)
+
+        time.sleep(0.1)
+        self.append_text(commentator, "woken again")
+        self.append_text("worker", "still working")
+
+        line = process.stdout.readline()
+        worker_id = self.session_log("worker").stem
+        self.assertEqual(line, f"transcripts grew: {worker_id} +84\n")
+
     def test_stays_silent_while_nothing_grows(self):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         (self.logs_dir / "impl-1.jsonl").write_text("{}\n")
