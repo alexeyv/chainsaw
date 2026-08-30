@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# Assemble the shipped supervisor crate from the root crate, minus tests.
+# Usage: scripts/release.sh [OUT]   (default: skills/chainsaw-lead/supervisor)
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SKILL="$ROOT/skills/chainsaw-lead"
-OUT="$SKILL/supervisor"
+OUT=${1:-"$SKILL/supervisor"}
 
 rm -rf "$OUT"
 mkdir -p "$OUT"

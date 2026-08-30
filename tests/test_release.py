@@ -1,6 +1,8 @@
 import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import PROJECT_ROOT
 
@@ -17,26 +19,55 @@ def _is_compiled_binary(path):
 
 
 class ReleaseAssemblyTests(unittest.TestCase):
+    """`scripts/release.sh` assembles the shipped supervisor; the checked-in copy
+    must equal what it assembles. The tests build into a scratch directory and
+    never write into the repository."""
+
     @classmethod
     def setUpClass(cls):
         cls.script = PROJECT_ROOT / "scripts" / "release.sh"
         cls.skill = PROJECT_ROOT / "skills" / "chainsaw-lead"
-        subprocess.run([str(cls.script)], cwd=PROJECT_ROOT, check=True)
+        cls.scratch = tempfile.TemporaryDirectory(prefix="chainsaw-release-")
+        cls.assembled = Path(cls.scratch.name) / "supervisor"
+        subprocess.run(
+            [str(cls.script), str(cls.assembled)], cwd=PROJECT_ROOT, check=True,
+            capture_output=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
 
     def test_assembles_skill_and_lead_prompt_files(self):
         self.assertTrue((self.skill / "SKILL.md").exists())
         self.assertTrue((self.skill / "references" / "commentator.md").exists())
 
     def test_assembles_supervisor_source(self):
-        supervisor = self.skill / "supervisor"
-        self.assertTrue((supervisor / "Cargo.toml").exists())
-        self.assertTrue((supervisor / "Cargo.lock").exists())
-        self.assertTrue((supervisor / "rust-toolchain.toml").exists())
-        self.assertTrue((supervisor / "src" / "main.rs").exists())
+        self.assertTrue((self.assembled / "Cargo.toml").exists())
+        self.assertTrue((self.assembled / "Cargo.lock").exists())
+        self.assertTrue((self.assembled / "rust-toolchain.toml").exists())
+        self.assertTrue((self.assembled / "src" / "main.rs").exists())
+
+    def test_checked_in_supervisor_matches_the_assembled_one(self):
+        """Drift between src/ and the shipped copy fails here; fix by running the script."""
+        shipped = self.skill / "supervisor"
+        shipped_files = {p.relative_to(shipped) for p in shipped.rglob("*") if p.is_file()}
+        assembled_files = {
+            p.relative_to(self.assembled) for p in self.assembled.rglob("*") if p.is_file()
+        }
+        self.assertEqual(
+            shipped_files, assembled_files,
+            "shipped supervisor is out of date; run scripts/release.sh",
+        )
+        for relative in sorted(assembled_files):
+            self.assertEqual(
+                (shipped / relative).read_bytes(), (self.assembled / relative).read_bytes(),
+                f"{relative} is out of date; run scripts/release.sh",
+            )
 
     def test_supervisor_sources_match_the_crate_without_tests(self):
         expected_src = PROJECT_ROOT / "src"
-        shipped_src = self.skill / "supervisor" / "src"
+        shipped_src = self.assembled / "src"
         expected_files = {
             path.relative_to(expected_src)
             for path in expected_src.rglob("*.rs")
@@ -46,14 +77,9 @@ class ReleaseAssemblyTests(unittest.TestCase):
             path.relative_to(shipped_src) for path in shipped_src.rglob("*.rs")
         }
         self.assertEqual(shipped_files, expected_files)
-        for relative in expected_files:
-            self.assertEqual(
-                (expected_src / relative).read_text(),
-                (shipped_src / relative).read_text(),
-            )
 
     def test_leaves_test_sources_out_of_the_supervisor(self):
-        src = self.skill / "supervisor" / "src"
+        src = self.assembled / "src"
         shipped = sorted(
             str(path.relative_to(src))
             for path in src.rglob("*.rs")
