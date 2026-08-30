@@ -103,6 +103,10 @@ pub struct HerdrSessionRuntime {
   program: OsString,
   workspace: Option<String>,
   tab_id: String,
+  /// How long, and how many times, `start` polls `agent get` for a session id
+  /// that `agent start` did not report.
+  session_id_poll_interval: Duration,
+  session_id_poll_attempts: usize,
 }
 
 impl HerdrSessionRuntime {
@@ -111,6 +115,8 @@ impl HerdrSessionRuntime {
       program: OsString::from("herdr"),
       workspace: env::var("HERDR_WORKSPACE_ID").ok(),
       tab_id: env::var("HERDR_TAB_ID").unwrap_or_default(),
+      session_id_poll_interval: Duration::from_secs(2),
+      session_id_poll_attempts: 30,
     }
   }
 
@@ -200,8 +206,20 @@ impl SessionRuntime for HerdrSessionRuntime {
       }
     }
     let started = started.context("herdr agent did not start")?;
+    // Under load `agent start` returns before the agent has reported its
+    // session id; poll `agent get` until it appears rather than failing and
+    // leaving an orphaned session that the supervisor never registered.
+    let mut external_id = Self::json_string(&started, "/result/agent/agent_session/value");
+    let mut attempt = 0;
+    while external_id.is_err() && attempt < self.session_id_poll_attempts {
+      thread::sleep(self.session_id_poll_interval);
+      attempt += 1;
+      if let Ok(response) = self.request(&["agent", "get", session.id]) {
+        external_id = Self::json_string(&response, "/result/agent/agent_session/value");
+      }
+    }
     Ok(StartedSession {
-      external_id: Self::json_string(&started, "/result/agent/agent_session/value")?,
+      external_id: external_id.context("herdr agent never reported a session id")?,
       pane_id,
       tab_id,
     })
@@ -603,10 +621,22 @@ case "$1 $2" in
 'pane split')
   printf '{"result":{"pane":{"pane_id":"pane-9"}}}\n' ;;
 'agent start')
-  printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"idle"}}}\n' ;;
+  case "$3" in
+  late-id|no-id) printf '{"result":{"agent":{"status":"starting"}}}\n' ;;
+  *) printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"idle"}}}\n' ;;
+  esac ;;
 'agent get')
   if [ "$3" = missing ]; then printf 'no such agent\n' >&2; exit 1; fi
   if [ "$3" = malformed ]; then printf 'not json\n'; exit 0; fi
+  if [ "$3" = no-id ]; then printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0; fi
+  if [ "$3" = late-id ]; then
+    # The name appears once for `tab create --label`, once for `agent start`, and
+    # once per `agent get`; report the id on the third get.
+    if [ "$(grep -c '^late-id$' "$calls")" -lt 5 ]; then
+      printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0
+    fi
+    printf '{"result":{"agent":{"agent_session":{"value":"abc"},"status":"idle"}}}\n'; exit 0
+  fi
   printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"busy"}}}\n' ;;
 'agent prompt')
   printf '{"result":{"delivered":true}}\n' ;;
@@ -645,6 +675,8 @@ esac
         program: OsString::from(&self.program),
         workspace: workspace.map(str::to_owned),
         tab_id: tab_id.to_owned(),
+        session_id_poll_interval: Duration::from_millis(1),
+        session_id_poll_attempts: 4,
       }
     }
 
@@ -744,6 +776,54 @@ esac
           "--no-focus"
         ]
       );
+    }
+
+    #[test]
+    fn should_poll_agent_get_when_agent_start_reports_no_session_id() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+
+      let started = runtime
+        .start(StartSession {
+          id: "late-id",
+          run_dir: Path::new("/tmp/run"),
+          kind: SessionKind::Implementer,
+        })
+        .unwrap();
+
+      assert_eq!(started.external_id, "abc");
+      let calls = herdr.calls();
+      assert_eq!(calls[1][..3], ["agent", "start", "late-id"]);
+      assert_eq!(
+        calls[2..],
+        [
+          ["agent", "get", "late-id"],
+          ["agent", "get", "late-id"],
+          ["agent", "get", "late-id"]
+        ]
+      );
+    }
+
+    #[test]
+    fn should_fail_when_agent_get_never_reports_a_session_id() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+
+      let error = runtime
+        .start(StartSession {
+          id: "no-id",
+          run_dir: Path::new("/tmp/run"),
+          kind: SessionKind::Implementer,
+        })
+        .unwrap_err();
+
+      assert_eq!(error.to_string(), "herdr agent never reported a session id");
+      let gets = herdr
+        .calls()
+        .iter()
+        .filter(|call| call[..2] == ["agent", "get"])
+        .count();
+      assert_eq!(gets, runtime.session_id_poll_attempts);
     }
 
     #[test]
