@@ -16,15 +16,13 @@ struct TaskRow {
   log_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
-  is_session_reuse: bool,
   context_size_start: Option<i64>,
 }
 
 const SELECT: &str = "
   select id, text, predicted_files, predicted_lines, session_id,
          commit_sha, created_at, retry_of_task_id, log_offset,
-         base_head, predicted_file_list, is_session_reuse,
-         context_size_start
+         base_head, predicted_file_list, context_size_start
   from tasks
 ";
 
@@ -128,7 +126,6 @@ pub fn dispatch(
   id: i64,
   session_id: i64,
   log_offset: i64,
-  reuse: bool,
   reason: Option<&str>,
 ) -> Result<Task> {
   advance(
@@ -138,13 +135,12 @@ pub fn dispatch(
     reason,
     |current| {
       same_fact(current, "session", current.session_id(), Some(session_id))?;
-      same_fact(current, "log offset", current.log_offset(), log_offset)?;
-      same_fact(current, "session reuse", current.is_session_reuse(), reuse)
+      same_fact(current, "log offset", current.log_offset(), log_offset)
     },
     |transaction| {
       transaction.execute(
-        "update tasks set session_id=?, log_offset=?, is_session_reuse=? where id=?",
-        params![session_id, log_offset, i64::from(reuse), id],
+        "update tasks set session_id=?, log_offset=? where id=?",
+        params![session_id, log_offset, id],
       )?;
       Ok(())
     },
@@ -293,7 +289,6 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     log_offset: row.get::<_, Option<i64>>("log_offset")?.unwrap_or_default(),
     base_head: row.get("base_head")?,
     predicted_file_list,
-    is_session_reuse: row.get::<_, i64>("is_session_reuse")? != 0,
     context_size_start: row.get("context_size_start")?,
   })
 }
@@ -313,7 +308,6 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.log_offset,
     row.base_head,
     row.predicted_file_list,
-    row.is_session_reuse,
     row.context_size_start,
     events,
   )

@@ -36,15 +36,13 @@ mod load {
     let dir = ScratchDir::new();
     fs::write(
       dir.path().join(FILE_NAME),
-      r#"{"prompt-landing-seconds": 3, "reuse-max-context": 48000, "reuse-max-stale-lines": 50}"#,
+      r#"{"prompt-landing-seconds": 3}"#,
     )
     .unwrap();
 
     let settings = Settings::load(dir.path()).unwrap();
 
     assert_eq!(settings.prompt_landing_seconds(), 3);
-    assert_eq!(settings.reuse_max_context(), 48_000);
-    assert_eq!(settings.reuse_max_stale_lines(), 50);
   }
 
   #[test]
@@ -75,17 +73,9 @@ mod parse {
 
   #[test]
   fn should_work() {
-    let settings = Settings::parse(r#"{"reuse-max-context": -1}"#).unwrap();
+    let settings = Settings::parse(r#"{"prompt-landing-seconds": -1}"#).unwrap();
 
-    assert_eq!(
-      settings.prompt_landing_seconds(),
-      DEFAULT_PROMPT_LANDING_SECONDS
-    );
-    assert_eq!(settings.reuse_max_context(), -1);
-    assert_eq!(
-      settings.reuse_max_stale_lines(),
-      DEFAULT_REUSE_MAX_STALE_LINES
-    );
+    assert_eq!(settings.prompt_landing_seconds(), -1);
   }
 
   #[test]
@@ -101,16 +91,19 @@ mod parse {
 
   #[test]
   fn should_fail_when_a_key_is_unknown() {
-    let error = Settings::parse(r#"{"reuse-max-contxt": 1}"#).unwrap_err();
-    assert_eq!(error.to_string(), r#"unknown setting "reuse-max-contxt""#);
+    let error = Settings::parse(r#"{"prompt-landing-secnds": 1}"#).unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      r#"unknown setting "prompt-landing-secnds""#
+    );
   }
 
   #[test]
   fn should_fail_when_a_value_is_not_an_integer() {
-    let error = Settings::parse(r#"{"reuse-max-context": "48000"}"#).unwrap_err();
+    let error = Settings::parse(r#"{"prompt-landing-seconds": "15"}"#).unwrap_err();
     assert_eq!(
       error.to_string(),
-      r#"setting "reuse-max-context" must be an integer, got "48000""#
+      r#"setting "prompt-landing-seconds" must be an integer, got "15""#
     );
   }
 

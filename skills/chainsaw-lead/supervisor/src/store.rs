@@ -20,7 +20,7 @@ create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),
   log_offset int default 0, base_head text, predicted_file_list text,
-  is_session_reuse int not null default 0, context_size_start int);
+  context_size_start int);
 create table task_events(
   id integer primary key autoincrement,
   task_id int not null references tasks(id), state text not null,

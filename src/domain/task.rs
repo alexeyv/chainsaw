@@ -88,7 +88,6 @@ pub struct Task {
   log_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
-  is_session_reuse: bool,
   context_size_start: Option<i64>,
   events: Vec<TaskEvent>,
 }
@@ -107,7 +106,6 @@ impl Task {
     log_offset: i64,
     base_head: Option<String>,
     predicted_file_list: Option<Vec<String>>,
-    is_session_reuse: bool,
     context_size_start: Option<i64>,
     events: Vec<TaskEvent>,
   ) -> Result<Self> {
@@ -133,9 +131,6 @@ impl Task {
     if state.requires_commit() && commit_sha.is_none() {
       bail!("{state:?} task requires a commit");
     }
-    if is_session_reuse && session_id.is_none() {
-      bail!("session reuse requires an assigned session");
-    }
     validate_predicted_files(predicted_files, predicted_file_list.as_deref())?;
 
     Ok(Self {
@@ -150,7 +145,6 @@ impl Task {
       log_offset,
       base_head,
       predicted_file_list,
-      is_session_reuse,
       context_size_start,
       events,
     })
@@ -217,10 +211,6 @@ impl Task {
 
   pub fn predicted_file_list(&self) -> Option<&[String]> {
     self.predicted_file_list.as_deref()
-  }
-
-  pub fn is_session_reuse(&self) -> bool {
-    self.is_session_reuse
   }
 
   pub fn context_size_start(&self) -> Option<i64> {

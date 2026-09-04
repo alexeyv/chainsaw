@@ -32,13 +32,7 @@ pub enum Command {
     role_prompt: PathBuf,
   },
   /// Start an implementer session.
-  Launch {
-    name: String,
-    #[arg(long)]
-    fresh: bool,
-    #[arg(long)]
-    reason: Option<String>,
-  },
+  Launch { name: String },
   /// Deliver a prompt to a session.
   Prompt {
     name: String,
@@ -64,9 +58,6 @@ pub enum Command {
     task: i64,
     #[arg(long)]
     to: String,
-    /// Dispatch to a session that has already taken a task.
-    #[arg(long)]
-    reuse: bool,
     /// Why this dispatch was made; recorded against the transition.
     #[arg(long)]
     reason: Option<String>,

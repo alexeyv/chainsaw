@@ -235,7 +235,6 @@ pub struct TaskSpec {
   pub log_offset: i64,
   pub base_head: Option<&'static str>,
   pub predicted_file_list: Option<Vec<&'static str>>,
-  pub is_session_reuse: bool,
   pub context_size_start: Option<i64>,
   pub events: Vec<TaskEvent>,
 }
@@ -254,7 +253,6 @@ pub fn drafted_task() -> TaskSpec {
     log_offset: 0,
     base_head: None,
     predicted_file_list: None,
-    is_session_reuse: false,
     context_size_start: None,
     events: events_through(TaskState::Drafted, None),
   }
@@ -289,7 +287,6 @@ pub fn build(spec: TaskSpec) -> Result<Task> {
     spec
       .predicted_file_list
       .map(|files| files.into_iter().map(str::to_owned).collect()),
-    spec.is_session_reuse,
     spec.context_size_start,
     spec.events,
   )
@@ -314,7 +311,7 @@ pub fn format_task(task: &Task) -> String {
     .collect::<Vec<_>>()
     .join("\n");
   format!(
-    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\nis_session_reuse: {}\ncontext_size_start: {}\nevents:\n{}",
+    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\ncontext_size_start: {}\nevents:\n{}",
     task.id(),
     task.text(),
     task.predicted_files(),
@@ -328,7 +325,6 @@ pub fn format_task(task: &Task) -> String {
     task.log_offset(),
     format_option_text(task.base_head()),
     file_list,
-    task.is_session_reuse(),
     format_option(task.context_size_start()),
     events,
   )

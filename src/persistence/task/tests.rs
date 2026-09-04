@@ -18,7 +18,7 @@ fn draft(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
 /// A task dispatched to session 7, which the caller must have created.
 fn dispatched(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
   let task = draft(transaction, text)?;
-  dispatch(transaction, task.id(), 7, 0, false, None)
+  dispatch(transaction, task.id(), 7, 0, None)
 }
 
 fn states_of(task: &Task) -> Vec<TaskState> {
@@ -87,7 +87,6 @@ reason: none
 log_offset: 0
 base_head: none
 predicted_file_list: ["src/domain/task.rs", "src/store.rs"]
-is_session_reuse: false
 context_size_start: none
 events:
   1 drafted none"#,
@@ -385,7 +384,7 @@ mod tasks_for_session {
     let transaction = db.transaction()?;
     let first = dispatched(&transaction, "first target task")?;
     let other = draft(&transaction, "other session task")?;
-    dispatch(&transaction, other.id(), 8, 0, false, None)?;
+    dispatch(&transaction, other.id(), 8, 0, None)?;
     let second = dispatched(&transaction, "second target task")?;
 
     assert_eq!(
@@ -472,14 +471,13 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, 42, true, Some("reuse"))?;
+    let task = dispatch(&transaction, task.id(), 7, 42, Some("a new area"))?;
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::Dispatched);
     assert_eq!(task.session_id(), Some(7));
     assert_eq!(task.log_offset(), 42);
-    assert!(task.is_session_reuse());
-    assert_eq!(task.reason(), Some("reuse"));
+    assert_eq!(task.reason(), Some("a new area"));
     assert_eq!(
       states_of(&task),
       vec![TaskState::Drafted, TaskState::Dispatched]
@@ -488,16 +486,15 @@ mod dispatch {
   }
 
   #[test]
-  fn should_record_a_fresh_session_without_a_reason() -> Result<()> {
+  fn should_record_a_dispatch_without_a_reason() -> Result<()> {
     let mut db = database();
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, 0, false, None)?;
+    let task = dispatch(&transaction, task.id(), 7, 0, None)?;
     transaction.commit()?;
 
-    assert!(!task.is_session_reuse());
     assert_eq!(task.reason(), None);
     Ok(())
   }
@@ -508,7 +505,7 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let error = dispatch(&transaction, task.id(), 7, 0, false, None).unwrap_err();
+    let error = dispatch(&transaction, task.id(), 7, 0, None).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
@@ -525,7 +522,7 @@ mod take_flight {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = draft(&transaction, "fly")?;
-    let task = dispatch(&transaction, task.id(), 7, 42, false, None)?;
+    let task = dispatch(&transaction, task.id(), 7, 42, None)?;
 
     let task = take_flight(&transaction, task.id(), "base123", 900)?;
     transaction.commit()?;
@@ -803,7 +800,7 @@ mod advance {
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "dispatched once")?;
 
-    let error = dispatch(&transaction, task.id(), 8, 0, false, None).unwrap_err();
+    let error = dispatch(&transaction, task.id(), 8, 0, None).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(
@@ -822,7 +819,7 @@ mod advance {
     transaction.commit()?;
 
     let transaction = db.transaction()?;
-    dispatch(&transaction, task.id(), 7, 0, false, None)?;
+    dispatch(&transaction, task.id(), 7, 0, None)?;
     transaction.rollback()?;
 
     let transaction = db.transaction()?;

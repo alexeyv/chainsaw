@@ -178,11 +178,8 @@ class SupervisorContractCase(unittest.TestCase):
             if name.startswith("commentator-")
         )
 
-    def dispatch(self, task_id, name="worker", reuse=False):
-        args = ["dispatch", str(task_id), "--to", name]
-        if reuse:
-            args.append("--reuse")
-        return self.cli(*args)
+    def dispatch(self, task_id, name="worker"):
+        return self.cli("dispatch", str(task_id), "--to", name)
 
     def zero_cost_dummy_state(self):
         return json.loads(self.runtime_state_path.read_text())

@@ -177,19 +177,13 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
     Command::StartCommentator { role_prompt } => {
       cmd_start_commentator(store, runtime, &role_prompt)
     }
-    Command::Launch {
-      name,
-      fresh,
-      reason,
-    } => cmd_launch(
+    Command::Launch { name } => cmd_launch(
       store,
       runtime,
       &name,
       LaunchOptions {
         role: Role::Implementer,
         kind: SessionKind::Implementer,
-        fresh,
-        reason: reason.as_deref(),
       },
     ),
     Command::Prompt {
@@ -227,12 +221,9 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
       } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
     },
     Command::Abort { task, reason } => cmd_abort(store, runtime, task, &reason),
-    Command::Dispatch {
-      task,
-      to,
-      reuse,
-      reason,
-    } => cmd_dispatch(store, runtime, task, &to, reuse, reason.as_deref()),
+    Command::Dispatch { task, to, reason } => {
+      cmd_dispatch(store, runtime, task, &to, reason.as_deref())
+    }
     Command::Accept {
       task,
       force,
@@ -272,11 +263,9 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
   }
 }
 
-struct LaunchOptions<'a> {
+struct LaunchOptions {
   role: Role,
   kind: SessionKind,
-  fresh: bool,
-  reason: Option<&'a str>,
 }
 
 /// The session's transcript: beside the database when Claude Code agrees about
@@ -362,29 +351,6 @@ fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
   )
 }
 
-fn last_seen_commit(store: &Store, session_id: i64) -> Result<Option<String>> {
-  Ok(
-    last_task_on(store, session_id)?
-      .and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned)),
-  )
-}
-
-fn staleness(store: &Store, since: Option<&str>) -> Result<(i64, i64, i64)> {
-  let Some(since) = since else {
-    return Ok((0, 0, 0));
-  };
-  let range = format!("{since}..HEAD");
-  let commits = git_stdout(store, &["rev-list", "--count", &range])?
-    .parse()
-    .unwrap_or_default();
-  let stat = git_stdout(store, &["diff", "--shortstat", since, "HEAD"])?;
-  Ok((
-    commits,
-    stat_number(&stat, "file"),
-    stat_number(&stat, "insertion") + stat_number(&stat, "deletion"),
-  ))
-}
-
 fn stat_number(text: &str, noun: &str) -> i64 {
   Regex::new(&format!(r"(\d+) {noun}s?"))
     .expect("valid stat regex")
@@ -393,152 +359,12 @@ fn stat_number(text: &str, noun: &str) -> i64 {
     .unwrap_or_default()
 }
 
-fn authored_files(store: &Store, session_id: i64) -> Result<Vec<String>> {
-  let mut files = Vec::new();
-  let mut seen = HashSet::new();
-  for task in task_snapshots_for_session(store, session_id)?
-    .into_iter()
-    .filter(|task| task.commit_sha().is_some())
-  {
-    let sha = task.commit_sha().unwrap_or_default();
-    for file in git_stdout(store, &["show", "--name-only", "--format=", sha])?.lines() {
-      if seen.insert(file.to_owned()) {
-        files.push(file.to_owned());
-      }
-    }
-  }
-  Ok(files)
-}
-
-fn reuse_verdict(store: &Store, session: &Session) -> Result<Option<String>> {
-  if !session.is_live() {
-    return Ok(Some("session is stopped".to_owned()));
-  }
-  let tasks = task_snapshots_for_session(store, session.id())?;
-  if tasks
-    .iter()
-    .any(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight))
-  {
-    return Ok(Some("session is in flight".to_owned()));
-  }
-  let last = tasks
-    .into_iter()
-    .rev()
-    .find(|task| task.state() != TaskState::Drafted);
-  if let Some(task) = &last
-    && task.state() == TaskState::Aborted
-  {
-    return Ok(Some(format!(
-      "its last task ({}) aborted; a retry gets a fresh head",
-      task.id()
-    )));
-  }
-  let settings = Settings::load(&store.run_dir)?;
-  let context_limit = settings.reuse_max_context();
-  if session.context() > context_limit {
-    return Ok(Some(format!(
-      "context {} is over reuse-max-context {context_limit}",
-      session.context()
-    )));
-  }
-  let since = last.and_then(|task| task.commit_sha().or(task.base_head()).map(str::to_owned));
-  let (commits, files, lines) = staleness(store, since.as_deref())?;
-  let stale_limit = settings.reuse_max_stale_lines();
-  if lines > stale_limit {
-    return Ok(Some(format!(
-      "tree moved {lines} lines in {files} files over {commits} commits since its last turn, over reuse-max-stale-lines {stale_limit}: its memory of the tree is wrong, not merely old"
-    )));
-  }
-  Ok(None)
-}
-
-#[derive(Clone)]
-struct IdleSession {
-  session: Session,
-  stale: (i64, i64, i64),
-  files: Vec<String>,
-}
-
-fn idle_pool(store: &Store) -> Result<Vec<IdleSession>> {
-  let mut pool = Vec::new();
-  for session in session_snapshots(store)?
-    .into_iter()
-    .filter(|session| session.role() == Role::Implementer)
-  {
-    if reuse_verdict(store, &session)?.is_some() {
-      continue;
-    }
-    let since = last_seen_commit(store, session.id())?;
-    pool.push(IdleSession {
-      stale: staleness(store, since.as_deref())?,
-      files: authored_files(store, session.id())?,
-      session,
-    });
-  }
-  Ok(pool)
-}
-
-fn describe_idle(store: &Store, idle: &IdleSession) -> Result<String> {
-  let session = &idle.session;
-  if last_task_on(store, session.id())?.is_none() {
-    return Ok(format!(
-      "{} is idle at context {} and has never taken a task — dispatch <task-id> --to {}",
-      session.name(),
-      session.context(),
-      session.name()
-    ));
-  }
-  let (commits, files, lines) = idle.stale;
-  let authored = if idle.files.is_empty() {
-    "nothing yet".to_owned()
-  } else {
-    idle.files.join(", ")
-  };
-  Ok(format!(
-    "{} is idle at context {}, tree moved {lines} lines/{files} files/{commits} commits since its last turn, authored {authored} — dispatch <task-id> --to {} --reuse",
-    session.name(),
-    session.context(),
-    session.name()
-  ))
-}
-
 fn cmd_launch(
   store: &Store,
   runtime: &dyn SessionRuntime,
   name: &str,
-  options: LaunchOptions<'_>,
+  options: LaunchOptions,
 ) -> Result<()> {
-  if options.role == Role::Implementer {
-    let pool: Vec<_> = idle_pool(store)?
-      .into_iter()
-      .filter(|idle| idle.session.name() != name)
-      .collect();
-    if !pool.is_empty() && !options.fresh {
-      eprintln!("supervisor: launch {name} refused — an idle implementer can take the next task:");
-      for idle in &pool {
-        eprintln!("  {}", describe_idle(store, idle)?);
-      }
-      bail!(
-        "dispatch to one of those, or launch {name} --fresh --reason \"...\" to record why a fresh head is needed"
-      );
-    }
-    if options.fresh {
-      let Some(reason) = options.reason.filter(|reason| !reason.trim().is_empty()) else {
-        bail!("supervisor: --fresh requires a non-empty --reason");
-      };
-      let idle = if pool.is_empty() {
-        "none".to_owned()
-      } else {
-        pool
-          .iter()
-          .map(|item| item.session.name())
-          .collect::<Vec<_>>()
-          .join(", ")
-      };
-      store.event("launch-fresh", &format!("{name} (idle: {idle}): {reason}"))?;
-    }
-  }
-
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
@@ -649,8 +475,6 @@ fn cmd_start_commentator(
     LaunchOptions {
       role: Role::Commentator,
       kind: SessionKind::Commentator,
-      fresh: false,
-      reason: None,
     },
   )?;
   store.set_cfg("commentator", &name)?;
@@ -775,67 +599,11 @@ fn cmd_task_new(
   Ok(())
 }
 
-fn reuse_preamble(store: &Store, task: &Task, session: &Session) -> Result<String> {
-  let Some(since) = last_seen_commit(store, session.id())? else {
-    return Ok(String::new());
-  };
-  let (commits, _, _) = staleness(store, Some(&since))?;
-  if commits == 0 {
-    return Ok(String::new());
-  }
-  let range = format!("{since}..HEAD");
-  let log = git_stdout(store, &["log", "--oneline", "--no-decorate", &range])?;
-  let changed = git_stdout(store, &["diff", "--name-only", &since, "HEAD"])?
-    .lines()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-  let own: HashSet<_> = task
-    .predicted_file_list()
-    .unwrap_or_default()
-    .iter()
-    .map(String::as_str)
-    .collect();
-  let outside = changed
-    .iter()
-    .filter(|file| !own.contains(file.as_str()))
-    .cloned()
-    .collect::<Vec<_>>();
-  let plural = if commits == 1 { "" } else { "s" };
-  let mut lines = vec![
-    format!(
-      "Since your last turn (your commit {}), {commits} commit{plural} landed:",
-      short_sha(&since)
-    ),
-    log,
-  ];
-  if own.is_empty() {
-    lines.push(format!(
-      "They touched: {} (this task carries no file list, so this is unfiltered).",
-      if changed.is_empty() {
-        "nothing".to_owned()
-      } else {
-        changed.join(", ")
-      }
-    ));
-  } else {
-    lines.push(format!(
-            "Outside this task's files they touched: {}. Files in your task are not listed here; read them fresh as you open them.",
-            if outside.is_empty() {
-                "nothing".to_owned()
-            } else {
-                outside.join(", ")
-            }
-        ));
-  }
-  Ok(format!("{}\n\n", lines.join("\n")))
-}
-
 fn cmd_dispatch(
   store: &Store,
   runtime: &dyn SessionRuntime,
   task_id: i64,
   implementer: &str,
-  reuse: bool,
   reason: Option<&str>,
 ) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
@@ -868,28 +636,15 @@ fn cmd_dispatch(
     }
     bail!("supervisor: {implementer} is stopped; launch it again first");
   }
-  let prior = last_task_on(store, session.id())?;
-  if let Some(prior) = &prior
-    && !reuse
-  {
+  if let Some(prior) = last_task_on(store, session.id())? {
     bail!(
-      "supervisor: {implementer} already took task {} ({}); dispatching to it again is a reuse: pass --reuse, or launch a fresh implementer",
+      "supervisor: {implementer} already took task {} ({}); every task gets a fresh implementer",
       prior.id(),
       prior.state()
     );
   }
-  if reuse && prior.is_none() {
-    bail!("supervisor: {implementer} has never taken a task; dispatch without --reuse");
-  }
-  if reuse && let Some(problem) = reuse_verdict(store, &session)? {
-    bail!("supervisor: cannot reuse {implementer}: {problem}");
-  }
 
-  let preamble = if reuse {
-    reuse_preamble(store, &task, &session)?
-  } else {
-    files_changed_since_launch(store, &session)?
-  };
+  let preamble = files_changed_since_launch(store, &session)?;
 
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
@@ -905,9 +660,6 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let dispatch_reason = reason
-    .map(str::to_owned)
-    .or_else(|| reuse.then(|| format!("reuse of {implementer}")));
   let log_offset = file_size(session_log(store, &session).as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
@@ -915,14 +667,12 @@ fn cmd_dispatch(
     task_id,
     session.id(),
     log_offset as i64,
-    reuse,
-    dispatch_reason.as_deref(),
+    reason,
   )?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
-  let reuse_note = if reuse { " (reuse)" } else { "" };
   println!(
-    "task {task_id} dispatched to {implementer}{reuse_note}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
+    "task {task_id} dispatched to {implementer}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
   );
   Ok(())
 }
@@ -1362,13 +1112,8 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   )?;
   transaction.commit()?;
   let wall_text = wall.map_or_else(|| "None".to_owned(), |wall| (wall as i64).to_string());
-  let reuse = if task.is_session_reuse() {
-    ", reuse"
-  } else {
-    ""
-  };
   println!(
-    "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {context} (session {end}, base {base}{reuse})",
+    "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {context} (session {end}, base {base})",
     task.predicted_files(),
     task.predicted_lines()
   );
@@ -1528,19 +1273,11 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     let retry = task
       .retry_of_task_id()
       .map_or_else(String::new, |id| format!("  retry of {id}"));
-    let reuse = if task.is_session_reuse() {
-      task.context_size_start().map_or_else(
-        || "  reuse (awaiting context base)".to_owned(),
-        |context| format!("  reuse (context base {context})"),
-      )
-    } else {
-      String::new()
-    };
     let reason = task
       .reason()
       .map_or_else(String::new, |reason| format!("  reason: {reason}"));
     println!(
-      "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reuse}{reason}",
+      "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
       task.id(),
       task.state(),
       session_name(store, task.session_id())?,
@@ -1553,12 +1290,6 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context() > IMPLEMENTER_LIMIT_TOKENS {
       flags.push_str(" OVER-LIMIT");
-    }
-    if implementer
-      && last_task_on(store, session.id())?.is_some()
-      && reuse_verdict(store, &session)?.is_none()
-    {
-      flags.push_str(" idle, reusable");
     }
     let quiet = session.quiet_seconds(Utc::now());
     if session_log(store, &session).is_some() {
@@ -1593,7 +1324,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     println!("  (a human wait is open)");
   }
   let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','launch-fresh','forced-commit','forced-commentary','commentary-wake','abort-interrupt','abort-unreachable') order by at desc limit 5",
+        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','forced-commit','forced-commentary','commentary-wake','abort-interrupt','abort-unreachable') order by at desc limit 5",
     )?;
   let events = statement.query_map([], |row| {
     Ok((

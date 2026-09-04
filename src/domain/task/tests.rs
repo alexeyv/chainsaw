@@ -129,7 +129,6 @@ reason: none
 log_offset: 0
 base_head: none
 predicted_file_list: none
-is_session_reuse: false
 context_size_start: none
 events:
   1 drafted none"#
@@ -141,7 +140,6 @@ events:
     let task = build(TaskSpec {
       retry_of_task_id: Some(2),
       predicted_file_list: Some(vec!["src/a.rs", "src/b.rs"]),
-      is_session_reuse: true,
       ..task_in(TaskState::Accepted, Some("gate passed"))
     })
     .unwrap();
@@ -161,7 +159,6 @@ reason: "gate passed"
 log_offset: 100
 base_head: "base123"
 predicted_file_list: ["src/a.rs", "src/b.rs"]
-is_session_reuse: true
 context_size_start: 900
 events:
   1 drafted none
@@ -373,19 +370,6 @@ events:
         format!("{state:?} task requires a commit")
       );
     }
-  }
-
-  #[test]
-  fn should_fail_when_session_reuse_is_claimed_without_a_session() {
-    let error = build(TaskSpec {
-      is_session_reuse: true,
-      ..drafted_task()
-    })
-    .unwrap_err();
-    assert_eq!(
-      error.to_string(),
-      "session reuse requires an assigned session"
-    );
   }
 }
 

@@ -196,7 +196,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         second = self.new_task(text="Second task.")
         self.launch("worker-one")
         self.assert_success(self.cli(
-            "launch", "worker-two", "--fresh", "--reason", "parallel fixture",
+            "launch", "worker-two",
         ))
         self.assert_success(self.dispatch(first, "worker-one"))
 
@@ -419,7 +419,7 @@ class VerificationContractTests(SupervisorContractCase):
         ))
         second = self.new_task(text="Second task.", files="second.txt")
         self.assert_success(self.cli(
-            "launch", "replacement", "--fresh", "--reason", "independent fixture",
+            "launch", "replacement",
         ))
         self.assert_success(self.dispatch(second, "replacement"))
 
@@ -543,49 +543,33 @@ class VerificationContractTests(SupervisorContractCase):
         self.assertIn(f"task {task} accepted: checks passed at {sha[:10]}", result.stdout)
 
 
-class ReuseContractTests(SupervisorContractCase):
+class FreshSessionContractTests(SupervisorContractCase):
+    """Every task gets a fresh implementer; the supervisor enforces it at dispatch."""
+
     def verified_first_task(self):
         task, _ = self.prepare_committed_task()
         self.assert_success(self.cli("accept", str(task)))
         return task
 
-    def test_idle_current_session_can_be_reused(self):
-        self.verified_first_task()
-        second = self.new_task(text="Second task.", files="second.txt")
-
-        result = self.assert_success(self.dispatch(second, reuse=True))
-        state = self.assert_success(self.cli("state"))
-
-        self.assertIn("task 2 dispatched to worker (reuse)", result.stdout)
-        self.assertIn("2 dispatched", state.stdout)
-        self.assertIn("reuse (awaiting context base)", state.stdout)
-
-    def test_reuse_flag_is_rejected_for_a_session_with_no_prior_task(self):
-        task = self.new_task()
-        self.launch()
-
-        result = self.dispatch(task, reuse=True)
-
-        self.assert_failure(result, "has never taken a task")
-
-    def test_reusing_a_prior_session_requires_the_explicit_flag(self):
+    def test_a_session_that_already_took_a_task_cannot_take_another(self):
         self.verified_first_task()
         second = self.new_task(text="Second task.", files="second.txt")
 
         result = self.dispatch(second)
 
-        self.assert_failure(result, "dispatching to it again is a reuse")
+        self.assert_failure(result, "already took task 1")
+        self.assert_failure(result, "every task gets a fresh implementer")
 
-    def test_aborted_session_cannot_be_reused(self):
+    def test_an_aborted_session_cannot_take_another_task(self):
         first = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(first))
         self.assert_success(self.cli("abort", str(first), "--reason", "implementation failed"))
         second = self.new_task(text="Retry elsewhere.", files="retry.txt")
 
-        result = self.dispatch(second, reuse=True)
+        result = self.dispatch(second)
 
-        self.assert_failure(result, "its last task (1) aborted")
+        self.assert_failure(result, "already took task 1")
 
     def test_repeated_implementer_name_creates_a_distinct_session(self):
         first = self.new_task()
@@ -599,56 +583,21 @@ class ReuseContractTests(SupervisorContractCase):
 
         self.assertIn("task 2 dispatched to worker", dispatched.stdout)
 
-    def test_session_over_configured_context_limit_cannot_be_reused(self):
+    def test_launch_no_longer_refuses_while_an_earlier_session_is_idle(self):
         self.verified_first_task()
-        (self.run_dir / "chainsaw.json").write_text('{"reuse-max-context": -1}\n')
+
+        self.assert_success(self.cli("launch", "replacement"))
+
+    def test_dispatch_refuses_an_unreadable_settings_file(self):
+        self.verified_first_task()
+        self.assert_success(self.cli("launch", "replacement"))
+        (self.run_dir / "chainsaw.json").write_text('{"prompt-landing-secnds": 1}\n')
         second = self.new_task(text="Second task.", files="second.txt")
 
-        result = self.dispatch(second, reuse=True)
-
-        self.assert_failure(result, "is over reuse-max-context -1")
-
-    def test_reuse_refuses_an_unreadable_settings_file(self):
-        self.verified_first_task()
-        (self.run_dir / "chainsaw.json").write_text('{"reuse-max-contxt": 1}\n')
-        second = self.new_task(text="Second task.", files="second.txt")
-
-        result = self.dispatch(second, reuse=True)
+        result = self.dispatch(second, "replacement")
 
         self.assert_failure(result, "invalid settings in")
-        self.assert_failure(result, 'unknown setting "reuse-max-contxt"')
-
-    def test_session_with_a_materially_stale_tree_cannot_be_reused(self):
-        self.verified_first_task()
-        changed = "".join(f"line {number}\n" for number in range(250))
-        self.commit_file("large-change.txt", changed, "feat: large intervening change")
-        second = self.new_task(text="Second task.", files="second.txt")
-
-        result = self.dispatch(second, reuse=True)
-
-        self.assert_failure(result, "over reuse-max-stale-lines 200")
-
-    def test_launch_refuses_when_an_idle_session_is_reusable(self):
-        self.verified_first_task()
-
-        result = self.cli("launch", "replacement")
-
-        self.assert_failure(result, "an idle implementer can take the next task")
-        self.assertIn("dispatch <task-id> --to worker --reuse", result.stderr)
-
-    def test_fresh_launch_requires_and_records_a_reason(self):
-        self.verified_first_task()
-
-        missing_reason = self.cli("launch", "replacement", "--fresh")
-        launched = self.cli(
-            "launch", "replacement", "--fresh", "--reason", "needs independent context",
-        )
-        state = self.assert_success(self.cli("state"))
-
-        self.assert_failure(missing_reason, "--fresh requires a non-empty --reason")
-        self.assert_success(launched)
-        self.assertIn("launch-fresh", state.stdout)
-        self.assertIn("needs independent context", state.stdout)
+        self.assert_failure(result, 'unknown setting "prompt-landing-secnds"')
 
     def test_a_committed_predecessor_releases_the_next_dispatch(self):
         self.prepare_committed_task()
@@ -658,9 +607,7 @@ class ReuseContractTests(SupervisorContractCase):
         daemon.wait(timeout=10)
 
         second = self.new_task(text="Immediate successor.", files="second.txt")
-        self.assert_success(self.cli(
-            "launch", "replacement", "--fresh", "--reason", "predecessor fixture",
-        ))
+        self.assert_success(self.cli("launch", "replacement"))
 
         result = self.dispatch(second, "replacement")
         state = self.assert_success(self.cli("state"))

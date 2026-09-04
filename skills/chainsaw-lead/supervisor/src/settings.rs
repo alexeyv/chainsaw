@@ -11,22 +11,16 @@ use serde_json::Value;
 
 pub const FILE_NAME: &str = "chainsaw.json";
 pub const DEFAULT_PROMPT_LANDING_SECONDS: i64 = 15;
-pub const DEFAULT_REUSE_MAX_CONTEXT: i64 = 60_000;
-pub const DEFAULT_REUSE_MAX_STALE_LINES: i64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
   prompt_landing_seconds: i64,
-  reuse_max_context: i64,
-  reuse_max_stale_lines: i64,
 }
 
 impl Default for Settings {
   fn default() -> Self {
     Self {
       prompt_landing_seconds: DEFAULT_PROMPT_LANDING_SECONDS,
-      reuse_max_context: DEFAULT_REUSE_MAX_CONTEXT,
-      reuse_max_stale_lines: DEFAULT_REUSE_MAX_STALE_LINES,
     }
   }
 }
@@ -53,8 +47,6 @@ impl Settings {
     for (key, value) in object {
       let target = match key.as_str() {
         "prompt-landing-seconds" => &mut settings.prompt_landing_seconds,
-        "reuse-max-context" => &mut settings.reuse_max_context,
-        "reuse-max-stale-lines" => &mut settings.reuse_max_stale_lines,
         other => bail!("unknown setting {other:?}"),
       };
       *target = value
@@ -66,14 +58,6 @@ impl Settings {
 
   pub fn prompt_landing_seconds(&self) -> i64 {
     self.prompt_landing_seconds
-  }
-
-  pub fn reuse_max_context(&self) -> i64 {
-    self.reuse_max_context
-  }
-
-  pub fn reuse_max_stale_lines(&self) -> i64 {
-    self.reuse_max_stale_lines
   }
 }
 

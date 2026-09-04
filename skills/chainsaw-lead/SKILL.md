@@ -105,7 +105,7 @@ and draft another.
 
 **dispatched** — implementer session received the task prompt, but has not yet produced
 new transcript output after it. You trigger this: `$SUP dispatch <task-id> --to
-implementer-<n> [--reuse] [--reason "..."]`. The supervisor records the session's log
+implementer-<n> [--reason "..."]`. The supervisor records the session's log
 offset here so it can distinguish prompt delivery from the implementer starting work.
 
 **in_flight** — implementer started working on the task. The daemon detects the first
@@ -167,7 +167,8 @@ previous commit has landed, reconciling the draft against the actual tree.
    needs to find out, not what you assume the answer is.
 6. Record it: `$SUP task new --files a.py,b.py --predicted-lines N < task.md` prints
    the task id; name the predicted files (the count is derived), so the supervisor can
-   judge overlap for a reused implementer — `--predicted-files N` alone is the fallback
+   judge overlap against the next session's reading list — `--predicted-files N` is the
+   fallback
    when the set is genuinely unknown. Never edit a brief in place after dispatch. A
    dispatched or in-flight task may instead be superseded with `$SUP task new --retry-of
    <id> --reason "..." ... < task.md`, which aborts and interrupts the old task before
@@ -175,36 +176,80 @@ previous commit has landed, reconciling the draft against the actual tree.
 
 Anything the spec does not settle is a question for the human, never invented.
 
+## The reading list
+
+A fresh session starts around 23k tokens before it reads anything, and the run it is in
+compacts somewhere above 160k. Everything between is shared between the reading turn and
+the task, and the reading turn is the half you control. Two budgets, both measurable
+before you send anything:
+
+- **The reading list: under 100 kB of file content, aiming at 60–70 kB.** Measure it —
+  `wc -c` the whole files and estimate the ranges; do not eyeball a file count. 100 kB is
+  where a session is certain to compact mid-task and lose the reading you just paid for;
+  60–70 kB leaves the median task room to finish intact.
+- **The task brief: under 2000 tokens.** This is a budget on your summarising, not a
+  size limit on the work. When it overflows, the first move is a tighter brief — cut
+  restatement, not content. If it still overflows after that, the task is carrying more
+  than one change and is a candidate to split.
+
+Build the list from four slots, and trim inside a slot rather than dropping one. Cutting
+by relevance ranking is what produces an incoherent pile: the lowest-ranked file is
+usually the one that made the others legible.
+
+1. **The edit site** — every file the task changes, whole. Never a range: nobody lands a
+   change in a file they have seen forty lines of.
+2. **The contracts it must satisfy** — the declarations the changed code has to compile
+   and typecheck against: headers, interfaces, traits, schemas. This is the one slot
+   where line ranges are the right answer, because declarations separate cleanly from
+   bodies.
+3. **One worked example** — a single existing implementation of the same pattern, whole.
+   The highest value per byte on the list and the first thing lost to careless trimming;
+   it is what turns a set of files into "I see how this is done here".
+4. **The judge** — the test file the new tests join, or its nearest neighbour.
+
+The list is coherent when, from it alone, *you* could write the first hunk of the diff:
+the signature, the file it lands in, the calls it makes. Not the whole change — the first
+hunk. If you could not, a slot is missing, and adding bytes to the slots you have will
+not fix it. If you could, anything further is luxury and comes out.
+
+Prose does not go on the list. Specs, architecture notes, decision records and rulebooks
+are the lead's material, not the implementer's: extract the part this task turns on and
+put it in the brief, inside the 2000 tokens. Sending a session to read a whole design
+document costs thousands of tokens to deliver a paragraph it needed.
+
+If the edit site alone will not fit, the task changes too much — split it. If the other
+three slots will not fit, the task straddles too many boundaries; that is more often a
+design problem worth raising with the human than a sizing problem to split around.
+Neither is do-or-die: both are signals that the task may be too big for one session.
+
 ## The loop
 
 Starting the next implementer is the first priority; a long gap between commits is a
 defect. Measure implementer-busy against wall clock; time waiting on the human is
 measured separately (`$SUP state` shows both).
 
-1. Decide who takes the next task, then pre-populate while the current one works. The
-   default is a fresh head: `$SUP launch implementer-<n+1>` starts a fresh
-   session in its own tab. The launch refuses while an idle earlier implementer could
-   take the task instead — it names that session with its measured context, how
-   far the tree has moved since its last turn, and the files it authored. Then choose:
-   reuse it (no launch now; when the commit lands, `dispatch <task-id> --to
-   implementer-<k> --reuse`, step 2), or `$SUP launch implementer-<n+1> --fresh
-   --reason "..."` when the task needs a clean head — a new area, convention-setting,
-   the author's frame itself in question — which records the override like `accept`
-   does. Fresh is still the norm; the point is that the question gets asked at the
-   moment of the launch, not read off `state` and forgotten. For a fresh session,
-   `$SUP prompt implementer-<n+1> "<reading turn>"` with:
+1. Start the next implementer and pre-populate it while the current one works. Every
+   task gets a fresh session: `$SUP launch implementer-<n+1>` starts one in its own
+   tab, and the supervisor refuses to dispatch a second task to a session that has
+   already taken one. Then `$SUP prompt implementer-<n+1> "<reading turn>"` with:
 
    ```text
    You are about to be given one task in this repository. This turn is preparation
-   only: read, then stop. 1. Read these files entirely: [...]. 2. Read only these
-   line ranges of these large files: [file, range]. 3. The list is exhaustive — your
-   whole turn consists of reads of exactly the listed items. Another session owns
-   the rest of the repository, the build, and git until your task arrives.
-   4. When the list is read, stop and wait.
+   only: read, then stop. 1. Read these files entirely: [...]. 2. Read these line
+   ranges of these large files: [file, range]. 3. This list is a starting frame,
+   not a limit. It is short because the rest of the repository is probably
+   irrelevant to your task, not because it is off limits — once the task arrives,
+   read whatever it turns out you need. 4. This turn is the list and nothing more:
+   you do not have the task yet, so anything further is guesswork, and another
+   session owns the repository, the build, and git until your task arrives. When
+   the list is read, stop and wait.
    ```
 
-   Choose against the in-flight implementer's predicted file set: anything it will
-   rewrite is read after its commit; large files by line range.
+   The list is a frame to start from, not everything the implementer will read, so
+   size it to what makes the task legible rather than to what it might need. Build it
+   from the four slots in "The reading list" above, and keep it under that section's
+   budget. Choose against the in-flight implementer's predicted file set: anything it
+   will rewrite is read after its commit; large files by line range.
 2. The moment the previous task reaches `committed_unverified`, get the next one
    moving — do not wait for its session to fall idle and do not wait to judge its
    commit. Dispatch first, then come back and judge the previous task: `$SUP accept
@@ -212,19 +257,12 @@ measured separately (`$SUP state` shows both).
    bypasses them.
    Neither one gates this dispatch, and nothing forces you to run either; the task's own
    state name is what tells you it is still outstanding. Dispatch with
-   `$SUP dispatch <task-id> --to implementer-<n>` for the fresh session,
-   or `$SUP dispatch <task-id> --to implementer-<k> --reuse` for the idle earlier one
-   (`--to` is a choice, not ceremony; without `--reuse` the supervisor refuses a session
-   that already took a task). Either sends the task verbatim and then the implementer's
-   contract. A fresh session gets "these files changed since your session started:
-   [...]" first when the tree has moved since its launch; a reused one gets the commits
-   that landed since its own last turn and the files they touched *outside* the task's
-   file set — nothing about the files it
-   is about to edit (rationale at step 6). `--reuse` refuses, measured not judged, when
-   that session is in flight, its last task aborted, its context is over
-   `reuse-max-context` (60k), or the tree moved more than `reuse-max-stale-lines` (200
-   changed lines; both tunable in `chainsaw.json` at the run root) since its last turn — its memory is then wrong, not merely old; launch
-   fresh instead. The implementer's contract:
+   `$SUP dispatch <task-id> --to implementer-<n>`. It sends the task verbatim and then
+   the implementer's contract, prefixed by "these files changed since your session
+   started: [...]" when the tree moved between that session's launch and this dispatch.
+   That preamble is unbudgeted and lands on top of the reading turn, so leave room for
+   it: the files the in-flight implementer is predicted to change are the files it will
+   name. The implementer's contract:
 
    ```text
    Verify the tree is clean; stop if dirty. Implement only this task. Run the task's
@@ -247,9 +285,9 @@ measured separately (`$SUP state` shows both).
    task: `$SUP calibrate <task-id>` fills actual files/lines from git and wall
    time and context from the session log against your prediction. Its context
    figure is that task's own cost — the session's peak during the task minus the
-   baseline it carried at dispatch (shown alongside), so a reused session's record
-   describes the task, not the session's total. If predictions are far out, size smaller
-   from here on.
+   baseline it carried at dispatch (shown alongside), so the record describes the task
+   rather than the session's total. If predictions are far out, size smaller from here
+   on.
 5. Progress signals come from the supervisor, never self-reports:
    `$SUP state` shows each task's state and each session's measured context;
    `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else,
@@ -264,32 +302,16 @@ measured separately (`$SUP state` shows both).
    trigger to review from git and the implementer log, not a finding or your opinion.
    Never prompt it for a review. A precise finding normally becomes the next fix
    task; you alone decide, and the supervisor remains the authoritative review state.
-   A fix task goes back to the session that wrote the commit it is about, when `state`
-   shows that session idle with context headroom and the finding names a specified
-   change: it holds why the code took that shape, which a fresh session must re-derive
-   from a reading turn, and being idle it costs no pipelining. Give the fix a fresh head
-   instead when the finding puts the shape itself in question rather than a line of it —
-   the author's frame is then the thing under suspicion — or when the supervisor's
-   staleness measure says its memory of the tree is wrong rather than merely old. Do not
-   brief it on the files it will edit: an exact-match edit against a stale memory fails
-   loudly and it goes and reads. Brief it only on what it has no reason to open — a
-   decision reversed, a convention moved — which you hold already and it would
-   otherwise spend tool calls discovering. (A fresh session's failure mode is *absent*
-   knowledge, which is self-announcing; a stale author's is *wrong* knowledge, which
-   never collides with anything — so brief exactly the non-colliding layer. Untested as
-   of the run that wrote this: it follows from the context economics, not from a
-   finding that exercised it.)
+   A fix task is a task like any other and gets a fresh implementer with its own
+   reading list. The reading list is where the author's knowledge is replaced: name the
+   commit under the finding and the files it touched, so the fix session sees the shape
+   the finding is about before it reads the finding.
 7. When an implementer reports failure (gate never green, cannot finish):
    `$SUP abort <task-id> --reason "<its reason>"` records it and checks the
    tree is clean. Read the reason, adjust the task, and retry with a fresh implementer
    (`$SUP task new --retry-of <task-id>`). The supervisor counts aborts across the
    retries; at three it tells you to escalate to the human.
-8. Continuation (default off) is the same mechanism as reuse: when the next task
-   is a direct continuation on the same files, `dispatch <task-id> --to` the same
-   implementer `--reuse`; the supervisor's measured context and staleness decide, never
-   the implementer's own estimate. A task that needs a clean head always gets a fresh
-   one.
-9. A human-flagged trivial edit (trigger word `trivial:`) you do yourself — edit,
+8. A human-flagged trivial edit (trigger word `trivial:`) you do yourself — edit,
    quality gate, commit — only when no implementer is in flight on that file.
 
 Serial wherever it touches the repo: one implementer in flight, one frozen task.
