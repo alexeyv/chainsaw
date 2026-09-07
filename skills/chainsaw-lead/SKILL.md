@@ -69,6 +69,21 @@ observations so they are not repeated. Treat observations as context only. Add e
 returned finding to the unresolved map and keep it there until its resolution command
 succeeds; findings are returned again on every poll while unresolved by design.
 
+When you have nothing left to do but wait, wait on the supervisor, never on a sleep:
+
+```sh
+$SUP poll --after-observation "$OBSERVATION_CURSOR" --wait --timeout 120
+```
+
+It returns the moment there is something to return — a new observation, a finding no
+earlier poll printed, or any task changing state — and on timeout it returns what
+there is, exit 0. The response also carries `task_transitions`, every task whose
+state changed during the wait, so `<task-id> committed_unverified` reaches you
+through the same call as the commentary. This is one clock for everything you sit on.
+Never loop `poll` or `state` around a sleep of your own, and never arm a watch on
+`state --task` that queues behind a review poll: a commit would then wait out the
+commentator's clock before you saw it.
+
 Resolve a finding you reject with a concrete verdict reason:
 
 ```sh
@@ -280,7 +295,8 @@ measured separately (`$SUP state` shows both).
    cursor, verify every unresolved finding against git, and resolve it through the
    protocol above. Gather
    derivations that do not depend on the in-flight commit, batch questions for the
-   human, draft and pre-populate the next task.
+   human, draft and pre-populate the next task. Then `poll --wait`: it returns when
+   the commit lands or the commentator writes, whichever is first.
 4. After starting the next implementer, append the calibration record for the previous
    task: `$SUP calibrate <task-id>` fills actual files/lines from git and wall
    time and context from the session log against your prediction. Its context
@@ -290,8 +306,9 @@ measured separately (`$SUP state` shows both).
    on.
 5. Progress signals come from the supervisor, never self-reports:
    `$SUP state` shows each task's state and each session's measured context;
-   `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else,
-   which is the line to watch for `<task-id> committed_unverified`. Every command you
+   `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else;
+   `poll --wait` returns the same transition in `task_transitions` without a loop of
+   your own, and counts as a state read. Every command you
    run ends with `WARNING:` lines on stderr when a measured fact needs you: your
    context near or past 250k, a commit unjudged for five minutes, no state read for
    two minutes while a task is out, no daemon polling. Act on them when they appear;
@@ -400,7 +417,8 @@ when the planning happened to be cheap.
    plus the prompt at four bytes a token; a guess to calibrate against
    `$SUP context implementer-<n>` once the fork's first request lands) and warns on
    stderr when that estimate passes 70k.
-3. When the task reaches `committed_unverified`, dispatch the next one **to the same
+3. When the task reaches `committed_unverified` (`poll --wait` returns it in
+   `task_transitions`), dispatch the next one **to the same
    implementer** while its measured context is under 100k: it carries the seed's
    reading plus everything it just built, and a fresh fork would be handed the same
    commits as history anyway. `dispatch` sends it the commits since its own last
@@ -430,24 +448,25 @@ when the planning happened to be cheap.
    you cannot finish, report the concrete blocker concisely.
    ```
 
-### Replacing the seed
+### The seed stays
 
-Two triggers, either one sufficient:
+Every fork of the run comes from the same seed. Retiring an implementer at 100k is
+not a reason to prepare another seed: the next implementer is `launch --fork-of
+<seed>` again, and `dispatch` hands it every commit since the seed's baseline,
+messages and diffs, which is the whole account of what the retired implementer and
+its predecessors built. That history is prepared mechanically and costs you nothing;
+a replacement seed costs a reading turn and a fresh transcript for the commentator to
+learn. Relevance is not a trigger either: the fork plans its task from the map and
+the history it is handed.
 
-- **Size.** `dispatch` warned that the fork's estimated starting context is past 70k.
-  The history since the baseline grows with every landed task, so this comes sooner
-  with larger diffs; small tasks are what keep it affordable.
-- **Relevance.** The next task has little to do with the chain so far and needs a
-  substantially different reading. Your judgment, informed by the task map.
-
-`$SUP launch seed-2 --seed` starts a replacement with today's HEAD as its baseline.
-Prompt it with the spec, the existing task map (from the file or `$SUP state`), the
-reading list, and which tasks have landed; it reads afresh and does not register
-tasks again. Fork later implementers from `seed-2`. Optionally prepare it while the
-current implementer works; the commits that land after its reading reach the next
-fork as history in the usual way. An implementer that is still under 100k keeps
-taking tasks regardless: replacing the seed changes where the next fork starts, not
-who takes the next task.
+Replace the seed only when `dispatch` warns that a **fresh fork's** estimated starting
+context is past 70k, that is, when the history since the baseline has itself
+outgrown the budget. Then `$SUP launch seed-2 --seed` starts a replacement with
+today's HEAD as its baseline. Prompt it with the spec, the existing task map (from the
+file or `$SUP state`), the reading list, and which tasks have landed; it reads afresh
+and does not register tasks again. Fork later implementers from `seed-2`. An
+implementer that is still under 100k keeps taking tasks regardless: replacing the seed
+changes where the next fork starts, not who takes the next task.
 
 ### Known limits of the prototype
 

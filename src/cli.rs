@@ -97,7 +97,7 @@ pub enum Command {
     task: i64,
     description: String,
   },
-  /// Print JSON containing new observations and unresolved findings.
+  /// Print JSON containing new observations, unresolved findings, and task moves.
   Poll {
     /// Return observations after this cursor.
     #[arg(long = "after-observation", default_value_t = 0)]
@@ -105,6 +105,14 @@ pub enum Command {
     /// Limit findings to this task and observations to this task or the run.
     #[arg(long)]
     task: Option<i64>,
+    /// Block until there is something to return: a new observation, a finding
+    /// no earlier poll printed, or any task changing state. On timeout, print
+    /// what there is and exit 0.
+    #[arg(long)]
+    wait: bool,
+    /// Seconds to wait before giving up. Only meaningful with --wait.
+    #[arg(long, default_value_t = 120)]
+    timeout: u64,
   },
   /// Resolve a supervisor-mediated finding.
   Resolve {

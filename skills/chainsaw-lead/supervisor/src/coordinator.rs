@@ -5,7 +5,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, TimeZone, Utc};
@@ -17,7 +17,9 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
+use crate::domain::{
+  Finding, FindingVerdict, Observation, Role, Session, Task, TaskEvent, TaskState,
+};
 use crate::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
   format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
@@ -145,7 +147,7 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
     };
     if let Some(unread) = unread {
       warnings.push(format!(
-        "{unread} while task {task_id} is out: is a monitor armed on `state --task {task_id}`?"
+        "{unread} while task {task_id} is out: is `poll --wait` or a monitor on `state --task {task_id}` armed?"
       ));
     }
   }
@@ -256,7 +258,14 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
     Command::Poll {
       after_observation,
       task,
-    } => cmd_poll(store, after_observation, task),
+      wait,
+      timeout,
+    } => cmd_poll(
+      store,
+      after_observation,
+      task,
+      wait.then(|| Duration::from_secs(timeout)),
+    ),
     Command::Resolve {
       finding,
       verdict,
@@ -1383,20 +1392,47 @@ fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
   Ok(())
 }
 
-fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Result<()> {
+/// Answer the lead's poll, blocking when asked until there is something to
+/// answer with. The wait is one clock for everything the lead sits on: the
+/// commentator's next observation, a finding no earlier poll printed, and any
+/// task moving state, so a commit can never queue behind a review poll.
+fn cmd_poll(
+  store: &Store,
+  after_observation: i64,
+  task_id: Option<i64>,
+  wait: Option<Duration>,
+) -> Result<()> {
   if after_observation < 0 {
     bail!("supervisor: --after-observation must be nonnegative");
   }
-  let transaction = store.db.unchecked_transaction()?;
   if let Some(task_id) = task_id {
+    let transaction = store.db.unchecked_transaction()?;
     require_task(&transaction, task_id)?;
+    transaction.commit()?;
   }
-  let observations = observation::after(&transaction, after_observation, task_id)?;
-  let observation_cursor = observations
+  let printed_finding = store
+    .cfg("last-polled-finding")?
+    .and_then(|value| value.parse::<i64>().ok())
+    .unwrap_or(0);
+  let baseline = poll_snapshot(store, after_observation, task_id)?;
+  let mut snapshot = baseline.clone();
+  if let Some(wait) = wait {
+    let deadline = Instant::now() + wait;
+    while !snapshot.answers(&baseline, printed_finding) && Instant::now() < deadline {
+      std::thread::sleep(
+        POLL_WAIT_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+      );
+      store.set_cfg("last-state-read", &now().to_string())?;
+      snapshot = poll_snapshot(store, after_observation, task_id)?;
+    }
+  }
+  let observation_cursor = snapshot
+    .observations
     .last()
     .map_or(after_observation, |observation| observation.id());
-  let observations = observations
-    .into_iter()
+  let observations = snapshot
+    .observations
+    .iter()
     .map(|observation| {
       json!({
         "id": observation.id(),
@@ -1406,8 +1442,9 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
-  let findings = finding::unresolved(&transaction, task_id)?
-    .into_iter()
+  let findings = snapshot
+    .findings
+    .iter()
     .map(|finding| {
       json!({
         "id": finding.id(),
@@ -1417,16 +1454,72 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
-  transaction.commit()?;
+  let task_transitions = snapshot
+    .task_states
+    .iter()
+    .filter(|(id, state)| baseline.task_states.get(*id) != Some(*state))
+    .map(|(id, state)| json!({"task_id": id, "state": state.to_string()}))
+    .collect::<Vec<_>>();
+  if let Some(newest) = snapshot.newest_finding()
+    && newest > printed_finding
+  {
+    store.set_cfg("last-polled-finding", &newest.to_string())?;
+  }
   println!(
     "{}",
     json!({
       "observation_cursor": observation_cursor,
       "observations": observations,
       "findings": findings,
+      "task_transitions": task_transitions,
     })
   );
   Ok(())
+}
+
+const POLL_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Everything one poll answer is made of, read in a single transaction.
+#[derive(Clone)]
+struct PollSnapshot {
+  observations: Vec<Observation>,
+  findings: Vec<Finding>,
+  task_states: BTreeMap<i64, TaskState>,
+}
+
+impl PollSnapshot {
+  /// Whether a waiting poll should return now: the commentator wrote, a
+  /// finding arrived that no poll has printed, or a task moved since the
+  /// wait began.
+  fn answers(&self, baseline: &PollSnapshot, printed_finding: i64) -> bool {
+    !self.observations.is_empty()
+      || self.newest_finding().is_some_and(|id| id > printed_finding)
+      || self.task_states != baseline.task_states
+  }
+
+  fn newest_finding(&self) -> Option<i64> {
+    self.findings.iter().map(Finding::id).max()
+  }
+}
+
+fn poll_snapshot(
+  store: &Store,
+  after_observation: i64,
+  task_id: Option<i64>,
+) -> Result<PollSnapshot> {
+  let transaction = store.db.unchecked_transaction()?;
+  let observations = observation::after(&transaction, after_observation, task_id)?;
+  let findings = finding::unresolved(&transaction, task_id)?;
+  let task_states = task::all(&transaction)?
+    .iter()
+    .map(|task| (task.id(), task.state()))
+    .collect();
+  transaction.commit()?;
+  Ok(PollSnapshot {
+    observations,
+    findings,
+    task_states,
+  })
 }
 
 fn cmd_resolve(

@@ -1299,13 +1299,13 @@ class StandingWarningTests(SupervisorContractCase):
 
         self.assertIn(
             f"WARNING: state has never been read while task {task} is out: "
-            f"is a monitor armed on `state --task {task}`?",
+            f"is `poll --wait` or a monitor on `state --task {task}` armed?",
             never.stderr,
         )
         self.assertNotIn("state read", watched.stderr)
         self.assertIn(
             f"WARNING: no state read for 6m while task {task} is out: "
-            f"is a monitor armed on `state --task {task}`?",
+            f"is `poll --wait` or a monitor on `state --task {task}` armed?",
             silent.stderr,
         )
         self.assertNotIn("state read", nothing_out.stderr)
@@ -1368,6 +1368,131 @@ class StandingWarningTests(SupervisorContractCase):
 
         self.assertIn("WARNING:", result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+
+class WaitingPollContractTests(SupervisorContractCase):
+    """`poll --wait` is the one clock the lead waits on: it returns on the
+    commentator's next word or on any task moving, whichever comes first."""
+
+    def start_waiting_poll(self, *args, timeout=10):
+        command = [
+            *self.supervisor_command, "--run-dir", str(self.run_dir),
+            "poll", "--wait", "--timeout", str(timeout), *map(str, args),
+        ]
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.env,
+        )
+        time.sleep(1)  # let the wait take its baseline before the trigger
+        return process
+
+    def finish(self, process):
+        started = time.monotonic()
+        stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, stderr)
+        return json.loads(stdout), time.monotonic() - started
+
+    def test_a_waiting_poll_returns_the_moment_a_task_moves(self):
+        task = self.new_task()
+        self.launch()
+        waiting = self.start_waiting_poll()
+
+        self.assert_success(self.dispatch(task))
+        result, elapsed = self.finish(waiting)
+
+        self.assertEqual(
+            result["task_transitions"], [{"task_id": task, "state": "dispatched"}],
+        )
+        self.assertEqual(result["observations"], [])
+        self.assertLess(elapsed, 5)
+
+    def test_a_waiting_poll_returns_the_moment_the_commentator_writes(self):
+        waiting = self.start_waiting_poll()
+
+        self.assert_success(self.cli("observe", "fresh context"))
+        result, elapsed = self.finish(waiting)
+
+        self.assertEqual(
+            [observation["text"] for observation in result["observations"]],
+            ["fresh context"],
+        )
+        self.assertEqual(result["observation_cursor"], result["observations"][0]["id"])
+        self.assertEqual(result["task_transitions"], [])
+        self.assertLess(elapsed, 5)
+
+    def test_a_waiting_poll_returns_a_finding_no_poll_has_printed(self):
+        task = self.new_task()
+        waiting = self.start_waiting_poll()
+
+        self.assert_success(self.cli("finding", "--task", str(task), "off by one"))
+        result, elapsed = self.finish(waiting)
+
+        self.assertEqual(
+            [finding["description"] for finding in result["findings"]], ["off by one"],
+        )
+        self.assertEqual(result["task_transitions"], [])
+        self.assertLess(elapsed, 5)
+
+    def test_a_waiting_poll_sits_through_a_finding_it_already_printed(self):
+        task = self.new_task()
+        self.assert_success(self.cli("finding", "--task", str(task), "off by one"))
+        self.assert_success(self.cli("poll"))
+
+        started = time.monotonic()
+        result = self.assert_success(self.cli("poll", "--wait", "--timeout", "2"))
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            [finding["description"] for finding in json.loads(result.stdout)["findings"]],
+            ["off by one"],
+        )
+        self.assertGreaterEqual(elapsed, 1.5)
+
+    def test_a_waiting_poll_returns_at_once_when_commentary_is_pending(self):
+        self.assert_success(self.cli("observe", "already here"))
+
+        started = time.monotonic()
+        result = self.assert_success(self.cli("poll", "--wait", "--timeout", "10"))
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            [observation["text"] for observation in json.loads(result.stdout)["observations"]],
+            ["already here"],
+        )
+        self.assertLess(elapsed, 5)
+
+    def test_a_waiting_poll_times_out_with_what_there_is(self):
+        started = time.monotonic()
+        result = self.assert_success(self.cli("poll", "--wait", "--timeout", "1"))
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "observation_cursor": 0, "observations": [], "findings": [],
+                "task_transitions": [],
+            },
+        )
+        self.assertGreaterEqual(elapsed, 1)
+
+    def test_a_plain_poll_lists_no_transitions(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+
+        result = self.assert_success(self.cli("poll"))
+
+        self.assertEqual(json.loads(result.stdout)["task_transitions"], [])
+
+    def test_a_waiting_poll_counts_as_reading_state(self):
+        task = self.new_task()
+        self.launch()
+        never = self.assert_success(self.dispatch(task))
+        self.assert_success(self.cli("poll", "--wait", "--timeout", "1"))
+        read = self.assert_success(self.cli("observe", "after the wait"))
+
+        self.assertIn("state has never been read", never.stderr)
+        self.assertNotIn("state", read.stderr)
 
 
 class SeedAndForkContractTests(SupervisorContractCase):
