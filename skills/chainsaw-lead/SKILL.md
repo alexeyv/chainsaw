@@ -69,20 +69,23 @@ observations so they are not repeated. Treat observations as context only. Add e
 returned finding to the unresolved map and keep it there until its resolution command
 succeeds; findings are returned again on every poll while unresolved by design.
 
-When you have nothing left to do but wait, wait on the supervisor, never on a sleep:
+You never wait in the foreground. Right after every dispatch, arm one watch **in the
+background** (a background shell task, so its exit interrupts you with the output)
+and go on thinking:
 
 ```sh
-$SUP poll --after-observation "$OBSERVATION_CURSOR" --wait --timeout 120
+$SUP poll --after-observation "$OBSERVATION_CURSOR" --wait --timeout 600
 ```
 
 It returns the moment there is something to return — a new observation, a finding no
 earlier poll printed, or any task changing state — and on timeout it returns what
-there is, exit 0. The response also carries `task_transitions`, every task whose
-state changed during the wait, so `<task-id> committed_unverified` reaches you
-through the same call as the commentary. This is one clock for everything you sit on.
-Never loop `poll` or `state` around a sleep of your own, and never arm a watch on
-`state --task` that queues behind a review poll: a commit would then wait out the
-commentator's clock before you saw it.
+there is, exit 0; re-arm it. The response also carries `task_transitions`, every
+task whose state changed during the wait, so `<task-id> committed_unverified`
+interrupts you through the same watch as the commentary. One watch is one clock for
+everything you would otherwise sit on. Never run it, or any `poll` or `state` loop,
+in the foreground: a lead inside a wait is a lead not thinking, and in the run where
+that happened the dispatch gaps outweighed the implementers' working time. Arming
+the watch counts as reading state for the monitor warning.
 
 Resolve a finding you reject with a concrete verdict reason:
 
@@ -295,8 +298,9 @@ measured separately (`$SUP state` shows both).
    cursor, verify every unresolved finding against git, and resolve it through the
    protocol above. Gather
    derivations that do not depend on the in-flight commit, batch questions for the
-   human, draft and pre-populate the next task. Then `poll --wait`: it returns when
-   the commit lands or the commentator writes, whichever is first.
+   human, draft and pre-populate the next task. The background `poll --wait`
+   interrupts you when the commit lands or the commentator writes, whichever is
+   first.
 4. After starting the next implementer, append the calibration record for the previous
    task: `$SUP calibrate <task-id>` fills actual files/lines from git and wall
    time and context from the session log against your prediction. Its context
@@ -307,8 +311,8 @@ measured separately (`$SUP state` shows both).
 5. Progress signals come from the supervisor, never self-reports:
    `$SUP state` shows each task's state and each session's measured context;
    `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else;
-   `poll --wait` returns the same transition in `task_transitions` without a loop of
-   your own, and counts as a state read. Every command you
+   the background `poll --wait` delivers the same transition in `task_transitions`
+   without a loop of your own, and counts as a state read. Every command you
    run ends with `WARNING:` lines on stderr when a measured fact needs you: your
    context near or past 250k, a commit unjudged for five minutes, no state read for
    two minutes while a task is out, no daemon polling. Act on them when they appear;
@@ -417,8 +421,8 @@ when the planning happened to be cheap.
    plus the prompt at four bytes a token; a guess to calibrate against
    `$SUP context implementer-<n>` once the fork's first request lands) and warns on
    stderr when that estimate passes 70k.
-3. When the task reaches `committed_unverified` (`poll --wait` returns it in
-   `task_transitions`), dispatch the next one **to the same
+3. When the task reaches `committed_unverified` (the background `poll --wait`
+   interrupts you with it in `task_transitions`), dispatch the next one **to the same
    implementer** while its measured context is under 100k: it carries the seed's
    reading plus everything it just built, and a fresh fork would be handed the same
    commits as history anyway. `dispatch` sends it the commits since its own last

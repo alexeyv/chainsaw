@@ -1393,7 +1393,8 @@ fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
 }
 
 /// Answer the lead's poll, blocking when asked until there is something to
-/// answer with. The wait is one clock for everything the lead sits on: the
+/// answer with. The lead arms the wait in the background and keeps working;
+/// it is one clock for everything the lead would otherwise sit on: the
 /// commentator's next observation, a finding no earlier poll printed, and any
 /// task moving state, so a commit can never queue behind a review poll.
 fn cmd_poll(
