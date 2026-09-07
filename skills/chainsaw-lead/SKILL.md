@@ -29,9 +29,13 @@ the commentator's findings — not implementation detail.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
    from yours.
 
-5. The supervisor launches implementers and the commentator with `--model opus
-   --effort high` (hardcoded in the supervisor's `session_runtime.rs`); the lead runs
-   on whatever model the human started this session with.
+5. Models: the lead runs on Fable at medium effort; every other role — implementers,
+   the commentator, and in fork mode the planner and the seed — on Opus at high
+   effort. The supervisor launches those itself with `--model opus --effort high`
+   (hardcoded in its `session_runtime.rs`). The lead runs on whatever the human
+   started this session with, so the human starts it as
+   `claude --model fable --effort medium`; if you know you are on something else,
+   say so once before the first dispatch and carry on.
 
 ## Basics
 Every role is a visible interactive session in its own pane or tab, addressable by

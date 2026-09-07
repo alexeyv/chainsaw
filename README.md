@@ -30,4 +30,4 @@ Requires [Herdr](https://herdr.dev) and a Rust toolchain (the supervisor builds 
 npx skills add alexeyv/chainsaw
 ```
 
-Prepare a spec, preferably with a story breakdown. Say **chainsaw this**. Or start it and feed small intents by hand.
+Prepare a spec, preferably with a story breakdown. Start Claude Code as the lead with `claude --model fable --effort medium` (the supervisor runs every other role on Opus at high effort) and say **chainsaw this**. Or start it and feed small intents by hand.
