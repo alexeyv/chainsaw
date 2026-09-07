@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -49,7 +49,9 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started int, ended int);
 create table events(at int, kind text, detail text);
-pragma user_version=2;
+create table session_history(
+  session_id int primary key references sessions(id), shown_head text not null);
+pragma user_version=3;
 "#;
 
 pub struct Store {
@@ -309,7 +311,7 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     assert_eq!(session_fork_columns, 1);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);

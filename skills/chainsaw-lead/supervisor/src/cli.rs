@@ -43,6 +43,9 @@ pub enum Command {
     #[arg(long = "fork-of")]
     fork_of: Option<String>,
   },
+  /// Hand an idle forked implementer the commits it has not seen, reading only,
+  /// so it is caught up before its first task.
+  Warm { name: String },
   /// Deliver a prompt to a session.
   Prompt {
     name: String,

@@ -1696,6 +1696,146 @@ class SeedAndForkContractTests(SupervisorContractCase):
         self.assertNotIn("Work silently.", prompt)
 
 
+class PreWarmContractTests(SupervisorContractCase):
+    """A spare fork is fed the commits it has not seen, one warm at a time, so
+    the dispatch that finally reaches it has little left to hand over."""
+
+    def launch_seed(self):
+        self.assert_success(self.cli("launch", "seed-1", "--seed"))
+
+    def launch_fork(self, name="spare"):
+        self.assert_success(self.cli("launch", name, "--fork-of", "seed-1"))
+
+    def test_warm_feeds_a_fork_the_commits_since_the_tree_it_read(self):
+        self.launch_seed()
+        self.launch_fork()
+        baseline = self.head()
+        self.commit_file("a.txt", "first landed\n", "feat: first landed task\n\nBody one.")
+
+        result = self.assert_success(self.cli("warm", "spare"))
+        prompt = self.prompts_to("spare")[-1]
+
+        self.assertIn(
+            f"spare warmed with 1 commit ({baseline[:10]}..{self.head()[:10]}); "
+            "estimated context",
+            result.stdout,
+        )
+        self.assertIn(f"These commits landed after the tree you read at {baseline[:10]}", prompt)
+        self.assertIn("feat: first landed task", prompt)
+        self.assertIn("Body one.", prompt)
+        self.assertIn("+first landed", prompt)
+        self.assertIn("No task yet: this is reading only", prompt)
+        self.assertIn("Reply with exactly `warm`", prompt)
+        self.assertIn(("warm",), self.event_kinds())
+
+    def test_warm_picks_up_where_the_last_warm_left_off(self):
+        self.launch_seed()
+        self.launch_fork()
+        self.commit_file("a.txt", "first\n", "feat: first landed task")
+        self.assert_success(self.cli("warm", "spare"))
+        shown = self.head()
+
+        nothing = self.assert_success(self.cli("warm", "spare"))
+        self.commit_file("b.txt", "second\n", "feat: second landed task")
+        again = self.assert_success(self.cli("warm", "spare"))
+        prompt = self.prompts_to("spare")[-1]
+
+        self.assertEqual(
+            nothing.stdout.strip(),
+            f"nothing to warm: spare has seen everything up to {shown[:10]}",
+        )
+        self.assertEqual(len(self.prompts_to("spare")), 2)
+        self.assertIn("spare warmed with 1 commit", again.stdout)
+        self.assertIn(f"after the last commit you were shown at {shown[:10]}", prompt)
+        self.assertIn("feat: second landed task", prompt)
+        self.assertNotIn("feat: first landed task", prompt)
+
+    def test_dispatch_to_a_warmed_fork_hands_over_only_what_is_left(self):
+        self.launch_seed()
+        self.launch_fork()
+        self.commit_file("a.txt", "first\n", "feat: first landed task")
+        self.assert_success(self.cli("warm", "spare"))
+        shown = self.head()
+        self.commit_file("b.txt", "second\n", "feat: second landed task")
+        task = self.new_task(text="The warmed fork's first task.")
+
+        result = self.assert_success(self.cli("dispatch", str(task), "--to", "spare"))
+        prompt = self.prompts_to("spare")[-1]
+
+        self.assertIn(f"task {task} dispatched to spare (fork;", result.stdout)
+        self.assertIn(f"after the last commit you were shown at {shown[:10]}", prompt)
+        self.assertIn("feat: second landed task", prompt)
+        self.assertNotIn("feat: first landed task", prompt)
+        self.assertIn("The warmed fork's first task.", prompt)
+        self.assertIn("Work silently.", prompt)
+
+    def test_a_dispatch_counts_as_showing_the_tree(self):
+        self.launch_seed()
+        self.launch_fork()
+        task = self.new_task(text="A task that gets aborted.")
+        self.assert_success(self.cli("dispatch", str(task), "--to", "spare"))
+        shown = self.head()
+        self.assert_success(self.cli("abort", str(task), "--reason", "fixture"))
+        self.commit_file("c.txt", "later\n", "feat: landed after the abort")
+
+        self.assert_success(self.cli("warm", "spare"))
+        prompt = self.prompts_to("spare")[-1]
+
+        self.assertIn(f"after the last commit you were shown at {shown[:10]}", prompt)
+        self.assertIn("feat: landed after the abort", prompt)
+
+    def test_a_commit_after_a_warm_moves_the_base_to_the_commit(self):
+        self.launch_seed()
+        self.launch_fork("worker")
+        self.commit_file("a.txt", "first\n", "feat: first landed task")
+        self.assert_success(self.cli("warm", "worker"))
+        first = self.new_task(text="First forked task.")
+        self.assert_success(self.dispatch(first))
+        self.observe_in_flight(first)
+        own = self.commit_file("own.txt", "own\n", "feat: the fork's own task")
+        self.record_commit("worker", own)
+        self.assert_success(self.cli("task", "record-commit", str(first), own, "--force",
+                                     "--reason", "fixture"))
+        self.commit_file("d.txt", "elsewhere\n", "feat: landed from elsewhere")
+
+        self.assert_success(self.cli("warm", "worker"))
+        warmed = self.prompts_to("worker")[-1]
+        second = self.new_task(text="Second forked task.", files="second.txt")
+        self.assert_success(self.dispatch(second))
+        dispatched = self.prompts_to("worker")[-1]
+
+        self.assertIn(f"after your last commit at {own[:10]}", warmed)
+        self.assertIn("feat: landed from elsewhere", warmed)
+        self.assertNotIn("the fork's own task", warmed)
+        self.assertTrue(dispatched.startswith("Second forked task."), dispatched[:80])
+
+    def test_warm_refuses_a_fork_with_a_task_out(self):
+        self.launch_seed()
+        self.launch_fork()
+        task = self.new_task()
+        self.assert_success(self.cli("dispatch", str(task), "--to", "spare"))
+        self.commit_file("e.txt", "meanwhile\n", "feat: meanwhile")
+
+        result = self.cli("warm", "spare")
+
+        self.assert_failure(
+            result, f"spare has task {task} out (dispatched); only an idle implementer is warmed",
+        )
+        self.assertEqual(len(self.prompts_to("spare")), 1)
+
+    def test_warm_refuses_cold_sessions_and_seeds(self):
+        self.launch_seed()
+        self.launch("cold")
+
+        cold = self.cli("warm", "cold")
+        seed = self.cli("warm", "seed-1")
+        missing = self.cli("warm", "nobody")
+
+        self.assert_failure(cold, "cold is not a forked implementer; only forks are warmed")
+        self.assert_failure(seed, "seed-1 is not a forked implementer")
+        self.assert_failure(missing, "no session nobody; launch it first")
+
+
 class TaskImportContractTests(SupervisorContractCase):
     def test_import_registers_the_task_map_in_order(self):
         task_map = json.dumps([

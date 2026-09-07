@@ -456,6 +456,21 @@ when the planning happened to be cheap.
    you cannot finish, report the concrete blocker concisely.
    ```
 
+### Pre-warming the next implementer
+
+An implementer retires at 100k; the fork that replaces it should not start cold on
+that turn. While implementer-<n> works, `$SUP launch implementer-<n+1> --fork-of
+<seed>` in its own tab, and after each commit lands run `$SUP warm
+implementer-<n+1>`: it hands the spare every commit it has not yet seen, message and
+diff, marked reading only, and the spare answers `warm`. Each warm covers only what
+landed since the last one, so feed it one commit at a time as they land and it
+stays as warm as the working implementer; `nothing to warm` means it has seen HEAD.
+When implementer-<n> retires, `dispatch` to the spare hands over only what is left
+since its last warm, usually nothing. The supervisor refuses to warm a session with
+a task out, a cold session, or a seed. A warm is a turn on the spare, so its context
+grows by the diffs it reads; `$SUP context implementer-<n+1>` shows the price, and
+it counts toward the spare's own 100k.
+
 ### The seed stays
 
 Every fork of the run comes from the same seed. Retiring an implementer at 100k is

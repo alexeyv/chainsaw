@@ -208,6 +208,7 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
         fork_of: fork_of.as_deref(),
       },
     ),
+    Command::Warm { name } => cmd_warm(store, runtime, &name),
     Command::Prompt {
       name,
       text,
@@ -816,16 +817,11 @@ fn cmd_dispatch(
   };
 
   let (preamble, contract) = match (&continuing, session.is_fork()) {
-    (Some(own_commit), _) => (
-      history_since(store, own_commit, "your last commit")?,
-      if session.is_fork() {
-        FORK_CONTRACT
-      } else {
-        CONTRACT
-      },
-    ),
-    (None, true) => (history_since_seed(store, &session)?, FORK_CONTRACT),
     (None, false) => (files_changed_since_launch(store, &session)?, CONTRACT),
+    (_, is_fork) => (
+      history_since_base(store, &session, continuing.as_deref())?,
+      if is_fork { FORK_CONTRACT } else { CONTRACT },
+    ),
   };
 
   let prompt = format!(
@@ -855,6 +851,7 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
+  record_shown_head(store, &session)?;
   let log_offset = file_size(session_log(store, &session).as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
@@ -880,14 +877,146 @@ fn cmd_dispatch(
   Ok(())
 }
 
-/// A fork inherits its seed's reading of the tree at the seed's baseline. Hand it
-/// every commit since then, message and diff, oldest first: that is the whole
-/// account of what moved, and nobody writes another one. Empty when nothing has.
-fn history_since_seed(store: &Store, session: &Session) -> Result<String> {
-  let Some(base) = session.launched_head() else {
-    return Ok(String::new());
+const WARM_CONTRACT: &str = "No task yet: this is reading only, so you are caught up when one arrives. Do not edit, build, or commit anything. Reply with exactly `warm` and nothing else.";
+
+/// Hand an idle forked implementer every commit it has not seen, reading only,
+/// so the next dispatch has less to hand over. Feeding them one commit at a
+/// time as they land keeps a spare implementer as warm as the working one.
+fn cmd_warm(store: &Store, runtime: &dyn SessionRuntime, name: &str) -> Result<()> {
+  let Some(session) = latest_session_named(store, name)? else {
+    bail!("supervisor: no session {name}; launch it first");
   };
-  history_since(store, base, "the tree you read")
+  if !session.is_live() {
+    bail!("supervisor: {name} is stopped; launch it again first");
+  }
+  if !session.is_fork() || session.role() != Role::Implementer {
+    bail!(
+      "supervisor: {name} is not a forked implementer; only forks are warmed, a cold session reads for itself"
+    );
+  }
+  let prior = last_task_on(store, session.id())?;
+  if let Some(prior) = &prior
+    && matches!(prior.state(), TaskState::Dispatched | TaskState::InFlight)
+  {
+    bail!(
+      "supervisor: {name} has task {} out ({}); only an idle implementer is warmed",
+      prior.id(),
+      prior.state()
+    );
+  }
+  let own_commit = prior
+    .filter(|task| {
+      matches!(
+        task.state(),
+        TaskState::CommittedUnverified | TaskState::Accepted
+      )
+    })
+    .and_then(|task| task.commit_sha().map(str::to_owned));
+  let Some((base, what_base_was)) = history_base(store, &session, own_commit.as_deref())? else {
+    bail!("supervisor: {name} has no baseline to warm from");
+  };
+  let history = history_since(store, &base, what_base_was)?;
+  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  if history.is_empty() {
+    println!(
+      "nothing to warm: {name} has seen everything up to {}",
+      short_sha(&head)
+    );
+    return Ok(());
+  }
+  let commits = git_stdout(store, &["rev-list", "--count", &format!("{base}..HEAD")])?
+    .trim()
+    .parse::<i64>()
+    .unwrap_or_default();
+  let prompt = format!("{history}{WARM_CONTRACT}");
+  let estimate = estimate_fork_starting_context(store, &session, &prompt);
+  cmd_prompt(store, runtime, name, &prompt, false, 300)?;
+  record_shown_head(store, &session)?;
+  store.event(
+    "warm",
+    &format!(
+      "{name} {}..{}: {commits} commits",
+      short_sha(&base),
+      short_sha(&head)
+    ),
+  )?;
+  println!(
+    "{name} warmed with {commits} commit{} ({}..{}); estimated context {estimate} tokens",
+    if commits == 1 { "" } else { "s" },
+    short_sha(&base),
+    short_sha(&head)
+  );
+  Ok(())
+}
+
+/// Remember that the session has now been shown the tree up to HEAD, whether
+/// through a warm or a dispatch, so the next history starts there.
+fn record_shown_head(store: &Store, session: &Session) -> Result<()> {
+  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  store.db.execute(
+    "insert into session_history(session_id, shown_head) values(?1, ?2)
+     on conflict(session_id) do update set shown_head=excluded.shown_head",
+    params![session.id(), head],
+  )?;
+  Ok(())
+}
+
+fn shown_head(store: &Store, session: &Session) -> Result<Option<String>> {
+  Ok(
+    store
+      .db
+      .query_row(
+        "select shown_head from session_history where session_id=?",
+        [session.id()],
+        |row| row.get(0),
+      )
+      .optional()?,
+  )
+}
+
+/// The newest point in history the session already knows, and what that point
+/// was to it: the tree its seed read, its own last commit, or the last commit
+/// it was shown by a warm or a dispatch. Whichever descends from the others
+/// wins, so a warm after a commit and a commit after a warm both count.
+fn history_base(
+  store: &Store,
+  session: &Session,
+  own_commit: Option<&str>,
+) -> Result<Option<(String, &'static str)>> {
+  let shown = shown_head(store, session)?;
+  let candidates = [
+    (session.launched_head(), "the tree you read"),
+    (own_commit, "your last commit"),
+    (shown.as_deref(), "the last commit you were shown"),
+  ];
+  let mut best: Option<(String, &'static str)> = None;
+  for (candidate, what) in candidates {
+    let Some(candidate) = candidate else { continue };
+    let newer = match &best {
+      None => true,
+      Some((base, _)) => git(store, &["merge-base", "--is-ancestor", base, candidate])?
+        .status
+        .success(),
+    };
+    if newer {
+      best = Some((candidate.to_owned(), what));
+    }
+  }
+  Ok(best)
+}
+
+/// The commits since the newest point the session knows, message and diff,
+/// oldest first: the whole account of what moved, and nobody writes another
+/// one. Empty when nothing has.
+fn history_since_base(
+  store: &Store,
+  session: &Session,
+  own_commit: Option<&str>,
+) -> Result<String> {
+  match history_base(store, session, own_commit)? {
+    Some((base, what_base_was)) => history_since(store, &base, what_base_was),
+    None => Ok(String::new()),
+  }
 }
 
 /// Every commit after `base`, message and diff, oldest first, introduced by what
