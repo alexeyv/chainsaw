@@ -66,6 +66,9 @@ pub struct StartSession<'a> {
   pub id: &'a str,
   pub run_dir: &'a Path,
   pub kind: SessionKind,
+  /// Fork this Claude session (its external id) instead of starting cold: the
+  /// new session inherits the seed's transcript and continues from there.
+  pub fork_of: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -193,6 +196,9 @@ impl SessionRuntime for HerdrSessionRuntime {
     let mut arguments = vec![
       "agent", "start", session.id, "--kind", "claude", "--pane", &pane_id, "--",
     ];
+    if let Some(seed) = session.fork_of {
+      arguments.extend_from_slice(&["--resume", seed, "--fork-session"]);
+    }
     arguments.extend_from_slice(session.kind.flags());
     let mut started = None;
     for attempt in 0..5 {
@@ -450,6 +456,15 @@ impl SessionRuntime for ZeroCostDummy {
       let tab_id = format!("tab-{sequence}");
       let external_id = format!("session-{}-{sequence}", session.id);
       let run_dir = session.run_dir.to_string_lossy().into_owned();
+      // A real fork starts from a copy of the seed's transcript; mirror that so
+      // the copied prefix is observable through the supervisor.
+      if let Some(seed) = session.fork_of {
+        let logs = Self::logs_dir(session.run_dir)?;
+        let seed_log = logs.join(format!("{seed}.jsonl"));
+        if seed_log.exists() {
+          fs::copy(&seed_log, logs.join(format!("{external_id}.jsonl")))?;
+        }
+      }
       Self::object_mut(state, "panes")?.insert(pane_id.clone(), json!({"cwd": run_dir}));
       Self::object_mut(state, "agents")?.insert(
         session.id.to_owned(),
@@ -463,6 +478,7 @@ impl SessionRuntime for ZeroCostDummy {
         "operation": "start",
         "session_id": session.id,
         "kind": session.kind.label(),
+        "fork_of": session.fork_of,
       }));
       Ok(StartedSession {
         external_id,
@@ -715,6 +731,7 @@ esac
           id: "worker",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          fork_of: None,
         })
         .unwrap();
 
@@ -749,6 +766,31 @@ esac
     }
 
     #[test]
+    fn should_fork_the_seed_session_before_the_implementer_flags_when_asked() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+
+      runtime
+        .start(StartSession {
+          id: "worker",
+          run_dir: Path::new("/tmp/run"),
+          kind: SessionKind::Implementer,
+          fork_of: Some("seed-uuid"),
+        })
+        .unwrap();
+
+      let calls = herdr.calls();
+      assert_eq!(calls[1][8..11], ["--resume", "seed-uuid", "--fork-session"]);
+      assert_eq!(
+        calls[1][11..]
+          .iter()
+          .map(String::as_str)
+          .collect::<Vec<_>>(),
+        IMPLEMENTER_FLAGS
+      );
+    }
+
+    #[test]
     fn should_split_the_current_pane_and_keep_the_ambient_tab_for_a_commentator() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
@@ -758,6 +800,7 @@ esac
           id: "commentator",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Commentator,
+          fork_of: None,
         })
         .unwrap();
 
@@ -788,6 +831,7 @@ esac
           id: "late-id",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          fork_of: None,
         })
         .unwrap();
 
@@ -814,6 +858,7 @@ esac
           id: "no-id",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          fork_of: None,
         })
         .unwrap_err();
 
@@ -836,6 +881,7 @@ esac
           id: "worker",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          fork_of: None,
         })
         .unwrap_err();
 

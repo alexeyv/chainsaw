@@ -351,6 +351,7 @@ pub struct SessionSpec {
   pub context_max: i64,
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
+  pub forked_from: Option<i64>,
 }
 
 /// A live implementer that has just been launched and read nothing yet.
@@ -367,6 +368,7 @@ pub fn launched_implementer() -> SessionSpec {
     context_max: 0,
     last_growth: created_at(),
     kicked_at: None,
+    forked_from: None,
   }
 }
 
@@ -393,6 +395,7 @@ pub fn build_session(spec: SessionSpec) -> Result<Session> {
     spec.context_max,
     spec.last_growth,
     spec.kicked_at,
+    spec.forked_from,
   )
 }
 

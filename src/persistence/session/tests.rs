@@ -16,6 +16,7 @@ fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Res
     Role::Implementer,
     external,
     Some("base123"),
+    None,
   )
 }
 
@@ -96,7 +97,7 @@ can_be_kicked: true"#,
     let mut db = database();
 
     let transaction = db.transaction()?;
-    let session = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let session = create(&transaction, "lead", Role::Lead, "uuid-lead", None, None)?;
     transaction.commit()?;
 
     assert_eq!(session.role(), Role::Lead);
@@ -200,7 +201,7 @@ mod all {
   fn should_work() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None, None)?;
     let first = implementer(&transaction, "implementer-1", "uuid-1")?;
     stop_named(&transaction, "implementer-1")?;
     let second = implementer(&transaction, "implementer-1", "uuid-2")?;

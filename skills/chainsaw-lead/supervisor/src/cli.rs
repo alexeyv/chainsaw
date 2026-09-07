@@ -31,8 +31,18 @@ pub enum Command {
     #[arg(long)]
     role_prompt: PathBuf,
   },
-  /// Start an implementer session.
-  Launch { name: String },
+  /// Start an implementer session, or a seed session, or an implementer forked from a seed.
+  Launch {
+    name: String,
+    /// Start a seed: a session that reads the repository and holds the epic's task
+    /// map, from which implementers are forked. It never takes a task itself.
+    #[arg(long, conflicts_with = "fork_of")]
+    seed: bool,
+    /// Fork this seed session instead of starting cold; the implementer inherits
+    /// the seed's transcript and is dispatched the Git history since the seed's baseline.
+    #[arg(long = "fork-of")]
+    fork_of: Option<String>,
+  },
   /// Deliver a prompt to a session.
   Prompt {
     name: String,
@@ -151,6 +161,9 @@ pub enum TaskCommand {
     #[arg(long)]
     reason: Option<String>,
   },
+  /// Create drafted tasks from a JSON task map on standard input: an array of
+  /// {"text", "files" | "predicted_files", "predicted_lines"} objects, in order.
+  Import,
   /// Remedy a coordinator failure to observe an implementer commit.
   RecordCommit {
     task: i64,

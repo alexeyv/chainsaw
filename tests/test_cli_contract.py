@@ -1303,3 +1303,187 @@ class StandingWarningTests(SupervisorContractCase):
 
         self.assertIn("WARNING:", result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+
+class SeedAndForkContractTests(SupervisorContractCase):
+    """Prototype: one prepared seed session, implementers forked from it, and
+    the Git history since the seed's baseline as the dispatch preamble."""
+
+    def launch_seed(self, name="seed-1"):
+        result = self.assert_success(self.cli("launch", name, "--seed"))
+        return json.loads(result.stdout)
+
+    def launch_fork(self, name="worker", seed="seed-1"):
+        result = self.assert_success(self.cli("launch", name, "--fork-of", seed))
+        return json.loads(result.stdout)
+
+    def test_seed_launch_records_its_role_and_baseline(self):
+        launched = self.launch_seed()
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(launched["role"], "seed")
+        self.assertEqual(launched["baseline"], self.head())
+        self.assertIsNone(launched["fork_of"])
+        self.assertIn("seed-1", state.stdout)
+        self.assertIn("seed ", state.stdout)
+
+    def test_a_seed_never_takes_a_task(self):
+        task = self.new_task()
+        self.launch_seed()
+
+        result = self.dispatch(task, "seed-1")
+
+        self.assert_failure(result, "seed-1 is the seed, not an implementer")
+
+    def test_fork_launch_resumes_the_seed_and_inherits_its_baseline(self):
+        seed = self.launch_seed()
+        self.append_usage("seed-1", input_tokens=11, cache_read=1000)
+        self.commit_file("moved.txt", "after the seed read\n", "feat: move after seed")
+
+        fork = self.launch_fork()
+        start = [operation for operation in self.runtime_operations()
+                 if operation["operation"] == "start"][-1]
+
+        self.assertEqual(start["session_id"], "worker")
+        self.assertEqual(start["fork_of"], seed["session_id"])
+        self.assertEqual(fork["fork_of"], "seed-1")
+        self.assertEqual(fork["baseline"], seed["baseline"])
+        self.assertNotEqual(fork["baseline"], self.head())
+        self.assertEqual(
+            self.session_log("worker").read_text(),
+            self.session_log("seed-1").read_text(),
+            "a fork starts from a copy of the seed's transcript",
+        )
+
+    def test_fork_launch_requires_a_live_seed(self):
+        self.launch("cold")
+
+        missing = self.cli("launch", "worker", "--fork-of", "seed-9")
+        not_a_seed = self.cli("launch", "worker", "--fork-of", "cold")
+
+        self.assert_failure(missing, "no live session seed-9 to fork")
+        self.assert_failure(not_a_seed, "cold is the implementer, not a seed")
+
+    def test_dispatch_to_a_fork_hands_over_git_history_and_the_silent_contract(self):
+        self.launch_seed()
+        self.append_usage("seed-1", input_tokens=5, cache_read=2000)
+        self.commit_file(
+            "moved.txt", "after the seed read\n",
+            "feat: move after seed\n\nBody of the first landed task.",
+        )
+        task = self.new_task(text="You are task 2 of the map.")
+        self.launch_fork()
+
+        result = self.assert_success(self.dispatch(task))
+        prompt = self.prompts_to("worker")[-1]
+
+        self.assertIn("task 1 dispatched to worker (fork; estimated starting context", result.stdout)
+        self.assertIn("These commits landed after the tree you read at", prompt)
+        self.assertIn("feat: move after seed", prompt)
+        self.assertIn("Body of the first landed task.", prompt)
+        self.assertIn("+after the seed read", prompt)
+        self.assertIn("You are task 2 of the map.", prompt)
+        self.assertIn("Work silently.", prompt)
+        self.assertIn("Your final response must contain only the commit SHA.", prompt)
+        self.assertNotIn("changed-file manifest", prompt)
+        self.assertNotIn("read them first", prompt)
+
+    def test_dispatch_to_a_fork_omits_history_when_nothing_landed(self):
+        self.launch_seed()
+        task = self.new_task(text="First task of the map.")
+        self.launch_fork()
+
+        self.assert_success(self.dispatch(task))
+        prompt = self.prompts_to("worker")[-1]
+
+        self.assertTrue(prompt.startswith("First task of the map."), prompt[:80])
+        self.assertIn("Work silently.", prompt)
+
+    def test_dispatch_warns_when_the_fork_starts_over_budget(self):
+        self.launch_seed()
+        self.append_usage("seed-1", input_tokens=500, cache_read=80_000)
+        task = self.new_task(text="A task on a heavy seed.")
+        self.launch_fork()
+
+        result = self.assert_success(self.dispatch(task))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn("over the 70000 budget; prepare a replacement seed", result.stderr)
+        self.assertIn(f"{task} dispatched", state.stdout)
+
+    def test_commentator_wake_names_the_seed_of_a_forked_implementer(self):
+        self.launch_seed()
+        task = self.new_task(text="Forked task.")
+        self.launch_fork()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        sha = self.commit_file()
+        self.record_commit("worker", sha)
+        commentator = self.start_commentator()
+
+        daemon = self.start_daemon()
+        self.wait_for_state("commentary-wake")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertEqual(
+            self.prompts_to(commentator)[-1],
+            f"supervisor: commit {sha[:10]} landed for task {task} (implementer worker "
+            "is a fork of seed seed-1; its transcript begins with a copy of the "
+            "seed's); review it from git",
+        )
+
+    def test_cold_dispatch_keeps_the_original_contract(self):
+        task = self.new_task(text="Cold task.")
+        self.launch()
+
+        self.assert_success(self.dispatch(task))
+        prompt = self.prompts_to("worker")[-1]
+
+        self.assertIn("changed-file manifest", prompt)
+        self.assertNotIn("Work silently.", prompt)
+
+
+class TaskImportContractTests(SupervisorContractCase):
+    def test_import_registers_the_task_map_in_order(self):
+        task_map = json.dumps([
+            {"text": "Task A: add the parser.", "files": ["src/parser.rs"],
+             "predicted_lines": 40},
+            {"text": "Task B: wire the CLI.", "predicted_files": 2,
+             "predicted_lines": 20},
+        ])
+
+        result = self.assert_success(self.cli("task", "import", input_text=task_map))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(result.stdout, "1\n2\n")
+        self.assertIn("1 drafted", state.stdout)
+        self.assertIn("2 drafted", state.stdout)
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            rows = database.execute(
+                "select id, text, predicted_files, predicted_lines, predicted_file_list "
+                "from tasks order by id"
+            ).fetchall()
+        self.assertEqual(rows, [
+            (1, "Task A: add the parser.", 1, 40, "src/parser.rs"),
+            (2, "Task B: wire the CLI.", 2, 20, None),
+        ])
+
+    def test_import_rejects_an_incomplete_entry_and_registers_nothing(self):
+        task_map = json.dumps([
+            {"text": "Fine.", "files": ["a.rs"], "predicted_lines": 5},
+            {"text": "No size.", "files": ["b.rs"]},
+        ])
+
+        result = self.cli("task", "import", input_text=task_map)
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(result, "task map entry 2 has no predicted_lines")
+        self.assertNotIn("1 drafted", state.stdout)
+
+    def test_import_rejects_an_empty_or_malformed_map(self):
+        empty = self.cli("task", "import", input_text="[]")
+        malformed = self.cli("task", "import", input_text="not json")
+
+        self.assert_failure(empty, "task map on stdin is empty")
+        self.assert_failure(malformed, "task map on stdin is not a JSON array")

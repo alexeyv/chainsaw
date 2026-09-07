@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -15,7 +15,8 @@ create table sessions(
   external_session_id text not null unique, launched_head text,
   started_at int not null, stopped_at int,
   context int not null default 0, context_max int not null default 0,
-  last_growth int not null, kicked_at int);
+  last_growth int not null, kicked_at int,
+  forked_from int references sessions(id));
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),
@@ -48,7 +49,7 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started int, ended int);
 create table events(at int, kind text, detail text);
-pragma user_version=1;
+pragma user_version=2;
 "#;
 
 pub struct Store {
@@ -303,7 +304,13 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    assert_eq!(version, 1);
+    let session_fork_columns = db.query_row(
+      "select count(*) from pragma_table_info('sessions') where name='forked_from'",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(version, 2);
+    assert_eq!(session_fork_columns, 1);
     assert_eq!(task_id_required, 1);
     assert_eq!(task_foreign_keys, 2);
     assert_eq!(observation_foreign_keys, 1);

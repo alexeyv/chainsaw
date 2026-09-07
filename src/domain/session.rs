@@ -3,7 +3,10 @@ use std::fmt;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
-use super::{require_nonblank, require_nonnegative, require_optional_nonblank, require_positive};
+use super::{
+  require_nonblank, require_nonnegative, require_optional_nonblank, require_optional_positive,
+  require_positive,
+};
 
 /// What a session is for. The lead runs the process, implementers take tasks,
 /// and the commentator reviews commits; only implementers are ever dispatched to.
@@ -12,6 +15,9 @@ pub enum Role {
   Lead,
   Implementer,
   Commentator,
+  /// A prepared session that read the repository and holds the epic's task map;
+  /// implementers are forked from it and it never takes a task itself.
+  Seed,
 }
 
 impl Role {
@@ -20,6 +26,7 @@ impl Role {
       Self::Lead => "lead",
       Self::Implementer => "implementer",
       Self::Commentator => "commentator",
+      Self::Seed => "seed",
     }
   }
 }
@@ -32,6 +39,7 @@ impl TryFrom<&str> for Role {
       "lead" => Ok(Self::Lead),
       "implementer" => Ok(Self::Implementer),
       "commentator" => Ok(Self::Commentator),
+      "seed" => Ok(Self::Seed),
       value => bail!("unknown session role {value:?}"),
     }
   }
@@ -58,6 +66,7 @@ pub struct Session {
   context_max: i64,
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
+  forked_from: Option<i64>,
 }
 
 impl Session {
@@ -74,6 +83,7 @@ impl Session {
     context_max: i64,
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
+    forked_from: Option<i64>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("name", &name)?;
@@ -93,6 +103,7 @@ impl Session {
     if kicked_at.is_some_and(|kicked| kicked < started_at) {
       bail!("kicked_at cannot precede started_at");
     }
+    require_optional_positive("forked_from", forked_from)?;
 
     Ok(Self {
       id,
@@ -106,6 +117,7 @@ impl Session {
       context_max,
       last_growth,
       kicked_at,
+      forked_from,
     })
   }
 
@@ -151,6 +163,15 @@ impl Session {
 
   pub fn kicked_at(&self) -> Option<DateTime<Utc>> {
     self.kicked_at
+  }
+
+  /// The seed session this one was forked from, when it was not started cold.
+  pub fn forked_from(&self) -> Option<i64> {
+    self.forked_from
+  }
+
+  pub fn is_fork(&self) -> bool {
+    self.forked_from.is_some()
   }
 
   /// A session is live until it is superseded or stopped.

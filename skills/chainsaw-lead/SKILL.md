@@ -316,6 +316,113 @@ measured separately (`$SUP state` shows both).
 
 Serial wherever it touches the repo: one implementer in flight, one frozen task.
 
+## Fork mode (prototype)
+
+An alternative loop, being trialled: prepare one **seed** session that understands the
+whole epic, then fork every implementer from it instead of giving each a reading turn
+and a brief. The seed holds the spec, its reading of the repository, and the complete
+task map; every fork therefore sees every task's boundary, not just its own, and plans
+its own task from inherited understanding. Git is the handoff: each landed commit
+carries its task prompt and a short account, and the next fork is handed the commits
+since the seed's baseline, messages and diffs, mechanically. You write no reading
+lists, no briefs, and read no implementer reports.
+
+Everything in "Review protocol", "Task lifecycle", and "Stopping" still applies. Only
+the preparation and the dispatch preamble differ. The run keeps one working directory
+and stays serial: one fork in flight at a time.
+
+### Preparing the seed
+
+1. `$SUP launch seed-1 --seed` starts a seed in its own tab: the implementer's model
+   and flags, the role `seed`, and the current HEAD recorded as its baseline. It is
+   never dispatched a task; the supervisor refuses.
+2. Prompt it to read and decompose, and wait for it to finish
+   (`$SUP prompt seed-1 "..." --wait --timeout 1800`):
+
+   ```text
+   You are the seed for an epic in this repository. Read the spec at <spec path>.
+   Read the repository as far as you need to understand how the epic will be built:
+   the files it touches, the contracts they satisfy, one worked example of each
+   pattern, and the tests new tests will join. Then decompose the epic into an
+   ordered task map of small tasks. Each entry is a boundary definition of about 100
+   tokens: what it changes, where its responsibility ends, and any shared interface,
+   dependency, or acceptance criterion a neighbour needs to make that division
+   meaningful; not a recipe. Size each task for well under 100 changed lines in
+   fewer than five files, and err smaller: every task must be committable on its own
+   with the quality gate green, in a session that starts with your context and must
+   finish under 150k tokens. Write the map, in order, as a JSON array of
+   {"text", "files", "predicted_lines"} objects to <logs-dir>/task-map.json, print
+   it in full, and stop. Do not edit, build, or commit anything: the tree belongs to
+   other sessions. Every fork of this session will implement one task while seeing
+   this whole map, so write each boundary for the neighbours as much as the owner.
+   ```
+
+   `<logs-dir>` is `$SUP logs-dir`, outside the tree; the seed must never dirty the
+   run repository. Keep the seed's context well under 70k: that is the budget for a
+   fork's whole starting context, and the history and task come on top of it.
+3. Register the map mechanically: `$SUP task import < "$($SUP logs-dir)/task-map.json"`
+   prints one task id per line, in map order. The registration metadata (files,
+   predicted lines) rides beside the compact prose; the prose is what the fork gets.
+
+### The fork loop
+
+1. `$SUP launch implementer-<n> --fork-of seed-1` starts a fresh Claude session that
+   resumes the seed's transcript (`--resume <seed> --fork-session`) in its own tab. Its
+   recorded baseline is the seed's, not today's HEAD. There is no reading turn:
+   the fork already carries the seed's reading. Every task still gets a fresh fork.
+2. `$SUP dispatch <task-id> --to implementer-<n>` sends, in order: every commit since
+   the seed's baseline, oldest first, with message and diff (nothing when none landed);
+   the task text verbatim; and the fork contract below in place of the cold one. It
+   prints an estimated starting context for the fork (the seed's last reported
+   context plus the prompt at four bytes a token; a guess to calibrate against
+   `$SUP context implementer-<n>` once the fork's first request lands) and warns on
+   stderr when that estimate passes 70k.
+3. Dispatch the next task the moment the previous one reaches
+   `committed_unverified`, exactly as in the cold loop. Nothing in the commit's chat
+   output matters: the fork's account is its commit message.
+
+   ```text
+   Work silently. Verify the tree is clean; stop if dirty. Investigate, plan,
+   implement, and verify only the assigned task. Run task-specific checks as you work
+   and the project's complete quality gate immediately before committing; a failing
+   gate is fixed or escalated, never committed past. Commit without attribution
+   trailers and leave the tree clean. Include the original task prompt verbatim and at
+   most 300 tokens describing what changed, consequential decisions, and verification
+   results in the commit message body, naming any pre-existing gate failure by test
+   name and one-line error. Follow the repository's commit-subject conventions. Run
+   exactly `git log -1 --format='[chainsaw %h]'` so the supervisor can observe the
+   commit. Your final response must contain only the commit SHA. Do not send
+   acknowledgments, progress updates, or explanations of tool calls. Do not narrate
+   plans or actions. Do not write a separate handoff file or completion summary,
+   repeat the commit message in chat, suggest next steps, or offer to continue. If
+   you cannot finish, report the concrete blocker concisely.
+   ```
+
+### Replacing the seed
+
+Two triggers, either one sufficient:
+
+- **Size.** `dispatch` warned that the fork's estimated starting context is past 70k.
+  The history since the baseline grows with every landed task, so this comes sooner
+  with larger diffs; small tasks are what keep it affordable.
+- **Relevance.** The next task has little to do with the chain so far and needs a
+  substantially different reading. Your judgment, informed by the task map.
+
+`$SUP launch seed-2 --seed` starts a replacement with today's HEAD as its baseline.
+Prompt it with the spec, the existing task map (from the file or `$SUP state`), and
+which tasks have landed; it reads afresh and does not register tasks again. Fork later
+implementers from `seed-2`. Optionally prepare it while the current fork works; the
+commits that land after its reading reach the next fork as history in the usual way.
+
+### Known limits of the prototype
+
+- The history preamble is `git log --patch` over the baseline range: merge commits
+  show no diff. Keep the run's history linear.
+- The estimate is a byte count, not a token count. Record the fork's first measured
+  context beside it and size the next seed from the ratio you observe.
+- A fork's transcript begins with a byte-for-byte copy of the seed's; the commentator
+  is told which seed each fork came from so it reads the seed once.
+
 ## Stopping
 
 When the user says to stop OR a supervisor command's output warns that your context is past 250k, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Then, in order:

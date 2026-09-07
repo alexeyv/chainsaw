@@ -44,6 +44,15 @@ const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on its own; use --force --reason only to remedy a coordinator failure";
 
+/// The compact contract a forked implementer gets. It already holds the spec and
+/// the whole task map, so the assignment names the work and the session plans,
+/// implements, and verifies without narrating; Git is the handoff record.
+const FORK_CONTRACT: &str = "Work silently. Verify the tree is clean; stop if dirty. Investigate, plan, implement, and verify only the assigned task. Run task-specific checks as you work and the project's complete quality gate immediately before committing; a failing gate is fixed or escalated, never committed past.\n\nCommit without attribution trailers and leave the tree clean. Include the original task prompt verbatim and at most 300 tokens describing what changed, consequential decisions, and verification results in the commit message body, naming any pre-existing gate failure by test name and one-line error. Follow the repository's commit-subject conventions. Run exactly `git log -1 --format='[chainsaw %h]'` so the supervisor can observe the commit.\n\nYour final response must contain only the commit SHA.\n\nDo not send acknowledgments, progress updates, or explanations of tool calls. Do not narrate plans or actions. Do not use pleasantries, rhetorical questions, self-commentary, or closing remarks. Do not write a separate handoff file or completion summary, repeat the commit message in chat, suggest next steps, or offer to continue.\n\nIf you cannot finish, report the concrete blocker concisely.";
+/// Roughly where a fork's assembled starting context stops leaving room for its
+/// task; an operating choice from the guiding thoughts, not a measured optimum.
+const FORK_START_BUDGET_TOKENS: i64 = 70_000;
+const BYTES_PER_TOKEN_GUESS: usize = 4;
+
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
 pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
@@ -177,13 +186,18 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
     Command::StartCommentator { role_prompt } => {
       cmd_start_commentator(store, runtime, &role_prompt)
     }
-    Command::Launch { name } => cmd_launch(
+    Command::Launch {
+      name,
+      seed,
+      fork_of,
+    } => cmd_launch(
       store,
       runtime,
       &name,
       LaunchOptions {
-        role: Role::Implementer,
+        role: if seed { Role::Seed } else { Role::Implementer },
         kind: SessionKind::Implementer,
+        fork_of: fork_of.as_deref(),
       },
     ),
     Command::Prompt {
@@ -208,6 +222,7 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
         files.as_deref(),
         reason.as_deref(),
       ),
+      TaskCommand::Import => cmd_task_import(store),
       TaskCommand::RecordCommit {
         task,
         sha,
@@ -263,9 +278,11 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
   }
 }
 
-struct LaunchOptions {
+struct LaunchOptions<'a> {
   role: Role,
   kind: SessionKind,
+  /// Name of the seed session to fork, when the session is not started cold.
+  fork_of: Option<&'a str>,
 }
 
 /// The session's transcript: beside the database when Claude Code agrees about
@@ -363,17 +380,38 @@ fn cmd_launch(
   store: &Store,
   runtime: &dyn SessionRuntime,
   name: &str,
-  options: LaunchOptions,
+  options: LaunchOptions<'_>,
 ) -> Result<()> {
+  let seed = match options.fork_of {
+    Some(seed_name) => {
+      let seed = latest_session_named(store, seed_name)?
+        .filter(Session::is_live)
+        .with_context(|| format!("supervisor: no live session {seed_name} to fork"))?;
+      if seed.role() != Role::Seed {
+        bail!(
+          "supervisor: {seed_name} is the {}, not a seed; only seeds are forked",
+          seed.role()
+        );
+      }
+      Some(seed)
+    }
+    None => None,
+  };
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
     kind: options.kind,
+    fork_of: seed.as_ref().map(Session::external_session_id),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
-  let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
+  // A fork's baseline is the tree its seed read, not the tree at its own launch:
+  // everything between the two is handed over as Git history at dispatch.
+  let launched_head = match &seed {
+    Some(seed) => seed.launched_head().map(str::to_owned),
+    None => git_stdout(store, &["rev-parse", "HEAD"]).ok(),
+  };
   let transaction = store.write_transaction()?;
   session::stop_named(&transaction, name)?;
   session::create(
@@ -382,12 +420,27 @@ fn cmd_launch(
     options.role,
     &external_session_id,
     launched_head.as_deref(),
+    seed.as_ref().map(Session::id),
   )?;
   transaction.commit()?;
-  store.event("launch", name)?;
+  store.event(
+    "launch",
+    &match &seed {
+      Some(seed) => format!("{name} (fork of {})", seed.name()),
+      None => format!("{name} ({})", options.role),
+    },
+  )?;
   println!(
     "{}",
-    json!({"name": name, "pane_id": pane_id, "tab_id": tab_id, "session_id": external_session_id})
+    json!({
+      "name": name,
+      "role": options.role.as_str(),
+      "pane_id": pane_id,
+      "tab_id": tab_id,
+      "session_id": external_session_id,
+      "baseline": launched_head,
+      "fork_of": seed.as_ref().map(Session::name),
+    })
   );
   Ok(())
 }
@@ -475,6 +528,7 @@ fn cmd_start_commentator(
     LaunchOptions {
       role: Role::Commentator,
       kind: SessionKind::Commentator,
+      fork_of: None,
     },
   )?;
   store.set_cfg("commentator", &name)?;
@@ -599,6 +653,79 @@ fn cmd_task_new(
   Ok(())
 }
 
+/// Register a seed's task map mechanically: one drafted task per entry, in
+/// order, so the compact prose stays what the seed wrote and the registration
+/// metadata (files, predicted lines) rides beside it.
+fn cmd_task_import(store: &Store) -> Result<()> {
+  let mut text = String::new();
+  std::io::stdin().read_to_string(&mut text)?;
+  let entries: Vec<Value> =
+    serde_json::from_str(&text).context("supervisor: task map on stdin is not a JSON array")?;
+  if entries.is_empty() {
+    bail!("supervisor: task map on stdin is empty");
+  }
+  let mut tasks = Vec::new();
+  for (index, entry) in entries.iter().enumerate() {
+    let position = index + 1;
+    let task_text = entry
+      .get("text")
+      .and_then(Value::as_str)
+      .filter(|text| !text.trim().is_empty())
+      .with_context(|| format!("supervisor: task map entry {position} has no text"))?;
+    let predicted_lines = entry
+      .get("predicted_lines")
+      .and_then(Value::as_i64)
+      .with_context(|| format!("supervisor: task map entry {position} has no predicted_lines"))?;
+    let files: Vec<String> = entry
+      .get("files")
+      .and_then(Value::as_array)
+      .map(|files| {
+        files
+          .iter()
+          .filter_map(Value::as_str)
+          .map(str::trim)
+          .filter(|file| !file.is_empty())
+          .map(str::to_owned)
+          .collect()
+      })
+      .unwrap_or_default();
+    let predicted_files = if files.is_empty() {
+      entry
+        .get("predicted_files")
+        .and_then(Value::as_i64)
+        .with_context(|| {
+          format!("supervisor: task map entry {position} needs files or predicted_files")
+        })?
+    } else {
+      i64::try_from(files.len()).unwrap_or(i64::MAX)
+    };
+    tasks.push((
+      task_text.to_owned(),
+      predicted_files,
+      predicted_lines,
+      (!files.is_empty()).then_some(files),
+    ));
+  }
+  let transaction = store.write_transaction()?;
+  let mut ids = Vec::new();
+  for (task_text, predicted_files, predicted_lines, files) in tasks {
+    let task = task::create(
+      &transaction,
+      &task_text,
+      predicted_files,
+      predicted_lines,
+      None,
+      files,
+    )?;
+    ids.push(task.id());
+  }
+  transaction.commit()?;
+  for id in ids {
+    println!("{id}");
+  }
+  Ok(())
+}
+
 fn cmd_dispatch(
   store: &Store,
   runtime: &dyn SessionRuntime,
@@ -644,13 +771,29 @@ fn cmd_dispatch(
     );
   }
 
-  let preamble = files_changed_since_launch(store, &session)?;
+  let (preamble, contract) = if session.is_fork() {
+    (history_since_seed(store, &session)?, FORK_CONTRACT)
+  } else {
+    (files_changed_since_launch(store, &session)?, CONTRACT)
+  };
 
   let prompt = format!(
-    "{}{text}\n\n{CONTRACT}",
+    "{}{text}\n\n{contract}",
     preamble,
     text = task.text().trim_end()
   );
+  let starting_context = session
+    .is_fork()
+    .then(|| estimate_fork_starting_context(store, &session, &prompt));
+  if let Some(estimate) = starting_context
+    && estimate > FORK_START_BUDGET_TOKENS
+  {
+    let detail = format!(
+      "task {task_id} -> {implementer}: estimated starting context {estimate} tokens is over the {FORK_START_BUDGET_TOKENS} budget; prepare a replacement seed"
+    );
+    eprintln!("WARNING: {detail}");
+    store.event("fork-over-budget", &detail)?;
+  }
   // The task is only dispatched once the prompt has landed in the session log,
   // so a send that never lands leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
@@ -671,10 +814,48 @@ fn cmd_dispatch(
   )?;
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
+  let estimate = starting_context.map_or_else(String::new, |estimate| {
+    format!(" (fork; estimated starting context {estimate} tokens)")
+  });
   println!(
-    "task {task_id} dispatched to {implementer}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
+    "task {task_id} dispatched to {implementer}{estimate}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
   );
   Ok(())
+}
+
+/// A fork inherits its seed's reading of the tree at the seed's baseline. Hand it
+/// every commit since then, message and diff, oldest first: that is the whole
+/// account of what moved, and nobody writes another one. Empty when nothing has.
+fn history_since_seed(store: &Store, session: &Session) -> Result<String> {
+  let Some(base) = session.launched_head() else {
+    return Ok(String::new());
+  };
+  let history = git_stdout(
+    store,
+    &[
+      "log",
+      "--reverse",
+      "--no-color",
+      "--patch",
+      "--format=commit %H%n%B",
+      &format!("{base}..HEAD"),
+    ],
+  )?;
+  if history.is_empty() {
+    return Ok(String::new());
+  }
+  Ok(format!(
+    "These commits landed after the tree you read at {} (oldest first, messages and diffs); they are the complete account of what moved, and the tree now includes them:\n\n{history}\n\n",
+    short_sha(base)
+  ))
+}
+
+/// What the fork's first request will roughly carry: the context the seed's
+/// transcript last reported plus the dispatch prompt at a bytes-to-tokens guess.
+/// A guess to be calibrated against the fork's first actual usage, not a count.
+fn estimate_fork_starting_context(store: &Store, session: &Session, prompt: &str) -> i64 {
+  let inherited = context_size(session_log(store, session).as_deref()) as i64;
+  inherited + (prompt.len() / BYTES_PER_TOKEN_GUESS) as i64
 }
 
 /// The session may have read the tree before its task arrived; name what moved
@@ -1567,6 +1748,9 @@ fn daemon(
           )?;
         }
         Role::Lead => observe_lead(store, context)?,
+        // A seed only prepares; its reading is recorded above and nothing is
+        // dispatched to it, so there is nothing to observe.
+        Role::Seed => {}
       }
     }
     thread::sleep(poll_interval);
@@ -1586,7 +1770,7 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
       && session.external_session_id() == lead_session_id
   }) {
     session::stop_named(&transaction, lead)?;
-    session::create(&transaction, lead, Role::Lead, lead_session_id, None)?;
+    session::create(&transaction, lead, Role::Lead, lead_session_id, None, None)?;
   }
   transaction.commit()?;
   Ok(())
@@ -1701,8 +1885,9 @@ fn observe_commentator(
         runtime,
         session.name(),
         &format!(
-          "supervisor: commit {sha} landed for task {}; review it from git",
-          task.id()
+          "supervisor: commit {sha} landed for task {}{}; review it from git",
+          task.id(),
+          fork_note(store, &task)?
         ),
       )
     {
@@ -1723,6 +1908,26 @@ fn observe_commentator(
     *compacting = false;
   }
   kick_if_stalled(store, runtime, session, quiet)
+}
+
+/// Names the seed a task's implementer was forked from, so the commentator can
+/// skip the copied prefix of the fork's transcript instead of rereading the seed.
+fn fork_note(store: &Store, task: &Task) -> Result<String> {
+  let Some(session_id) = task.session_id() else {
+    return Ok(String::new());
+  };
+  let Some(session) = session_snapshot(store, session_id)? else {
+    return Ok(String::new());
+  };
+  let Some(seed_id) = session.forked_from() else {
+    return Ok(String::new());
+  };
+  let seed = session_snapshot(store, seed_id)?;
+  Ok(format!(
+    " (implementer {} is a fork of seed {}; its transcript begins with a copy of the seed's)",
+    session.name(),
+    seed.map_or_else(|| seed_id.to_string(), |seed| seed.name().to_owned())
+  ))
 }
 
 fn commentator_log_mentions(text: &str, needle: &str) -> bool {

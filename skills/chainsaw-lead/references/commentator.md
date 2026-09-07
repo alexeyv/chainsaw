@@ -16,6 +16,12 @@ the named directory holds no transcripts, look for the sibling under `~/.claude/
 whose name is the run directory with every `/` and `.` turned into `-`, say so in an
 observation, and use that.
 
+In a fork-mode run the lead prepares a seed session and forks every implementer from
+it. A fork's transcript begins with a byte-for-byte copy of the seed's entries, then
+its own turns. Read the seed's transcript once; for each fork, start at the byte
+length the seed's transcript had when the fork launched and never reread the copied
+prefix. The supervisor's wake names the seed a forked implementer came from.
+
 Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
 running for the whole run. Each line it prints names transcripts that grew since its
 last check; that wake is a catch-up on what the implementer did since your last look,
@@ -62,7 +68,11 @@ not findings.
 ## Per commit
 
 1. Read the commit — message and hunks — from git, and the implementer's closing report
-   from its log. A message that misdescribes its diff is a finding.
+   from its log. A forked implementer writes no closing report: its account is the
+   commit body, the original task prompt verbatim plus a short description of what
+   changed, decisions, and verification; take the account from there and the evidence
+   of checks and gate runs from the transcript. A message that misdescribes its diff
+   is a finding.
 2. Two lenses. **Drift**: does it contradict a decision or convention visible in earlier
    commits or the decision records? **Foundation**: does it make a decision later tasks
    will build on, and is it sound against the spec?

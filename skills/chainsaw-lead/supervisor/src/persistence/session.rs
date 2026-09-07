@@ -16,11 +16,12 @@ struct SessionRow {
   context_max: i64,
   last_growth: i64,
   kicked_at: Option<i64>,
+  forked_from: Option<i64>,
 }
 
 const SELECT: &str = "
   select id, name, role, external_session_id, launched_head, started_at, stopped_at,
-         context, context_max, last_growth, kicked_at
+         context, context_max, last_growth, kicked_at, forked_from
   from sessions
 ";
 
@@ -32,13 +33,14 @@ pub fn create(
   role: Role,
   external_session_id: &str,
   launched_head: Option<&str>,
+  forked_from: Option<i64>,
 ) -> Result<Session> {
   let started_at = Utc::now();
   let id = transaction.query_row(
     "
       insert into sessions(
-        name, role, external_session_id, launched_head, started_at, last_growth
-      ) values (?1, ?2, ?3, ?4, ?5, ?5)
+        name, role, external_session_id, launched_head, started_at, last_growth, forked_from
+      ) values (?1, ?2, ?3, ?4, ?5, ?5, ?6)
       returning id
       ",
     params![
@@ -47,6 +49,7 @@ pub fn create(
       external_session_id,
       launched_head,
       started_at.timestamp_millis(),
+      forked_from,
     ],
     |row| row.get(0),
   )?;
@@ -132,6 +135,7 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     context_max: row.get("context_max")?,
     last_growth: row.get("last_growth")?,
     kicked_at: row.get("kicked_at")?,
+    forked_from: row.get("forked_from")?,
   })
 }
 
@@ -151,6 +155,7 @@ fn materialize(row: SessionRow) -> Result<Session> {
     row.context_max,
     time(row.last_growth, "last_growth")?,
     row.kicked_at.map(|at| time(at, "kicked_at")).transpose()?,
+    row.forked_from,
   )
 }
 

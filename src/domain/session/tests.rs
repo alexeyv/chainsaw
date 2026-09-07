@@ -12,6 +12,7 @@ mod role_try_from {
       ("lead", Role::Lead),
       ("implementer", Role::Implementer),
       ("commentator", Role::Commentator),
+      ("seed", Role::Seed),
     ] {
       assert_eq!(Role::try_from(text).unwrap(), role);
       assert_eq!(role.to_string(), text);
