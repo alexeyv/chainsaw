@@ -6,6 +6,11 @@ Agentic software development process, minimizing downtime between coding session
 
 - Conventional commits; subject line at most 72 characters.
 - Never push unless the human explicitly asks to push.
+- The human is a second commentator: they read what lands and steer, and the loop
+  never waits on them. That sets two floors, and tokens buy both. Quality: the
+  code must be good enough that reading it is not a waste of the human's time.
+  Velocity: code must land fast enough that the human keeps watching rather than
+  waiting. Above the floors, faster beats cheaper.
 
 ## Where things are
 
