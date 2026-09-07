@@ -515,14 +515,58 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "commit carries an attribution trailer")
 
-    def test_accept_rejects_a_commit_that_is_not_head(self):
+    def test_accept_passes_a_commit_that_later_tasks_built_on(self):
         task, task_sha = self.prepare_committed_task()
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
         self.assertNotEqual(task_sha, self.head())
 
+        result = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"task {task} accepted: checks passed at {task_sha[:10]}", result.stdout)
+
+    def test_accept_rejects_a_commit_the_history_no_longer_contains(self):
+        task, task_sha = self.prepare_committed_task()
+        self.git("reset", "-q", "--hard", "HEAD~1")
+        self.assertNotEqual(task_sha, self.head())
+
         result = self.cli("accept", str(task))
 
-        self.assert_failure(result, "commit is not HEAD")
+        self.assert_failure(
+            result, "commit is not on the run's history (not an ancestor of HEAD)",
+        )
+
+    def committed_through_the_daemon(self, *, leave_behind=None):
+        """A task whose commit the daemon observed, with the tree as it was then."""
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        sha = self.commit_file()
+        if leave_behind:
+            (self.run_dir / leave_behind).write_text("left behind\n")
+        self.record_commit("worker", sha)
+        daemon = self.start_daemon()
+        self.wait_for_state(f"{task} committed_unverified")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        return task, sha
+
+    def test_accept_judges_the_tree_as_it_was_when_the_commit_landed(self):
+        task, _ = self.committed_through_the_daemon(leave_behind="forgotten.txt")
+        (self.run_dir / "forgotten.txt").unlink()
+        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+
+        result = self.cli("accept", str(task))
+
+        self.assert_failure(result, "tree was dirty when the commit landed: ?? forgotten.txt")
+
+    def test_accept_ignores_the_next_implementers_edits(self):
+        task, sha = self.committed_through_the_daemon()
+        (self.run_dir / "next-task.txt").write_text("in flight\n")
+
+        result = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"task {task} accepted: checks passed at {sha[:10]}", result.stdout)
 
     def test_accept_retries_a_commit_marker_after_clean_head_advance(self):
         task = self.new_task()

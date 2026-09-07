@@ -1187,6 +1187,7 @@ fn cmd_task_record_commit(
   }
   task::record_commit(&transaction, task_id, sha, Some(reason))?;
   transaction.commit()?;
+  record_tree_state(store, task_id)?;
   store.event("forced-commit", &format!("task {task_id} {sha}: {reason}"))?;
   println!("task {task_id} commit recorded by force: {sha}");
   Ok(())
@@ -1302,16 +1303,34 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     } else if has_attribution_trailer(&show_text) {
       problems.push("commit carries an attribution trailer".to_owned());
     }
-    let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+    // Later tasks stack on the commit the moment they are dispatched; what
+    // matters is that the run's history still contains it.
     let full_sha = show_text.lines().next().unwrap_or_default();
-    if show.status.success() && !head.starts_with(full_sha) {
-      problems.push("commit is not HEAD".to_owned());
+    if show.status.success()
+      && !git(store, &["merge-base", "--is-ancestor", full_sha, "HEAD"])?
+        .status
+        .success()
+    {
+      problems.push("commit is not on the run's history (not an ancestor of HEAD)".to_owned());
     }
   } else {
     problems.push("no commit found in the implementer's log".to_owned());
   }
-  if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
-    problems.push("tree is dirty".to_owned());
+  // Whether the implementer left the tree clean is a fact from the moment its
+  // commit landed, recorded then; the tree now belongs to whoever is in flight.
+  match tree_state_at_commit(store, task_id)? {
+    Some(dirty) if !dirty.is_empty() => {
+      problems.push(format!(
+        "tree was dirty when the commit landed: {}",
+        dirty.lines().map(str::trim).collect::<Vec<_>>().join(", ")
+      ));
+    }
+    Some(_) => {}
+    None => {
+      if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
+        problems.push("tree is dirty".to_owned());
+      }
+    }
   }
   // The implementer runs the quality gate before it commits; that is its
   // contract, and re-deriving it from the session log only costs wall time.
@@ -1331,6 +1350,31 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     println!(" - {problem}");
   }
   Err(anyhow!(""))
+}
+
+/// Record what the tree looked like the moment a task's commit was observed:
+/// empty when the implementer left it clean, otherwise `git status --porcelain`.
+fn record_tree_state(store: &Store, task_id: i64) -> Result<()> {
+  let dirty = git_stdout(store, &["status", "--porcelain"])?;
+  store.db.execute(
+    "insert into commit_trees(task_id, dirty) values(?1, ?2)
+     on conflict(task_id) do update set dirty=excluded.dirty",
+    params![task_id, dirty],
+  )?;
+  Ok(())
+}
+
+fn tree_state_at_commit(store: &Store, task_id: i64) -> Result<Option<String>> {
+  Ok(
+    store
+      .db
+      .query_row(
+        "select dirty from commit_trees where task_id=?",
+        [task_id],
+        |row| row.get(0),
+      )
+      .optional()?,
+  )
 }
 
 fn head_advanced_cleanly(store: &Store, base_head: Option<&str>) -> Result<bool> {
@@ -2121,6 +2165,7 @@ fn observe_implementer(
     let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
     transaction.commit()?;
+    record_tree_state(store, task.id())?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else {
     kick_if_stalled(store, runtime, session, quiet)?;

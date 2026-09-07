@@ -144,10 +144,13 @@ working on, and dispatch the next task as quickly as possible. Then go back to y
 **accepted** — terminal state, successful ending.
 Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
 Trigger the transition thus: `$SUP accept <task-id>`
-This checks the commit is in git, carries no attribution trailer, is HEAD, and left the
-tree clean. It does not re-derive whether the quality gate ran — the implementer's
-contract is to run it before it commits, and proving that again from the session log
-only costs wall time.
+This checks the commit is in git, carries no attribution trailer, is still on the run's
+history (an ancestor of HEAD; later tasks stacking on it are the normal case), and
+that the implementer left the tree clean, judged as the tree was when the commit was
+observed, not as the next implementer has it now. So judge whenever you have read the
+commentary; nothing about the tasks dispatched since can fail the check. It does not
+re-derive whether the quality gate ran — the implementer's contract is to run it before
+it commits, and proving that again from the session log only costs wall time.
 If you eventually decide to accept the task bypassing validations:
 `$SUP accept <task-id> --force --reason "..."`
 A reason is required with `--force`, and only meaningful with it.
