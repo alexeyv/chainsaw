@@ -607,6 +607,24 @@ class SessionContinuationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "an implementer is already in flight (worker is in flight on task 1)")
 
+    def test_the_last_task_is_the_most_recently_moved_not_the_highest_id(self):
+        first = self.new_task(text="First.")
+        second = self.new_task(text="Second.", files="second.txt")
+        third = self.new_task(text="Third.", files="third.txt")
+        self.launch()
+        self.assert_success(self.dispatch(second))
+        self.observe_in_flight(second)
+        sha = self.commit_file("second.txt", "second\n", "feat: second")
+        self.record_commit("worker", sha)
+        self.assert_success(self.cli("task", "record-commit", str(second), sha, "--force",
+                                     "--reason", "fixture"))
+        self.assert_success(self.dispatch(first))
+        self.assert_success(self.cli("abort", str(first), "--reason", "gave up"))
+
+        result = self.dispatch(third)
+
+        self.assert_failure(result, f"already took task {first} (aborted)")
+
     def test_an_aborted_session_cannot_take_another_task(self):
         first = self.new_task()
         self.launch()
@@ -1524,6 +1542,7 @@ class SeedAndForkContractTests(SupervisorContractCase):
         self.record_commit("worker", own)
         self.assert_success(self.cli("task", "record-commit", str(first), own, "--force",
                                      "--reason", "fixture"))
+        self.append_usage("worker", input_tokens=500, cache_read=75_000)
         later = self.commit_file("later.txt", "later\n", "feat: landed from elsewhere")
         second = self.new_task(text="Second forked task.", files="second.txt")
 
@@ -1531,6 +1550,8 @@ class SeedAndForkContractTests(SupervisorContractCase):
         prompt = self.prompts_to("worker")[-1]
 
         self.assertIn("(continuing; estimated starting context", result.stdout)
+        self.assertNotIn("prepare a replacement seed", result.stderr,
+                         "a continuation's size is its own, not the seed's")
         self.assertIn(f"after your last commit at {own[:10]}", prompt)
         self.assertIn("feat: landed from elsewhere", prompt)
         self.assertNotIn("feat: first forked task", prompt)

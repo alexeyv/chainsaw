@@ -365,12 +365,14 @@ fn git_stdout(store: &Store, args: &[&str]) -> Result<String> {
   )
 }
 
+/// The task this session most recently moved: by the id of its latest event, not
+/// by task id, since a fix task drafted later can be dispatched before an older one.
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
   Ok(
     task_snapshots_for_session(store, session_id)?
       .into_iter()
-      .rev()
-      .find(|task| task.state() != TaskState::Drafted),
+      .filter(|task| task.state() != TaskState::Drafted)
+      .max_by_key(|task| task.events().last().map(TaskEvent::id)),
   )
 }
 
@@ -824,7 +826,9 @@ fn cmd_dispatch(
   );
   let starting_context = (session.is_fork() || continuing.is_some())
     .then(|| estimate_fork_starting_context(store, &session, &prompt));
+  // A continuing session's size is its own; the seed budget concerns fresh forks.
   if let Some(estimate) = starting_context
+    && continuing.is_none()
     && estimate > FORK_START_BUDGET_TOKENS
   {
     let detail = format!(

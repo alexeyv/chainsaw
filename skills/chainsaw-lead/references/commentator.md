@@ -33,7 +33,11 @@ Discover the spec, the decision records, and the conventions from the repository
 logs yourself. Keep durable state outside the repo at
 `<session-log-directory>/chainsaw-commentator-state.md` — conventions seen, open
 finding numbers, last reviewed commit — because your pane may be compacted without warning and
-your files must never dirty the implementers' tree. On every start, read that state and
+your files must never dirty the implementers' tree. The same goes for any checkout you
+make to verify a commit: `git worktree add`, `git archive`, and every scratch file go
+under your own scratchpad or a temporary directory, never inside the run repository. A
+worktree created there is an untracked directory that stops the next implementer cold.
+On every start, read that state and
 resume from the logs and git after the last reviewed commit. Resolve the supervisor
 client from this prompt's location:
 
