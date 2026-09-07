@@ -543,22 +543,69 @@ class VerificationContractTests(SupervisorContractCase):
         self.assertIn(f"task {task} accepted: checks passed at {sha[:10]}", result.stdout)
 
 
-class FreshSessionContractTests(SupervisorContractCase):
-    """Every task gets a fresh implementer; the supervisor enforces it at dispatch."""
+class SessionContinuationContractTests(SupervisorContractCase):
+    """An implementer whose task has landed takes the next one while its measured
+    context is under 100k; otherwise the next task needs a fresh session."""
 
     def verified_first_task(self):
-        task, _ = self.prepare_committed_task()
+        task, sha = self.prepare_committed_task()
         self.assert_success(self.cli("accept", str(task)))
-        return task
+        return task, sha
 
-    def test_a_session_that_already_took_a_task_cannot_take_another(self):
+    def test_a_session_whose_task_landed_continues_onto_the_next(self):
         self.verified_first_task()
+        landed = self.commit_file(
+            "between.txt", "landed meanwhile\n",
+            "feat: land between tasks\n\nBody of the intermediate commit.",
+        )
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.assert_success(self.dispatch(second))
+        prompt = self.prompts_to("worker")[-1]
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn(
+            f"task {second} dispatched to worker (continuing; estimated starting context",
+            result.stdout,
+        )
+        self.assertIn("These commits landed after your last commit at", prompt)
+        self.assertIn("feat: land between tasks", prompt)
+        self.assertIn("Body of the intermediate commit.", prompt)
+        self.assertIn("+landed meanwhile", prompt)
+        self.assertNotIn("fixture commit", prompt.split("Second task.")[0])
+        self.assertIn("Second task.", prompt)
+        self.assertIn("changed-file manifest", prompt)
+        self.assertIn(f"{second} dispatched worker", state.stdout)
+        self.assertEqual(landed, self.head())
+
+    def test_a_continuation_omits_history_when_nothing_landed_since_its_commit(self):
+        self.verified_first_task()
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        self.assert_success(self.dispatch(second))
+        prompt = self.prompts_to("worker")[-1]
+
+        self.assertTrue(prompt.startswith("Second task."), prompt[:80])
+
+    def test_a_session_past_the_continuation_limit_cannot_take_another_task(self):
+        self.verified_first_task()
+        self.append_usage("worker", input_tokens=500, cache_read=100_000)
         second = self.new_task(text="Second task.", files="second.txt")
 
         result = self.dispatch(second)
 
-        self.assert_failure(result, "already took task 1")
-        self.assert_failure(result, "every task gets a fresh implementer")
+        self.assert_failure(result, "worker is at 100500 tokens")
+        self.assert_failure(result, "past the 100000 continuation limit; launch a fresh implementer")
+
+    def test_a_session_with_a_task_in_flight_cannot_take_another(self):
+        first = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(first))
+        second = self.new_task(text="Second task.", files="second.txt")
+
+        result = self.dispatch(second)
+
+        self.assert_failure(result, "an implementer is already in flight (worker is in flight on task 1)")
 
     def test_an_aborted_session_cannot_take_another_task(self):
         first = self.new_task()
@@ -569,7 +616,7 @@ class FreshSessionContractTests(SupervisorContractCase):
 
         result = self.dispatch(second)
 
-        self.assert_failure(result, "already took task 1")
+        self.assert_failure(result, "already took task 1 (aborted)")
 
     def test_repeated_implementer_name_creates_a_distinct_session(self):
         first = self.new_task()
@@ -1432,6 +1479,65 @@ class SeedAndForkContractTests(SupervisorContractCase):
             "is a fork of seed seed-1; its transcript begins with a copy of the "
             "seed's); review it from git",
         )
+
+    def test_fork_launch_warns_when_the_seed_is_heavy(self):
+        self.launch_seed()
+        self.append_usage("seed-1", input_tokens=200, cache_read=52_000)
+
+        result = self.assert_success(self.cli("launch", "worker", "--fork-of", "seed-1"))
+
+        self.assertIn(
+            "WARNING: worker forks seed-1 at 52200 tokens, over the 50000 seed budget",
+            result.stderr,
+        )
+        self.assertIn("Prepare a leaner seed from its task map", result.stderr)
+        self.assertIn(("heavy-seed",), self.event_kinds())
+
+    def test_fork_launch_is_quiet_when_the_seed_is_lean(self):
+        self.launch_seed()
+        self.append_usage("seed-1", input_tokens=200, cache_read=30_000)
+
+        result = self.assert_success(self.cli("launch", "worker", "--fork-of", "seed-1"))
+
+        self.assertNotIn("seed budget", result.stderr)
+        self.assertNotIn(("heavy-seed",), self.event_kinds())
+
+    def test_dispatch_estimates_from_the_seed_before_the_fork_has_a_transcript(self):
+        self.launch_seed()
+        self.append_usage("seed-1", input_tokens=500, cache_read=80_000)
+        task = self.new_task(text="A task on a heavy seed.")
+        self.launch_fork()
+        self.session_log("worker").unlink()
+
+        result = self.assert_success(self.dispatch(task))
+
+        self.assertIn("estimated starting context 80", result.stdout)
+        self.assertIn("over the 70000 budget; prepare a replacement seed", result.stderr)
+
+    def test_a_fork_continues_with_the_silent_contract_and_its_own_history(self):
+        self.launch_seed()
+        first = self.new_task(text="First forked task.")
+        self.launch_fork()
+        self.assert_success(self.dispatch(first))
+        self.observe_in_flight(first)
+        own = self.commit_file("first.txt", "first\n", "feat: first forked task")
+        self.record_commit("worker", own)
+        self.assert_success(self.cli("task", "record-commit", str(first), own, "--force",
+                                     "--reason", "fixture"))
+        later = self.commit_file("later.txt", "later\n", "feat: landed from elsewhere")
+        second = self.new_task(text="Second forked task.", files="second.txt")
+
+        result = self.assert_success(self.dispatch(second))
+        prompt = self.prompts_to("worker")[-1]
+
+        self.assertIn("(continuing; estimated starting context", result.stdout)
+        self.assertIn(f"after your last commit at {own[:10]}", prompt)
+        self.assertIn("feat: landed from elsewhere", prompt)
+        self.assertNotIn("feat: first forked task", prompt)
+        self.assertIn("Second forked task.", prompt)
+        self.assertIn("Work silently.", prompt)
+        self.assertNotIn("changed-file manifest", prompt)
+        self.assertEqual(later, self.head())
 
     def test_cold_dispatch_keeps_the_original_contract(self):
         task = self.new_task(text="Cold task.")

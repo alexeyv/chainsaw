@@ -331,16 +331,23 @@ Everything in "Review protocol", "Task lifecycle", and "Stopping" still applies.
 the preparation and the dispatch preamble differ. The run keeps one working directory
 and stays serial: one fork in flight at a time.
 
-### Preparing the seed
+### Planning, then choosing the seed
 
-1. `$SUP launch seed-1 --seed` starts a seed in its own tab: the implementer's model
-   and flags, the role `seed`, and the current HEAD recorded as its baseline. It is
-   never dispatched a task; the supervisor refuses.
+The planner and the seed are different jobs. The planner reads until it understands
+the epic and writes the task map; how much context that takes depends on the
+codebase and the epic, not on you. The seed is what every fork inherits, so it must
+be lean: the spec, a bounded reading, and the map. They are the same session only
+when the planning happened to be cheap.
+
+1. `$SUP launch planner-1 --seed` starts the planner in its own tab: the
+   implementer's model and flags, the role `seed`, and the current HEAD recorded as
+   its baseline. A session with role `seed` is never dispatched a task; the
+   supervisor refuses.
 2. Prompt it to read and decompose, and wait for it to finish
-   (`$SUP prompt seed-1 "..." --wait --timeout 1800`):
+   (`$SUP prompt planner-1 "..." --wait --timeout 1800`):
 
    ```text
-   You are the seed for an epic in this repository. Read the spec at <spec path>.
+   You are the planner for an epic in this repository. Read the spec at <spec path>.
    Read the repository as far as you need to understand how the epic will be built:
    the files it touches, the contracts they satisfy, one worked example of each
    pattern, and the tests new tests will join. Then decompose the epic into an
@@ -349,37 +356,62 @@ and stays serial: one fork in flight at a time.
    dependency, or acceptance criterion a neighbour needs to make that division
    meaningful; not a recipe. Size each task for well under 100 changed lines in
    fewer than five files, and err smaller: every task must be committable on its own
-   with the quality gate green, in a session that starts with your context and must
-   finish under 150k tokens. Write the map, in order, as a JSON array of
-   {"text", "files", "predicted_lines"} objects to <logs-dir>/task-map.json, print
-   it in full, and stop. Do not edit, build, or commit anything: the tree belongs to
-   other sessions. Every fork of this session will implement one task while seeing
-   this whole map, so write each boundary for the neighbours as much as the owner.
+   with the quality gate green, in a session that starts under 70k tokens of
+   inherited context and must finish under 150k. Write the map, in order, as a JSON
+   array of {"text", "files", "predicted_lines"} objects to <logs-dir>/task-map.json.
+   Then write <logs-dir>/seed-reading.md: the shortest reading list (paths, and line
+   ranges where a file is long) that lets an implementer who knows the spec and the
+   map build any task in it, with one line per entry saying why. Print both in full
+   and stop. Do not edit, build, or commit anything: the tree belongs to other
+   sessions. The implementers will each see this whole map, so write each boundary
+   for the neighbours as much as the owner.
    ```
 
-   `<logs-dir>` is `$SUP logs-dir`, outside the tree; the seed must never dirty the
-   run repository. Keep the seed's context well under 70k: that is the budget for a
-   fork's whole starting context, and the history and task come on top of it.
+   `<logs-dir>` is `$SUP logs-dir`, outside the tree; the planner must never dirty
+   the run repository.
 3. Register the map mechanically: `$SUP task import < "$($SUP logs-dir)/task-map.json"`
    prints one task id per line, in map order. The registration metadata (files,
    predicted lines) rides beside the compact prose; the prose is what the fork gets.
+4. Measure the planner: `$SUP context planner-1`. Then choose the seed:
+   - **Under 50k**: the planning was cheap, and the planner is the seed. Fork from
+     `planner-1` below.
+   - **Over 50k**: prepare a separate seed. `$SUP launch seed-1 --seed` starts a
+     fresh session at today's HEAD; prompt it with the spec path, the task map, and
+     the reading list, and tell it to read exactly those, print nothing but "ready",
+     and stop. Fork from `seed-1`. Between 50k and 70k is your call: fork from the
+     planner when its reading is mostly what the tasks need, since a leaner seed
+     rereads the same files; prepare a seed when the planner spent its context
+     finding out what was irrelevant.
+
+   The supervisor warns on stderr, and records the event `heavy-seed`, when a fork
+   is launched from a seed measured over 50k: every fork inherits all of it, and the
+   history and task come on top.
 
 ### The fork loop
 
-1. `$SUP launch implementer-<n> --fork-of seed-1` starts a fresh Claude session that
+1. `$SUP launch implementer-<n> --fork-of <seed>` starts a fresh Claude session that
    resumes the seed's transcript (`--resume <seed> --fork-session`) in its own tab. Its
    recorded baseline is the seed's, not today's HEAD. There is no reading turn:
-   the fork already carries the seed's reading. Every task still gets a fresh fork.
+   the fork already carries the seed's reading.
 2. `$SUP dispatch <task-id> --to implementer-<n>` sends, in order: every commit since
    the seed's baseline, oldest first, with message and diff (nothing when none landed);
    the task text verbatim; and the fork contract below in place of the cold one. It
-   prints an estimated starting context for the fork (the seed's last reported
-   context plus the prompt at four bytes a token; a guess to calibrate against
+   prints an estimated starting context for the fork (the seed's measured context
+   plus the prompt at four bytes a token; a guess to calibrate against
    `$SUP context implementer-<n>` once the fork's first request lands) and warns on
    stderr when that estimate passes 70k.
-3. Dispatch the next task the moment the previous one reaches
-   `committed_unverified`, exactly as in the cold loop. Nothing in the commit's chat
-   output matters: the fork's account is its commit message.
+3. When the task reaches `committed_unverified`, dispatch the next one **to the same
+   implementer** while its measured context is under 100k: it carries the seed's
+   reading plus everything it just built, and a fresh fork would be handed the same
+   commits as history anyway. `dispatch` sends it the commits since its own last
+   commit, oldest first, with message and diff, then the task and the contract, and
+   prints the continuation's estimated context. It refuses while the previous task
+   is still in flight, and refuses past 100k with a message to launch a fresh
+   implementer; a task ends with the tree clean and the session idle, so there is
+   nothing to wait for between tasks. Launch the next fork only when the supervisor
+   refuses, or when the next task is unrelated enough that the implementer's recent
+   work is more distraction than reading. Nothing in the commit's chat output
+   matters: the account is the commit message, for continuations as for first tasks.
 
    ```text
    Work silently. Verify the tree is clean; stop if dirty. Investigate, plan,
@@ -409,10 +441,13 @@ Two triggers, either one sufficient:
   substantially different reading. Your judgment, informed by the task map.
 
 `$SUP launch seed-2 --seed` starts a replacement with today's HEAD as its baseline.
-Prompt it with the spec, the existing task map (from the file or `$SUP state`), and
-which tasks have landed; it reads afresh and does not register tasks again. Fork later
-implementers from `seed-2`. Optionally prepare it while the current fork works; the
-commits that land after its reading reach the next fork as history in the usual way.
+Prompt it with the spec, the existing task map (from the file or `$SUP state`), the
+reading list, and which tasks have landed; it reads afresh and does not register
+tasks again. Fork later implementers from `seed-2`. Optionally prepare it while the
+current implementer works; the commits that land after its reading reach the next
+fork as history in the usual way. An implementer that is still under 100k keeps
+taking tasks regardless: replacing the seed changes where the next fork starts, not
+who takes the next task.
 
 ### Known limits of the prototype
 

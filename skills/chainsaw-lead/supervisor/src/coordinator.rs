@@ -52,6 +52,12 @@ const FORK_CONTRACT: &str = "Work silently. Verify the tree is clean; stop if di
 /// task; an operating choice from the guiding thoughts, not a measured optimum.
 const FORK_START_BUDGET_TOKENS: i64 = 70_000;
 const BYTES_PER_TOKEN_GUESS: usize = 4;
+/// A planner that finished its reading and decomposition under this much context
+/// can be forked from directly; a heavier one should hand its map to a leaner seed.
+const SEED_FORK_TOKENS: i64 = 50_000;
+/// An implementer whose task has landed may take the next one while its measured
+/// context is under this; past it, the next task goes to a fresh session.
+const IMPLEMENTER_CONTINUE_TOKENS: i64 = 100_000;
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
@@ -392,6 +398,14 @@ fn cmd_launch(
           "supervisor: {seed_name} is the {}, not a seed; only seeds are forked",
           seed.role()
         );
+      }
+      let seed_context = context_size(session_log(store, &seed).as_deref()) as i64;
+      if seed_context > SEED_FORK_TOKENS {
+        let detail = format!(
+          "{name} forks {seed_name} at {seed_context} tokens, over the {SEED_FORK_TOKENS} seed budget; every fork inherits that. Prepare a leaner seed from its task map"
+        );
+        eprintln!("WARNING: {detail}");
+        store.event("heavy-seed", &detail)?;
       }
       Some(seed)
     }
@@ -763,18 +777,44 @@ fn cmd_dispatch(
     }
     bail!("supervisor: {implementer} is stopped; launch it again first");
   }
-  if let Some(prior) = last_task_on(store, session.id())? {
-    bail!(
-      "supervisor: {implementer} already took task {} ({}); every task gets a fresh implementer",
-      prior.id(),
-      prior.state()
-    );
-  }
+  // A session continues onto the next task while its last one has landed and
+  // its context leaves room; otherwise the next task needs a fresh session.
+  let prior = last_task_on(store, session.id())?;
+  let measured_context = context_size(session_log(store, &session).as_deref()) as i64;
+  let continuing = match &prior {
+    None => None,
+    Some(prior) => {
+      let landed = matches!(
+        prior.state(),
+        TaskState::CommittedUnverified | TaskState::Accepted
+      );
+      if !landed {
+        bail!(
+          "supervisor: {implementer} already took task {} ({}); it can continue only once that task has committed",
+          prior.id(),
+          prior.state()
+        );
+      }
+      if measured_context >= IMPLEMENTER_CONTINUE_TOKENS {
+        bail!(
+          "supervisor: {implementer} is at {measured_context} tokens, past the {IMPLEMENTER_CONTINUE_TOKENS} continuation limit; launch a fresh implementer",
+        );
+      }
+      prior.commit_sha().map(str::to_owned)
+    }
+  };
 
-  let (preamble, contract) = if session.is_fork() {
-    (history_since_seed(store, &session)?, FORK_CONTRACT)
-  } else {
-    (files_changed_since_launch(store, &session)?, CONTRACT)
+  let (preamble, contract) = match (&continuing, session.is_fork()) {
+    (Some(own_commit), _) => (
+      history_since(store, own_commit, "your last commit")?,
+      if session.is_fork() {
+        FORK_CONTRACT
+      } else {
+        CONTRACT
+      },
+    ),
+    (None, true) => (history_since_seed(store, &session)?, FORK_CONTRACT),
+    (None, false) => (files_changed_since_launch(store, &session)?, CONTRACT),
   };
 
   let prompt = format!(
@@ -782,8 +822,7 @@ fn cmd_dispatch(
     preamble,
     text = task.text().trim_end()
   );
-  let starting_context = session
-    .is_fork()
+  let starting_context = (session.is_fork() || continuing.is_some())
     .then(|| estimate_fork_starting_context(store, &session, &prompt));
   if let Some(estimate) = starting_context
     && estimate > FORK_START_BUDGET_TOKENS
@@ -815,7 +854,12 @@ fn cmd_dispatch(
   transaction.commit()?;
   store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   let estimate = starting_context.map_or_else(String::new, |estimate| {
-    format!(" (fork; estimated starting context {estimate} tokens)")
+    let how = if continuing.is_some() {
+      "continuing"
+    } else {
+      "fork"
+    };
+    format!(" ({how}; estimated starting context {estimate} tokens)")
   });
   println!(
     "task {task_id} dispatched to {implementer}{estimate}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
@@ -830,6 +874,12 @@ fn history_since_seed(store: &Store, session: &Session) -> Result<String> {
   let Some(base) = session.launched_head() else {
     return Ok(String::new());
   };
+  history_since(store, base, "the tree you read")
+}
+
+/// Every commit after `base`, message and diff, oldest first, introduced by what
+/// `base` was to the session. Empty when nothing landed.
+fn history_since(store: &Store, base: &str, what_base_was: &str) -> Result<String> {
   let history = git_stdout(
     store,
     &[
@@ -845,7 +895,7 @@ fn history_since_seed(store: &Store, session: &Session) -> Result<String> {
     return Ok(String::new());
   }
   Ok(format!(
-    "These commits landed after the tree you read at {} (oldest first, messages and diffs); they are the complete account of what moved, and the tree now includes them:\n\n{history}\n\n",
+    "These commits landed after {what_base_was} at {} (oldest first, messages and diffs); they are the complete account of what moved, and the tree now includes them:\n\n{history}\n\n",
     short_sha(base)
   ))
 }
@@ -854,7 +904,15 @@ fn history_since_seed(store: &Store, session: &Session) -> Result<String> {
 /// transcript last reported plus the dispatch prompt at a bytes-to-tokens guess.
 /// A guess to be calibrated against the fork's first actual usage, not a count.
 fn estimate_fork_starting_context(store: &Store, session: &Session, prompt: &str) -> i64 {
-  let inherited = context_size(session_log(store, session).as_deref()) as i64;
+  // A fork's own transcript appears only with its first prompt; until then the
+  // seed's transcript is the reading of what the fork will carry.
+  let mut inherited = context_size(session_log(store, session).as_deref()) as i64;
+  if inherited == 0
+    && let Some(seed_id) = session.forked_from()
+    && let Some(seed) = session_snapshot(store, seed_id).ok().flatten()
+  {
+    inherited = context_size(session_log(store, &seed).as_deref()) as i64;
+  }
   inherited + (prompt.len() / BYTES_PER_TOKEN_GUESS) as i64
 }
 

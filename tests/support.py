@@ -137,6 +137,10 @@ class SupervisorContractCase(unittest.TestCase):
             check=check,
         )
 
+    def event_kinds(self):
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            return database.execute("select kind from events order by rowid").fetchall()
+
     def head(self):
         return self.git("rev-parse", "HEAD").stdout.strip()
 
