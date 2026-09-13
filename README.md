@@ -32,7 +32,7 @@ npx skills add alexeyv/chainsaw
 
 Prepare a spec, preferably with a story breakdown. Say **chainsaw this**. Or start it and feed small intents by hand.
 
-The supervisor starts implementers and the commentator through Herdr. By default that is Claude Code with Opus. Put a `chainsaw.json` in the run directory to pick a CLI and model per role.
+The supervisor starts implementers and the commentator through Herdr. By default that is Claude Code with Opus. Put a `chainsaw.json` in `~/.config/chainsaw/` for your usual CLIs and models; a `chainsaw.json` in the run directory overlays named keys and roles. `CHAINSAW_CONFIG` names a different global file; set it empty to ignore the global file.
 
 ```json
 {

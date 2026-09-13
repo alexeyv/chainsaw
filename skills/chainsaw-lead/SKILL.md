@@ -37,9 +37,11 @@ the commentator's findings — not implementation detail.
 
 ## Agent CLIs
 
-Each role is an interactive Herdr session. `chainsaw.json` in the run directory
-sets CLI and model per role. `cli` is `claude`, `cursor`, or `codex`. `model` is
-that CLI's model id. `args` are extra flags after the supervisor's defaults.
+Each role is an interactive Herdr session. `~/.config/chainsaw/chainsaw.json` is the
+global default. `chainsaw.json` in the run directory overlays named keys and roles.
+`CHAINSAW_CONFIG` names a different global file; empty means no global file. `cli` is
+`claude`, `cursor`, or `codex`. `model` is that CLI's model id. `args` are extra flags
+after the supervisor's defaults.
 
 ```json
 {
