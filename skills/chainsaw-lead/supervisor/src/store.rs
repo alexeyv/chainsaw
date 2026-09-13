@@ -63,7 +63,7 @@ pub struct Store {
 /// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
 /// dots put the database beside no transcript at all, and the commentator's
 /// start message named a directory holding nothing (run of 2026-08-28).
-fn project_directory_name(canonical_run_dir: &Path) -> String {
+pub(crate) fn project_directory_name(canonical_run_dir: &Path) -> String {
   canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
 }
 

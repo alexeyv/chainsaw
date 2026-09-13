@@ -31,3 +31,17 @@ npx skills add alexeyv/chainsaw
 ```
 
 Prepare a spec, preferably with a story breakdown. Say **chainsaw this**. Or start it and feed small intents by hand.
+
+The supervisor starts implementers and the commentator through Herdr. By default that is Claude Code with Opus. Put a `chainsaw.json` in `~/.config/chainsaw/` for your usual CLIs and models; a `chainsaw.json` in the run directory overlays named keys and roles. `CHAINSAW_CONFIG` names a different global file; set it empty to ignore the global file.
+
+```json
+{
+  "agents": {
+    "lead": { "cli": "claude", "model": "opus" },
+    "implementer": { "cli": "cursor", "model": "composer-2.5" },
+    "commentator": { "cli": "claude", "model": "opus" }
+  }
+}
+```
+
+`cli` is `claude`, `cursor`, or `codex`. `model` is whatever that CLI accepts. Extra flags go in `args`. Cursor sessions get `--trust --force` so they do not stop on workspace trust or shell approval. Start the lead yourself with the same CLI as `agents.lead`.

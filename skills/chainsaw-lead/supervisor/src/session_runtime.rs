@@ -12,33 +12,15 @@ use chrono::Utc;
 use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
+use crate::agent::AgentSpec;
 use crate::store;
-
-const IMPLEMENTER_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--disable-slash-commands",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
-
-const COMMENTATOR_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
 
 pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
+
+/// Cursor (and some Herdr kinds) do not report a session id until the first
+/// prompt. A one-line wake mints that id so launch can register the session.
+const SESSION_ID_WAKE: &str = "Ready. Wait for your task; do not edit files.";
 
 #[derive(Clone, Copy, Debug)]
 pub enum SessionKind {
@@ -53,19 +35,13 @@ impl SessionKind {
       Self::Commentator => "commentator",
     }
   }
-
-  fn flags(self) -> &'static [&'static str] {
-    match self {
-      Self::Implementer => IMPLEMENTER_FLAGS,
-      Self::Commentator => COMMENTATOR_FLAGS,
-    }
-  }
 }
 
 pub struct StartSession<'a> {
   pub id: &'a str,
   pub run_dir: &'a Path,
   pub kind: SessionKind,
+  pub agent: &'a AgentSpec,
 }
 
 #[derive(Debug)]
@@ -145,6 +121,28 @@ impl HerdrSessionRuntime {
       .map(str::to_owned)
       .with_context(|| format!("herdr response lacks {pointer}"))
   }
+
+  fn session_id_of(value: &Value) -> Result<String> {
+    Self::json_string(value, "/result/agent/agent_session/value")
+  }
+
+  fn agent_status_of(value: &Value) -> Result<String> {
+    Self::json_string(value, "/result/agent/agent_status")
+      .or_else(|_| Self::json_string(value, "/result/agent/status"))
+  }
+
+  fn poll_session_id(&self, name: &str) -> Result<String> {
+    let mut current = Err(anyhow!("missing session id"));
+    let mut attempt = 0;
+    while current.is_err() && attempt < self.session_id_poll_attempts {
+      thread::sleep(self.session_id_poll_interval);
+      attempt += 1;
+      if let Ok(response) = self.request(&["agent", "get", name]) {
+        current = Self::session_id_of(&response);
+      }
+    }
+    current
+  }
 }
 
 impl SessionRuntime for HerdrSessionRuntime {
@@ -190,10 +188,18 @@ impl SessionRuntime for HerdrSessionRuntime {
       }
     };
 
+    let flags = session.agent.launch_flags(session.kind);
     let mut arguments = vec![
-      "agent", "start", session.id, "--kind", "claude", "--pane", &pane_id, "--",
+      "agent",
+      "start",
+      session.id,
+      "--kind",
+      session.agent.cli().herdr_kind(),
+      "--pane",
+      &pane_id,
+      "--",
     ];
-    arguments.extend_from_slice(session.kind.flags());
+    arguments.extend(flags.iter().map(String::as_str));
     let mut started = None;
     for attempt in 0..5 {
       match self.request(&arguments) {
@@ -207,16 +213,18 @@ impl SessionRuntime for HerdrSessionRuntime {
     }
     let started = started.context("herdr agent did not start")?;
     // Under load `agent start` returns before the agent has reported its
-    // session id; poll `agent get` until it appears rather than failing and
-    // leaving an orphaned session that the supervisor never registered.
-    let mut external_id = Self::json_string(&started, "/result/agent/agent_session/value");
-    let mut attempt = 0;
-    while external_id.is_err() && attempt < self.session_id_poll_attempts {
-      thread::sleep(self.session_id_poll_interval);
-      attempt += 1;
+    // session id. Wait until it is idle, then read it. Cursor often has no id
+    // until the first prompt, so wake it once and poll rather than failing.
+    let mut external_id = Self::session_id_of(&started);
+    if external_id.is_err() {
+      let _ = self.wait(session.id, Duration::from_secs(60));
       if let Ok(response) = self.request(&["agent", "get", session.id]) {
-        external_id = Self::json_string(&response, "/result/agent/agent_session/value");
+        external_id = Self::session_id_of(&response);
       }
+    }
+    if external_id.is_err() {
+      let _ = self.prompt(session.id, SESSION_ID_WAKE);
+      external_id = self.poll_session_id(session.id);
     }
     Ok(StartedSession {
       external_id: external_id.context("herdr agent never reported a session id")?,
@@ -231,8 +239,8 @@ impl SessionRuntime for HerdrSessionRuntime {
       Err(_) => return Ok(None),
     };
     Ok(Some(SessionQuery {
-      external_id: Self::json_string(&response, "/result/agent/agent_session/value")?,
-      status: Self::json_string(&response, "/result/agent/status")?,
+      external_id: Self::session_id_of(&response)?,
+      status: Self::agent_status_of(&response)?,
     }))
   }
 
@@ -514,6 +522,16 @@ impl SessionRuntime for ZeroCostDummy {
         state["drop_prompts"] = json!(drop_prompts - 1);
         return Ok(());
       }
+      if state
+        .get("hold_transcript")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+      {
+        if let Some(session) = Self::object_mut(state, "agents")?.get_mut(session_id) {
+          session["status"] = json!("working");
+        }
+        return Ok(());
+      }
       let session = Self::object_mut(state, "agents")?
         .get(session_id)
         .cloned()
@@ -588,6 +606,7 @@ mod tests {
   use std::sync::atomic::{AtomicU64, Ordering};
 
   use super::*;
+  use crate::agent::AgentSpec;
 
   static NEXT_SHIM: AtomicU64 = AtomicU64::new(0);
   static SHIM: OnceLock<PathBuf> = OnceLock::new();
@@ -622,20 +641,24 @@ case "$1 $2" in
   printf '{"result":{"pane":{"pane_id":"pane-9"}}}\n' ;;
 'agent start')
   case "$3" in
-  late-id|no-id) printf '{"result":{"agent":{"status":"starting"}}}\n' ;;
+  late-id|late-prompt|no-id) printf '{"result":{"agent":{"status":"starting"}}}\n' ;;
   *) printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"idle"}}}\n' ;;
   esac ;;
 'agent get')
   if [ "$3" = missing ]; then printf 'no such agent\n' >&2; exit 1; fi
   if [ "$3" = malformed ]; then printf 'not json\n'; exit 0; fi
   if [ "$3" = no-id ]; then printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0; fi
-  if [ "$3" = late-id ]; then
-    # The name appears once for `tab create --label`, once for `agent start`, and
-    # once per `agent get`; report the id on the third get.
-    if [ "$(grep -c '^late-id$' "$calls")" -lt 5 ]; then
-      printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0
+  if [ "$3" = late-prompt ]; then
+    if grep -qx prompt "$calls"; then
+      printf '{"result":{"agent":{"agent_session":{"value":"abc"},"status":"idle"}}}\n'; exit 0
     fi
+    printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0
+  fi
+  if [ "$3" = late-id ]; then
     printf '{"result":{"agent":{"agent_session":{"value":"abc"},"status":"idle"}}}\n'; exit 0
+  fi
+  if [ "$3" = live-shape ]; then
+    printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"agent_status":"working"}}}\n'; exit 0
   fi
   printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"busy"}}}\n' ;;
 'agent prompt')
@@ -705,17 +728,23 @@ esac
   mod start {
     use super::*;
 
+    fn session<'a>(id: &'a str, kind: SessionKind, agent: &'a AgentSpec) -> StartSession<'a> {
+      StartSession {
+        id,
+        run_dir: Path::new("/tmp/run"),
+        kind,
+        agent,
+      }
+    }
+
     #[test]
     fn should_work() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::claude_opus();
 
       let started = runtime
-        .start(StartSession {
-          id: "worker",
-          run_dir: Path::new("/tmp/run"),
-          kind: SessionKind::Implementer,
-        })
+        .start(session("worker", SessionKind::Implementer, &agent))
         .unwrap();
 
       assert_eq!(started.external_id, "sess-1");
@@ -744,7 +773,58 @@ esac
       );
       assert_eq!(
         calls[1][8..].iter().map(String::as_str).collect::<Vec<_>>(),
-        IMPLEMENTER_FLAGS
+        agent.launch_flags(SessionKind::Implementer)
+      );
+    }
+
+    #[test]
+    fn should_start_cursor_with_the_configured_model() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::new(
+        crate::agent::AgentCli::Cursor,
+        Some("gpt-5".to_owned()),
+        Vec::new(),
+      )
+      .unwrap();
+
+      runtime
+        .start(session("worker", SessionKind::Implementer, &agent))
+        .unwrap();
+
+      let start = &herdr.calls()[1];
+      assert_eq!(
+        start[..8],
+        [
+          "agent", "start", "worker", "--kind", "cursor", "--pane", "pane-7", "--"
+        ]
+      );
+      assert_eq!(
+        start[8..].iter().map(String::as_str).collect::<Vec<_>>(),
+        ["--trust", "--force", "--model", "gpt-5"]
+      );
+    }
+
+    #[test]
+    fn should_start_codex_with_the_configured_model() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::new(
+        crate::agent::AgentCli::Codex,
+        Some("gpt-5.4".to_owned()),
+        vec!["--full-auto".to_owned()],
+      )
+      .unwrap();
+
+      runtime
+        .start(session("worker", SessionKind::Implementer, &agent))
+        .unwrap();
+
+      let start = &herdr.calls()[1];
+      assert_eq!(start[4], "codex");
+      assert_eq!(
+        start[8..].iter().map(String::as_str).collect::<Vec<_>>(),
+        ["--model", "gpt-5.4", "--full-auto"]
       );
     }
 
@@ -752,13 +832,10 @@ esac
     fn should_split_the_current_pane_and_keep_the_ambient_tab_for_a_commentator() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::claude_opus();
 
       let started = runtime
-        .start(StartSession {
-          id: "commentator",
-          run_dir: Path::new("/tmp/run"),
-          kind: SessionKind::Commentator,
-        })
+        .start(session("commentator", SessionKind::Commentator, &agent))
         .unwrap();
 
       assert_eq!(started.pane_id, "pane-9");
@@ -782,25 +859,40 @@ esac
     fn should_poll_agent_get_when_agent_start_reports_no_session_id() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::claude_opus();
 
       let started = runtime
-        .start(StartSession {
-          id: "late-id",
-          run_dir: Path::new("/tmp/run"),
-          kind: SessionKind::Implementer,
-        })
+        .start(session("late-id", SessionKind::Implementer, &agent))
         .unwrap();
 
       assert_eq!(started.external_id, "abc");
       let calls = herdr.calls();
       assert_eq!(calls[1][..3], ["agent", "start", "late-id"]);
-      assert_eq!(
-        calls[2..],
-        [
-          ["agent", "get", "late-id"],
-          ["agent", "get", "late-id"],
-          ["agent", "get", "late-id"]
-        ]
+      assert_eq!(calls[2][..3], ["agent", "wait", "late-id"]);
+      assert_eq!(calls[3], ["agent", "get", "late-id"]);
+      assert!(
+        !calls
+          .iter()
+          .any(|call| call.get(1).map(String::as_str) == Some("prompt"))
+      );
+    }
+
+    #[test]
+    fn should_prompt_when_agent_get_has_no_session_id_until_then() {
+      let herdr = FakeHerdr::new();
+      let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::claude_opus();
+
+      let started = runtime
+        .start(session("late-prompt", SessionKind::Implementer, &agent))
+        .unwrap();
+
+      assert_eq!(started.external_id, "abc");
+      let calls = herdr.calls();
+      assert!(
+        calls
+          .iter()
+          .any(|call| call[..3] == ["agent", "prompt", "late-prompt"])
       );
     }
 
@@ -808,35 +900,34 @@ esac
     fn should_fail_when_agent_get_never_reports_a_session_id() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let agent = AgentSpec::claude_opus();
 
       let error = runtime
-        .start(StartSession {
-          id: "no-id",
-          run_dir: Path::new("/tmp/run"),
-          kind: SessionKind::Implementer,
-        })
+        .start(session("no-id", SessionKind::Implementer, &agent))
         .unwrap_err();
 
       assert_eq!(error.to_string(), "herdr agent never reported a session id");
-      let gets = herdr
-        .calls()
+      let calls = herdr.calls();
+      let gets = calls
         .iter()
         .filter(|call| call[..2] == ["agent", "get"])
         .count();
-      assert_eq!(gets, runtime.session_id_poll_attempts);
+      assert_eq!(gets, runtime.session_id_poll_attempts + 1);
+      assert!(
+        calls
+          .iter()
+          .any(|call| call[..3] == ["agent", "prompt", "no-id"])
+      );
     }
 
     #[test]
     fn should_fail_when_the_supervisor_is_not_inside_a_herdr_pane() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(None, "");
+      let agent = AgentSpec::claude_opus();
 
       let error = runtime
-        .start(StartSession {
-          id: "worker",
-          run_dir: Path::new("/tmp/run"),
-          kind: SessionKind::Implementer,
-        })
+        .start(session("worker", SessionKind::Implementer, &agent))
         .unwrap_err();
 
       assert_eq!(
@@ -875,6 +966,19 @@ esac
         .unwrap();
 
       assert!(session.is_none());
+    }
+
+    #[test]
+    fn should_read_herdr_agent_status_when_status_is_absent() {
+      let herdr = FakeHerdr::new();
+
+      let session = herdr
+        .runtime(Some("workspace-1"), "")
+        .query("live-shape")
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(session.status, "working");
     }
 
     #[test]

@@ -107,6 +107,22 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
             ],
         )
 
+    def test_a_prompt_lands_when_the_agent_is_working_before_the_transcript_grows(self):
+        (self.run_dir / "chainsaw.json").write_text(
+            '{"prompt-landing-seconds": 1}\n'
+        )
+        self.launch()
+        self.update_zero_cost_dummy(hold_transcript=True)
+
+        result = self.assert_success(
+            self.cli("prompt", "worker", "hello from a late transcript")
+        )
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.session_log("worker").exists())
+        self.assertNotIn("prompt-failed worker", state.stdout)
+
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
         (self.run_dir / "chainsaw.json").write_text(
             '{"prompt-landing-seconds": 0}\n'
@@ -597,6 +613,30 @@ class FreshSessionContractTests(SupervisorContractCase):
         result = self.dispatch(second, "replacement")
 
         self.assert_failure(result, "invalid settings in")
+        self.assert_failure(result, 'unknown setting "prompt-landing-secnds"')
+
+    def test_dispatch_reads_global_chainsaw_json_when_the_run_file_is_absent(self):
+        global_path = self.home / ".config/chainsaw/chainsaw.json"
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text('{"prompt-landing-seconds": 0}\n')
+        self.launch()
+        self.update_zero_cost_dummy(drop_prompts=3)
+
+        result = self.cli("prompt", "worker", "lost in transit")
+
+        self.assert_failure(result, "never landed after 3 attempts")
+
+    def test_dispatch_refuses_an_unreadable_global_settings_file(self):
+        self.launch()
+        task = self.new_task()
+        global_path = self.home / ".config/chainsaw/chainsaw.json"
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text('{"prompt-landing-secnds": 1}\n')
+
+        result = self.dispatch(task)
+
+        self.assert_failure(result, "invalid settings in")
+        self.assert_failure(result, str(global_path))
         self.assert_failure(result, 'unknown setting "prompt-landing-secnds"')
 
     def test_a_committed_predecessor_releases_the_next_dispatch(self):

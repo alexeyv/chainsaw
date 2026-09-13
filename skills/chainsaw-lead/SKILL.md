@@ -13,8 +13,9 @@ the commentator's findings — not implementation detail.
 
 1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`); if not, stop and say so.
 2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
-   ever started, so its session-log directory (`~/.claude/projects/<munged-path>/`)
-   holds exactly this run. If logs already exist there, tell the human and stop.
+   ever started, so this run owns the session logs. Claude Code: `~/.claude/projects/<munged-path>/`.
+   Cursor: `~/.cursor/projects/<munged-path>/agent-transcripts/`. Codex: a new session under
+   `~/.codex/sessions/`. If logs already exist there, tell the human and stop.
 3. Resolve the role path and the supervisor client from this file's own location, not
    the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
    and `SUPERVISOR=$(realpath <dir of this SKILL.md>/bin/chainsaw)`. The wrapper builds
@@ -24,14 +25,40 @@ the commentator's findings — not implementation detail.
    First name your pane and tab: `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`.
    Then start the supervisor once, as a background process:
    `$SUP daemon --lead lead --session-id <your-session-id> &`. Your
-   session id is the UUID that names your scratchpad directory (the path ends in
-   `<uuid>/scratchpad`); it also names your transcript, which the daemon reads.
+   session id is the id Herdr reports for this pane (`herdr agent get` /
+   `agent_session`); it also names your transcript, which the daemon reads.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
    from yours.
 
-5. The supervisor launches implementers and the commentator with `--model opus
-   --effort high` (hardcoded in the supervisor's `session_runtime.rs`); the lead runs
-   on whatever model the human started this session with.
+5. The supervisor launches implementers and the commentator with the CLI and model in
+   `chainsaw.json` (see **Agent CLIs** below). Missing files: Claude Code, `--model opus
+   --effort high`. The lead runs on whatever CLI and model the human started this
+   session with; set `agents.lead` so the supervisor can find the lead transcript.
+
+## Agent CLIs
+
+Each role is an interactive Herdr session. `~/.config/chainsaw/chainsaw.json` is the
+global default. `chainsaw.json` in the run directory overlays named keys and roles.
+`CHAINSAW_CONFIG` names a different global file; empty means no global file. `cli` is
+`claude`, `cursor`, or `codex`. `model` is that CLI's model id. `args` are extra flags
+after the supervisor's defaults.
+
+```json
+{
+  "agents": {
+    "lead": { "cli": "claude", "model": "opus" },
+    "implementer": { "cli": "cursor", "model": "composer-2.5" },
+    "commentator": { "cli": "claude", "model": "opus" }
+  }
+}
+```
+
+Start the lead yourself with the same CLI named in `agents.lead`. Implementers and
+the commentator are started by the supervisor (`herdr agent start --kind <cli>`).
+Cursor sessions get `--trust --force`. If Herdr has no session id after start, the
+supervisor sends a one-line ready prompt so it can register the session; that is
+not a task. Cursor transcripts usually have no token counts, so the 250k lead-stop
+WARNING will not fire for a Cursor lead.
 
 ## Basics
 Every role is a visible interactive session in its own pane or tab, addressable by
@@ -318,7 +345,7 @@ Serial wherever it touches the repo: one implementer in flight, one frozen task.
 
 ## Stopping
 
-When the user says to stop OR a supervisor command's output warns that your context is past 250k, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Then, in order:
+When the user says to stop OR a supervisor command's output warns that your context is past 250k, ask the user once — "Are you sure you want to end the run?" — give them a yes/no choice and take the answer; never infer it. Cursor transcripts usually have no token counts, so that WARNING will not fire for a Cursor lead: `$SUP state` shows context UNAVAILABLE. Then end the run when the user says to, or when you can no longer follow this protocol. Then, in order:
 
 1. Let the in-flight implementer finish.
 2. Wait for the commentator's findings on that commit.
