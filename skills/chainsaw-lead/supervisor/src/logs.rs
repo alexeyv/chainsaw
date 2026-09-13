@@ -60,6 +60,16 @@ fn usage_of_line(line: &str) -> Option<u64> {
   {
     return None;
   }
+  if let Some(usage) = claude_usage(&entry) {
+    return Some(usage);
+  }
+  if let Some(usage) = codex_usage(&entry) {
+    return Some(usage);
+  }
+  None
+}
+
+fn claude_usage(entry: &Value) -> Option<u64> {
   let kind = entry.get("type")?.as_str()?;
   if kind != "assistant" && kind != "tool_result" {
     return None;
@@ -69,6 +79,26 @@ fn usage_of_line(line: &str) -> Option<u64> {
     .or_else(|| entry.get("usage"))?;
   Some(
     token_field(usage, "input_tokens")
+      + token_field(usage, "cache_read_input_tokens")
+      + token_field(usage, "cache_creation_input_tokens"),
+  )
+}
+
+fn codex_usage(entry: &Value) -> Option<u64> {
+  let kind = entry.get("type")?.as_str()?;
+  let usage = if kind == "token_usage_record" {
+    entry.pointer("/payload/usage")?
+  } else if kind == "event_msg"
+    && entry.pointer("/payload/type").and_then(Value::as_str) == Some("token_count")
+  {
+    entry.pointer("/payload/info/total_token_usage")?
+  } else {
+    return None;
+  };
+  Some(
+    token_field(usage, "input_tokens")
+      + token_field(usage, "cached_input_tokens")
+      + token_field(usage, "cache_write_input_tokens")
       + token_field(usage, "cache_read_input_tokens")
       + token_field(usage, "cache_creation_input_tokens"),
   )
@@ -136,9 +166,7 @@ pub enum PromptLanding {
 pub fn prompt_landed(path: &Path, offset: u64, needle: &str) -> Option<PromptLanding> {
   let mut queued = false;
   for entry in entries(path, offset) {
-    if entry.get("type").and_then(Value::as_str) == Some("user")
-      && text_of(entry.pointer("/message/content").unwrap_or(&Value::Null)).contains(needle)
-    {
+    if is_user_message(&entry) && user_visible_text(&entry).contains(needle) {
       return Some(PromptLanding::Landed);
     }
     if entry.get("type").and_then(Value::as_str) == Some("queue-operation")
@@ -154,21 +182,30 @@ pub fn prompt_landed(path: &Path, offset: u64, needle: &str) -> Option<PromptLan
   queued.then_some(PromptLanding::Queued)
 }
 
+/// Transcript landing that survives a rewritten jsonl and a retry whose
+/// offset is already past the first write.
+pub fn prompt_seen(path: Option<&Path>, offset: u64, needle: &str) -> Option<PromptLanding> {
+  let path = path?;
+  let offset = match path.metadata() {
+    Ok(metadata) if metadata.len() < offset => 0,
+    _ => offset,
+  };
+  prompt_landed(path, offset, needle).or_else(|| {
+    if offset > 0 {
+      prompt_landed(path, 0, needle)
+    } else {
+      None
+    }
+  })
+}
+
 pub fn latest_assistant_text(path: &Path) -> Option<String> {
   let mut last = None;
   for entry in entries(path, 0) {
-    if entry.get("type").and_then(Value::as_str) != Some("assistant") {
-      continue;
-    }
-    if let Some(content) = entry.pointer("/message/content").and_then(Value::as_array) {
-      for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("text")
-          && let Some(text) = block.get("text").and_then(Value::as_str)
-          && !text.trim().is_empty()
-        {
-          last = Some(text.to_owned());
-        }
-      }
+    if let Some(text) = assistant_visible_text(&entry)
+      && !text.trim().is_empty()
+    {
+      last = Some(text);
     }
   }
   last
@@ -278,6 +315,50 @@ fn text_of(content: &Value) -> String {
   }
 }
 
+fn is_user_message(entry: &Value) -> bool {
+  entry.get("type").and_then(Value::as_str) == Some("user")
+    || entry.get("role").and_then(Value::as_str) == Some("user")
+    || (entry.get("type").and_then(Value::as_str) == Some("response_item")
+      && entry.pointer("/payload/role").and_then(Value::as_str) == Some("user"))
+}
+
+fn user_visible_text(entry: &Value) -> String {
+  if let Some(content) = entry.pointer("/message/content") {
+    return text_of(content);
+  }
+  if let Some(content) = entry.pointer("/payload/content") {
+    return text_of(content);
+  }
+  String::new()
+}
+
+fn assistant_visible_text(entry: &Value) -> Option<String> {
+  if (entry.get("type").and_then(Value::as_str) == Some("assistant")
+    || entry.get("role").and_then(Value::as_str) == Some("assistant"))
+    && let Some(content) = entry.pointer("/message/content").and_then(Value::as_array)
+  {
+    let text: String = content
+      .iter()
+      .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+      .filter_map(|block| block.get("text").and_then(Value::as_str))
+      .collect::<Vec<_>>()
+      .join("");
+    if !text.is_empty() {
+      return Some(text);
+    }
+  }
+  if entry.get("type").and_then(Value::as_str) == Some("response_item")
+    && entry.pointer("/payload/role").and_then(Value::as_str) == Some("assistant")
+  {
+    let content = entry.pointer("/payload/content")?;
+    let text = text_of(content);
+    if !text.trim().is_empty() {
+      return Some(text);
+    }
+  }
+  None
+}
+
 #[cfg(test)]
 mod tests {
   use std::fs;
@@ -285,7 +366,9 @@ mod tests {
 
   use std::collections::BTreeMap;
 
-  use super::{PromptLanding, format_growth, prompt_landed, transcript_growth, usage_of_line};
+  use super::{
+    PromptLanding, format_growth, prompt_landed, prompt_seen, transcript_growth, usage_of_line,
+  };
 
   fn sizes(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
     pairs
@@ -398,12 +481,98 @@ mod tests {
 
       assert_eq!(landing_in(transcript, "deliver this"), None);
     }
+
+    #[test]
+    fn should_land_a_cursor_user_message() {
+      let transcript =
+        r#"{"role":"user","message":{"content":[{"type":"text","text":"deliver this prompt"}]}}"#;
+
+      assert_eq!(
+        landing_in(transcript, "deliver this"),
+        Some(PromptLanding::Landed)
+      );
+    }
+
+    #[test]
+    fn should_land_a_cursor_user_query_wrapper() {
+      let transcript = concat!(
+        r#"{"role":"user","message":{"content":[{"type":"text","text":""#,
+        r#"<timestamp>Thursday, Sep 10, 2026, 11:30 PM (UTC-4)</timestamp>\n"#,
+        r#"<user_query>\nImplement SPEC.md in this repo.\n</user_query>"#,
+        r#""}]}}"#
+      );
+
+      assert_eq!(
+        landing_in(transcript, "Implement SPEC.md in this repo."),
+        Some(PromptLanding::Landed)
+      );
+    }
+
+    #[test]
+    fn should_land_a_codex_user_message() {
+      let transcript = r#"{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"deliver this prompt"}]}}"#;
+
+      assert_eq!(
+        landing_in(transcript, "deliver this"),
+        Some(PromptLanding::Landed)
+      );
+    }
+  }
+
+  mod prompt_seen {
+    use super::*;
+
+    fn seen(transcript: &str, offset: u64, needle: &str) -> Option<PromptLanding> {
+      static NEXT: AtomicU64 = AtomicU64::new(0);
+      let path = std::env::temp_dir().join(format!(
+        "chainsaw-prompt-seen-{}-{}.jsonl",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+      ));
+      fs::write(&path, transcript).unwrap();
+      let landing = prompt_seen(Some(&path), offset, needle);
+      let _ = fs::remove_file(&path);
+      landing
+    }
+
+    #[test]
+    fn should_work() {
+      let transcript = r#"{"type":"user","message":{"content":"deliver this prompt"}}"#;
+
+      assert_eq!(
+        seen(transcript, 0, "deliver this"),
+        Some(PromptLanding::Landed)
+      );
+    }
+
+    #[test]
+    fn should_land_when_the_needle_is_before_the_offset() {
+      let prefix = r#"{"type":"user","message":{"content":"deliver this prompt"}}"#;
+      let transcript =
+        format!("{prefix}\n{{\"type\":\"assistant\",\"message\":{{\"content\":\"ok\"}}}}\n");
+
+      assert_eq!(
+        seen(&transcript, prefix.len() as u64 + 1, "deliver this"),
+        Some(PromptLanding::Landed)
+      );
+    }
+
+    #[test]
+    fn should_report_nothing_when_the_path_is_missing() {
+      assert_eq!(prompt_seen(None, 0, "deliver this"), None);
+    }
   }
 
   #[test]
   fn sums_context_tokens() {
     let line = r#"{"type":"assistant","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":5}}}"#;
     assert_eq!(usage_of_line(line), Some(10));
+  }
+
+  #[test]
+  fn sums_codex_context_tokens() {
+    let line = r#"{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"cached_input_tokens":4,"cache_write_input_tokens":1}}}"#;
+    assert_eq!(usage_of_line(line), Some(15));
   }
 
   #[test]

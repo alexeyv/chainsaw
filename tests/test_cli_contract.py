@@ -107,6 +107,22 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
             ],
         )
 
+    def test_a_prompt_lands_when_the_agent_is_working_before_the_transcript_grows(self):
+        (self.run_dir / "chainsaw.json").write_text(
+            '{"prompt-landing-seconds": 1}\n'
+        )
+        self.launch()
+        self.update_zero_cost_dummy(hold_transcript=True)
+
+        result = self.assert_success(
+            self.cli("prompt", "worker", "hello from a late transcript")
+        )
+        state = self.assert_success(self.cli("state"))
+
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.session_log("worker").exists())
+        self.assertNotIn("prompt-failed worker", state.stdout)
+
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
         (self.run_dir / "chainsaw.json").write_text(
             '{"prompt-landing-seconds": 0}\n'

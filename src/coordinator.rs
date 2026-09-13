@@ -16,11 +16,12 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
+use crate::agent::{AgentCli, find_session_transcript};
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
 use crate::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
-  format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
+  format_growth, latest_assistant_text, prompt_seen, transcript_growth, transcript_sizes,
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
@@ -268,10 +269,17 @@ struct LaunchOptions {
   kind: SessionKind,
 }
 
-/// The session's transcript: beside the database when Claude Code agrees about
-/// the project directory, otherwise wherever it was found under the projects
-/// directory. None until the transcript exists.
+/// The session's transcript: the CLI's usual path, then beside the database
+/// when Claude Code agrees about the project directory, otherwise wherever
+/// a matching jsonl was found. None until the transcript exists.
 fn session_log(store: &Store, session: &Session) -> Option<PathBuf> {
+  let cli = Settings::load(&store.run_dir)
+    .ok()
+    .map(|settings| settings.agent(session.role()).cli())
+    .unwrap_or(AgentCli::Claude);
+  if let Some(path) = find_session_transcript(cli, &store.run_dir, session.external_session_id()) {
+    return Some(path);
+  }
   let expected = store
     .logs_dir
     .join(format!("{}.jsonl", session.external_session_id()));
@@ -365,10 +373,12 @@ fn cmd_launch(
   name: &str,
   options: LaunchOptions,
 ) -> Result<()> {
+  let settings = Settings::load(&store.run_dir)?;
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
     kind: options.kind,
+    agent: settings.agent(options.role),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
@@ -414,11 +424,17 @@ fn cmd_prompt(
   )?;
   let prompt_id = store.db.last_insert_rowid();
   let prompt_landing_millis = Settings::load(&store.run_dir)?.prompt_landing_seconds() * 1000;
+  let mut prior_idle = true;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
     // queued; the landing check below then reads what actually arrived.
-    let _ = runtime.query(name);
+    let prior = runtime.query(name).ok().flatten();
+    if attempt == 1 {
+      prior_idle = prior
+        .as_ref()
+        .is_none_or(|session| agent_is_idle(&session.status));
+    }
     let path_before = session_log_named(store, name)?;
     let mut offset = file_size(path_before.as_deref());
     store.db.execute(
@@ -428,14 +444,23 @@ fn cmd_prompt(
     let _ = runtime.prompt(name, text);
     let deadline = now() + prompt_landing_millis;
     while now() < deadline {
-      let _ = runtime.query(name);
+      let status = runtime
+        .query(name)
+        .ok()
+        .flatten()
+        .map(|session| session.status);
       let path = session_log_named(store, name)?;
       if path != path_before {
         offset = 0;
       }
-      if let Some(path) = path
-        && let Some(landing) = prompt_landed(&path, offset, &needle)
-      {
+      let landing = prompt_seen(path.as_deref(), offset, &needle).or_else(|| {
+        if prior_idle && agent_is_active(status.as_deref()) {
+          Some(PromptLanding::Landed)
+        } else {
+          None
+        }
+      });
+      if let Some(landing) = landing {
         store.db.execute(
           "update prompts set landed_at=? where id=?",
           params![now(), prompt_id],
@@ -446,9 +471,13 @@ fn cmd_prompt(
         FileExt::unlock(&lock)?;
         if wait {
           let _ = runtime.wait(name, Duration::from_secs(timeout));
+          let log = session_log_named(store, name)?.or(path);
           println!(
             "{}",
-            latest_assistant_text(&path).unwrap_or_else(|| "(no assistant text)".to_owned())
+            log
+              .as_deref()
+              .and_then(latest_assistant_text)
+              .unwrap_or_else(|| "(no assistant text)".to_owned())
           );
         }
         return Ok(());
@@ -479,15 +508,28 @@ fn cmd_start_commentator(
   )?;
   store.set_cfg("commentator", &name)?;
   let role_prompt = absolute_path(role_prompt)?;
+  let settings = Settings::load(&store.run_dir)?;
+  let implementer = settings.agent(Role::Implementer);
+  let commentator = settings.agent(Role::Commentator);
   cmd_prompt(
     store,
     runtime,
     &name,
     &format!(
-      "Read and follow this role prompt entirely: {}\nSession-log directory: {}\nRun directory: {}",
+      "Read and follow this role prompt entirely: {}\nSession-log directory: {}\nRun directory: {}\nImplementer CLI: {}{}\nCommentator CLI: {}{}",
       role_prompt.display(),
       store.logs_dir.display(),
-      store.run_dir.display()
+      store.run_dir.display(),
+      implementer.cli(),
+      implementer
+        .model()
+        .map(|model| format!(" model {model}"))
+        .unwrap_or_default(),
+      commentator.cli(),
+      commentator
+        .model()
+        .map(|model| format!(" model {model}"))
+        .unwrap_or_default(),
     ),
     false,
     300,
@@ -1409,8 +1451,8 @@ fn print_time_summary(store: &Store) -> Result<()> {
   Ok(())
 }
 
-/// Runs until killed; the commentator drives it under Claude Code's Monitor
-/// tool, and each printed line is one wake. A wake is a catch-up on what the
+/// Runs until killed; the commentator drives it under a Monitor-style wait,
+/// and each printed line is one wake. A wake is a catch-up on what the
 /// implementer did since the commentator's last look, not a review trigger;
 /// reviews are triggered by commits.
 ///
@@ -1434,13 +1476,30 @@ fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
 }
 
 fn implementer_transcript_sizes(store: &Store) -> Result<BTreeMap<String, u64>> {
-  let excluded: HashSet<String> = session_snapshots(store)?
-    .into_iter()
+  let sessions = session_snapshots(store)?;
+  let excluded: HashSet<String> = sessions
+    .iter()
     .filter(|session| session.role() != Role::Implementer)
     .map(|session| session.external_session_id().to_owned())
     .collect();
   let mut sizes = transcript_sizes(&store.logs_dir);
   sizes.retain(|name, _| !excluded.contains(name));
+  let cli = Settings::load(&store.run_dir)?
+    .agent(Role::Implementer)
+    .cli();
+  if cli != AgentCli::Claude {
+    for session in sessions
+      .iter()
+      .filter(|session| session.role() == Role::Implementer)
+    {
+      if let Some(path) = session_log(store, session) {
+        sizes.insert(
+          session.external_session_id().to_owned(),
+          file_size(Some(&path)),
+        );
+      }
+    }
+  }
   Ok(sizes)
 }
 
@@ -1592,6 +1651,14 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
   Ok(())
 }
 
+fn agent_is_idle(status: &str) -> bool {
+  matches!(status, "idle" | "done")
+}
+
+fn agent_is_active(status: Option<&str>) -> bool {
+  matches!(status, Some("working") | Some("busy") | Some("blocked"))
+}
+
 /// Nudge a session that has gone quiet while its runtime reports it idle. The
 /// kick is latched on the session so it happens once per stall.
 fn kick_if_stalled(
@@ -1608,7 +1675,7 @@ fn kick_if_stalled(
       .flatten()
       .map(|session| session.status)
       .as_deref()
-      .is_some_and(|status| matches!(status, "idle" | "done"))
+      .is_some_and(agent_is_idle)
     && daemon_prompt(store, runtime, session.name(), "continue")
   {
     store.event("kick", session.name())?;

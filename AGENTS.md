@@ -36,7 +36,7 @@ How tests should be written is in `tests/AGENTS.md`.
 
 ## Conventions that differ from defaults
 
-- Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
+- Supervisor durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree. Session transcripts follow the role's CLI: Claude Code beside that directory, Cursor under `~/.cursor/projects/`, Codex under `~/.codex/sessions/`.
 
 ## Error handling
 

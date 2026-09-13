@@ -12,9 +12,12 @@ Your primary material is the implementer transcripts: `<session-log-directory>/<
 one per implementer, growing while it works. Open them from your first turn — before any
 commit lands — and keep reading them as tasks run; a review that looks only at git misses
 the controls the implementer claimed, the gate it actually ran, and the traps it hit. If
-the named directory holds no transcripts, look for the sibling under `~/.claude/projects/`
-whose name is the run directory with every `/` and `.` turned into `-`, say so in an
-observation, and use that.
+the named directory holds no transcripts, look where that implementer's CLI writes them:
+Claude Code under `~/.claude/projects/` (run directory with every `/` and `.` turned into
+`-`), Cursor under `~/.cursor/projects/<run-dir-with-slashes-as-dashes>/agent-transcripts/`,
+Codex under `~/.codex/sessions/` as `rollout-*-<session-id>.jsonl`. Say so in an
+observation, and use that. A first user line of "Ready. Wait for your task; do not edit
+files." is the supervisor minting a session id, not a confused implementer.
 
 Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
 running for the whole run. Each line it prints names transcripts that grew since its
@@ -22,7 +25,8 @@ last check; that wake is a catch-up on what the implementer did since your last 
 not a review trigger. Keep a byte offset per transcript in your state and read from
 there on each wake.
 
-The lead's start message names the session-log directory and the run directory.
+The lead's start message names the session-log directory, the run directory, and
+the implementer CLI.
 Discover the spec, the decision records, and the conventions from the repository and the
 logs yourself. Keep durable state outside the repo at
 `<session-log-directory>/chainsaw-commentator-state.md` — conventions seen, open

@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod cli;
 pub mod coordinator;
 pub mod domain;

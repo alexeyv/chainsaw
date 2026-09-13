@@ -1,7 +1,9 @@
 use super::*;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::domain::Role;
 
 struct ScratchDir(PathBuf);
 
@@ -76,6 +78,36 @@ mod parse {
     let settings = Settings::parse(r#"{"prompt-landing-seconds": -1}"#).unwrap();
 
     assert_eq!(settings.prompt_landing_seconds(), -1);
+  }
+
+  #[test]
+  fn should_parse_per_role_agent_clis() {
+    let settings = Settings::parse(
+      r#"{
+        "agents": {
+          "lead": {"cli": "cursor", "model": "composer-2"},
+          "implementer": {"cli": "codex", "model": "gpt-5.4", "args": ["--full-auto"]},
+          "commentator": {"cli": "claude", "model": "sonnet"}
+        }
+      }"#,
+    )
+    .unwrap();
+
+    assert_eq!(settings.agent(Role::Lead).cli().as_str(), "cursor");
+    assert_eq!(settings.agent(Role::Lead).model(), Some("composer-2"));
+    assert_eq!(settings.agent(Role::Implementer).cli().as_str(), "codex");
+    assert_eq!(settings.agent(Role::Implementer).model(), Some("gpt-5.4"));
+    assert_eq!(
+      settings.agent(Role::Implementer).args(),
+      &["--full-auto".to_owned()]
+    );
+    assert_eq!(settings.agent(Role::Commentator).model(), Some("sonnet"));
+  }
+
+  #[test]
+  fn should_fail_when_an_agent_role_is_unknown() {
+    let error = Settings::parse(r#"{"agents":{"reviewer":{"cli":"claude"}}}"#).unwrap_err();
+    assert_eq!(error.to_string(), r#"unknown agent role "reviewer""#);
   }
 
   #[test]
