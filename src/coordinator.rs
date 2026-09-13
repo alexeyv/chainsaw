@@ -424,7 +424,7 @@ fn cmd_prompt(
   )?;
   let prompt_id = store.db.last_insert_rowid();
   let prompt_landing_millis = Settings::load(&store.run_dir)?.prompt_landing_seconds() * 1000;
-  let mut prior_idle = true;
+  let mut prior_idle = false;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
@@ -433,7 +433,7 @@ fn cmd_prompt(
     if attempt == 1 {
       prior_idle = prior
         .as_ref()
-        .is_none_or(|session| agent_is_idle(&session.status));
+        .is_some_and(|session| agent_is_idle(&session.status));
     }
     let path_before = session_log_named(store, name)?;
     let mut offset = file_size(path_before.as_deref());
