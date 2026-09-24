@@ -1,0 +1,95 @@
+- id: "1"
+  title: Move supervisor state out of the platform's transcript directory
+  description: >-
+    Give chainsaw its own state root and open the database there instead of
+    inside Claude Code's project directory. Satisfies CAP-4 and unblocks every
+    later story, since Codex has no per-project directory to borrow.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    AGENTS.md forbids durable state in the run tree, so the new root is outside
+    it. Existing runs must keep opening their database: either migrate on open
+    or fall back to the old location when one is found there. logs_dir stops
+    being the state location but still resolves Claude transcripts until story 2.
+- id: "2"
+  title: Introduce the SessionAdapter trait with a Claude Code implementation
+  description: >-
+    Define the platform axis as a trait covering launch argv, transcript
+    resolution, context, commit scraping, prompt landing and mention detection,
+    and move today's logs.rs behind it unchanged. Foundation for CAP-2.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Pure refactor: no behaviour change and the whole gate must pass unmodified,
+    including the release drift test. Do not touch SessionRuntime - it is the
+    substrate axis and is already correctly scoped. The context call returns an
+    optional so a platform without token accounting can say "unavailable"
+    rather than zero.
+- id: "3"
+  title: Persist platform and model on the session row
+  description: >-
+    Add platform and model columns to the sessions table with a migration
+    defaulting existing rows to claude, and read the platform back when
+    resolving a session's adapter. Delivers CAP-3 and part of CAP-5.
+  invoke_dev_with: >-
+    The daemon parses transcripts long after launch, so this column is what
+    makes observation work across restarts. Prove it with a contract test that
+    reopens the store and still resolves the right adapter.
+- id: "4"
+  title: Choose platform and model per role from coordinator flags
+  description: >-
+    Add --platform and --model to launch, start-commentator and daemon, defaulting
+    to claude and today's model, and wire them through to the herdr kind and the
+    launch argv. Delivers CAP-1.
+  invoke_dev_with: >-
+    Flags only - no configuration file. --platform on daemon is required for the
+    lead, which is registered rather than launched and whose transcript
+    observe_lead reads for the stop threshold. Defaults must leave every current
+    SKILL.md invocation working unchanged.
+- id: "5"
+  title: Implement the Codex session adapter
+  description: >-
+    Resolve a Codex session id to its date-partitioned rollout, and read context
+    from token_count events plus commits, prompt landing and mentions from
+    response_item entries. Completes CAP-2 for Codex.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Before anything else, prove that herdr agent get returns a usable session id
+    for --kind codex; session registration depends on it and it is unverified.
+    Test against a real rollout file copied into the fixtures, not a
+    hand-written one. Note that agent_message payloads can carry
+    encrypted_content, so scraping is not guaranteed complete.
+- id: "6"
+  title: Make compaction and context thresholds platform-specific
+  description: >-
+    Stop pushing /compact unconditionally and express thresholds against the
+    context window a platform reports, where it reports one. Codex auto-compacts
+    and has no such command.
+  invoke_dev_with: >-
+    Claude keeps today's behaviour exactly. For Codex, model_context_window is
+    stated per turn, so the threshold can be a fraction rather than a hardcoded
+    constant. A platform reporting no context at all must degrade - calibration
+    goes dark, commit detection keeps working - never record zero.
+- id: "7"
+  title: Teach the prompts to run heterogeneously
+  description: >-
+    Update SKILL.md and commentator.md so the lead knows how to choose platforms
+    and the commentator is handed resolved transcript paths and the name of the
+    format it is reading rather than a directory to scan.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    The commentator is Claude while the implementer transcripts may be Codex, in
+    a different tree and shape. This story changes wording and what the
+    supervisor hands over; it does not retune Codex implementer behaviour, which
+    is explicitly out of scope.
+- id: "8"
+  title: Validate one end-to-end heterogeneous run
+  description: >-
+    Take a real task from created to accepted with a Claude lead and commentator
+    and a Codex implementer, with commentary delivered against the Codex commit.
+    This is CAP-6 and the success signal.
+  done_checkpoint: true
+  invoke_dev_with: >-
+    A real run, not a test fixture. Record what broke and what merely felt
+    wrong; prompt-quality problems belong in a follow-up, but mechanism failures
+    come back into this epic.
