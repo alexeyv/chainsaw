@@ -6,6 +6,8 @@ _planning/
 .claude/
 .agents/
 skills-lock.json
+_bmad/
+_bmad-output/
 
 # Ship supervisor sources in skills/; never the cargo build or binaries.
 skills/**/target/
