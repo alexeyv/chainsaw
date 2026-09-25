@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use toml::{Table, Value};
+use toml::Table;
 
 use crate::agent::AgentSpec;
 use crate::domain::Role;
@@ -61,9 +61,32 @@ impl Settings {
   }
 
   pub fn parse(text: &str) -> Result<Self> {
-    let mut settings = Self::default();
-    settings.apply(text)?;
-    Ok(settings)
+    let table: Table = text.parse()?;
+    reject_unknown(&table, &["prompt-landing-seconds", "agents"], "setting", "")?;
+    let prompt_landing_seconds = match table.get("prompt-landing-seconds") {
+      Some(value) => value.as_integer().with_context(|| {
+        format!("setting \"prompt-landing-seconds\" must be an integer, got {value}")
+      })?,
+      None => DEFAULT_PROMPT_LANDING_SECONDS,
+    };
+    let agents = match table.get("agents") {
+      Some(value) => value
+        .as_table()
+        .context("setting \"agents\" must be a table")?,
+      None => &Table::new(),
+    };
+    reject_unknown(
+      agents,
+      &["lead", "implementer", "commentator"],
+      "agent role",
+      "; expected lead, implementer, or commentator",
+    )?;
+    Ok(Self {
+      prompt_landing_seconds,
+      lead: agent_spec(agents, "lead")?,
+      implementer: agent_spec(agents, "implementer")?,
+      commentator: agent_spec(agents, "commentator")?,
+    })
   }
 
   pub fn prompt_landing_seconds(&self) -> i64 {
@@ -77,38 +100,21 @@ impl Settings {
       Role::Commentator => &self.commentator,
     }
   }
+}
 
-  fn apply(&mut self, text: &str) -> Result<()> {
-    let table: Table = text.parse()?;
-    for (key, value) in &table {
-      match key.as_str() {
-        "prompt-landing-seconds" => {
-          self.prompt_landing_seconds = value
-            .as_integer()
-            .with_context(|| format!("setting {key:?} must be an integer, got {value}"))?;
-        }
-        "agents" => parse_agents(self, value)?,
-        other => bail!("unknown setting {other:?}"),
-      }
-    }
-    Ok(())
+fn reject_unknown(table: &Table, known: &[&str], what: &str, hint: &str) -> Result<()> {
+  match table.keys().find(|key| !known.contains(&key.as_str())) {
+    Some(key) => bail!("unknown {what} {key:?}{hint}"),
+    None => Ok(()),
   }
 }
 
-fn parse_agents(settings: &mut Settings, value: &Value) -> Result<()> {
-  let Some(table) = value.as_table() else {
-    bail!("setting \"agents\" must be a table");
-  };
-  for (key, value) in table {
-    let target = match key.as_str() {
-      "lead" => &mut settings.lead,
-      "implementer" => &mut settings.implementer,
-      "commentator" => &mut settings.commentator,
-      other => bail!("unknown agent role {other:?}; expected lead, implementer, or commentator"),
-    };
-    *target = AgentSpec::parse(value).with_context(|| format!("setting \"agents.{key}\""))?;
+/// The role's spec from `[agents.<role>]`, or Claude Code on Opus when absent.
+fn agent_spec(agents: &Table, role: &str) -> Result<AgentSpec> {
+  match agents.get(role) {
+    Some(value) => AgentSpec::parse(value).with_context(|| format!("setting \"agents.{role}\"")),
+    None => Ok(AgentSpec::claude_opus()),
   }
-  Ok(())
 }
 
 #[cfg(test)]
