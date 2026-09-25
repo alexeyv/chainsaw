@@ -49,7 +49,7 @@ const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only 
 
 pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
   let lead_facing = is_lead_facing(&command);
-  run(store, runtime, command)?;
+  run_command(store, runtime, command)?;
   if lead_facing {
     for warning in standing_warnings(store)? {
       eprintln!("WARNING: {warning}");
@@ -162,7 +162,8 @@ fn duration_text(seconds: i64) -> String {
   }
 }
 
-fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
+/// Routes each subcommand to its handler; the handlers do the work.
+fn run_command(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
@@ -193,34 +194,7 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
       wait,
       timeout,
     } => cmd_prompt(store, runtime, &name, &text, wait, timeout),
-    Command::Task { action } => match action {
-      TaskCommand::New {
-        files,
-        predicted_files,
-        predicted_lines,
-        retry_of_task_id,
-        reason,
-      } => cmd_task_new(
-        store,
-        runtime,
-        predicted_files,
-        predicted_lines,
-        retry_of_task_id,
-        files.as_deref(),
-        reason.as_deref(),
-      ),
-      TaskCommand::RecordCommit {
-        task,
-        sha,
-        force,
-        reason,
-      } => cmd_task_record_commit(store, task, &sha, force, reason.as_deref()),
-      TaskCommand::RecordCommentary {
-        task,
-        force,
-        reason,
-      } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
-    },
+    Command::Task { action } => run_task_command(store, runtime, action),
     Command::Abort { task, reason } => cmd_abort(store, runtime, task, &reason),
     Command::Dispatch { task, to, reason } => {
       cmd_dispatch(store, runtime, task, &to, reason.as_deref())
@@ -244,24 +218,64 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
       reason,
     } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
     Command::Resolutions => cmd_resolutions(store),
-    Command::Config { key, value } => {
-      if let Some(value) = value {
-        store.set_cfg(&key, &value)
-      } else {
-        println!("{}", store.cfg_or(&key, "")?);
-        Ok(())
-      }
-    }
+    Command::Config { key, value } => cmd_config(store, &key, value.as_deref()),
     Command::State { task } => cmd_state(store, task),
-    Command::LogsDir => {
-      println!("{}", store.logs_dir.display());
-      Ok(())
-    }
+    Command::LogsDir => cmd_logs_dir(store),
     Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(store, interval_ms),
     Command::Context { name } => cmd_context(store, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
   }
+}
+
+fn run_task_command(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  action: TaskCommand,
+) -> Result<()> {
+  match action {
+    TaskCommand::New {
+      files,
+      predicted_files,
+      predicted_lines,
+      retry_of_task_id,
+      reason,
+    } => cmd_task_new(
+      store,
+      runtime,
+      predicted_files,
+      predicted_lines,
+      retry_of_task_id,
+      files.as_deref(),
+      reason.as_deref(),
+    ),
+    TaskCommand::RecordCommit {
+      task,
+      sha,
+      force,
+      reason,
+    } => cmd_task_record_commit(store, task, &sha, force, reason.as_deref()),
+    TaskCommand::RecordCommentary {
+      task,
+      force,
+      reason,
+    } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
+  }
+}
+
+fn cmd_config(store: &Store, key: &str, value: Option<&str>) -> Result<()> {
+  match value {
+    Some(value) => store.set_cfg(key, value),
+    None => {
+      println!("{}", store.cfg_or(key, "")?);
+      Ok(())
+    }
+  }
+}
+
+fn cmd_logs_dir(store: &Store) -> Result<()> {
+  println!("{}", store.logs_dir.display());
+  Ok(())
 }
 
 struct LaunchOptions {
