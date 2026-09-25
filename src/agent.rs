@@ -74,10 +74,8 @@ impl AgentSpec {
     {
       bail!("agent model cannot be blank");
     }
-    for argument in &args {
-      if argument.trim().is_empty() {
-        bail!("agent extra arg cannot be blank");
-      }
+    if args.iter().any(|argument| argument.trim().is_empty()) {
+      bail!("agent extra arg cannot be blank");
     }
     Ok(Self { cli, model, args })
   }
@@ -86,37 +84,39 @@ impl AgentSpec {
     let Some(table) = value.as_table() else {
       bail!("agent spec must be a table");
     };
-    let mut cli = None;
-    let mut model = None;
-    let mut args = Vec::new();
-    for (key, value) in table {
-      match key.as_str() {
-        "cli" => {
-          let text = value.as_str().context("agent cli must be a string")?;
-          cli = Some(AgentCli::parse(text)?);
-        }
-        "model" => {
-          let text = value.as_str().context("agent model must be a string")?;
-          model = Some(text.to_owned());
-        }
-        "args" => {
-          let Some(items) = value.as_array() else {
-            bail!("agent args must be an array of strings");
-          };
-          for item in items {
-            let text = item
-              .as_str()
-              .context("agent args must be an array of strings")?;
-            args.push(text.to_owned());
-          }
-        }
-        other => bail!("unknown agent setting {other:?}"),
-      }
+    if let Some(other) = table
+      .keys()
+      .find(|key| !["cli", "model", "args"].contains(&key.as_str()))
+    {
+      bail!("unknown agent setting {other:?}");
     }
-    let cli = cli.ok_or_else(|| anyhow::anyhow!("agent spec needs a cli"))?;
-    let model = match (cli, model) {
-      (AgentCli::Claude, None) => Some("opus".to_owned()),
-      (_, model) => model,
+    let cli = match table.get("cli") {
+      Some(value) => AgentCli::parse(value.as_str().context("agent cli must be a string")?)?,
+      None => bail!("agent spec needs a cli"),
+    };
+    let model = match table.get("model") {
+      Some(value) => Some(
+        value
+          .as_str()
+          .context("agent model must be a string")?
+          .to_owned(),
+      ),
+      None if cli == AgentCli::Claude => Some("opus".to_owned()),
+      None => None,
+    };
+    let args = match table.get("args") {
+      Some(value) => value
+        .as_array()
+        .context("agent args must be an array of strings")?
+        .iter()
+        .map(|item| {
+          item
+            .as_str()
+            .map(str::to_owned)
+            .context("agent args must be an array of strings")
+        })
+        .collect::<Result<_>>()?,
+      None => Vec::new(),
     };
     Self::new(cli, model, args)
   }
@@ -133,48 +133,50 @@ impl AgentSpec {
     &self.args
   }
 
-  /// Flags passed to the CLI after `herdr agent start … --`.
+  /// Flags passed to the CLI after `herdr agent start … --`: the CLI's
+  /// defaults, then the role's extra `args`.
   pub fn launch_flags(&self, kind: SessionKind) -> Vec<String> {
-    let mut flags = match self.cli {
+    let defaults = match self.cli {
       AgentCli::Claude => claude_flags(self.model.as_deref().unwrap_or("opus"), kind),
       AgentCli::Cursor => cursor_flags(self.model.as_deref()),
-      AgentCli::Codex => self
-        .model
-        .as_ref()
-        .map(|model| vec!["--model".to_owned(), model.clone()])
-        .unwrap_or_default(),
+      AgentCli::Codex => model_flag(self.model.as_deref()),
     };
-    flags.extend(self.args.iter().cloned());
-    flags
+    defaults
+      .into_iter()
+      .chain(self.args.iter().map(String::as_str))
+      .map(str::to_owned)
+      .collect()
   }
 }
 
-fn claude_flags(model: &str, kind: SessionKind) -> Vec<String> {
-  let mut flags = vec![
-    "--model".to_owned(),
-    model.to_owned(),
-    "--effort".to_owned(),
-    "high".to_owned(),
-  ];
-  if matches!(kind, SessionKind::Implementer) {
-    flags.push("--disable-slash-commands".to_owned());
-  }
-  flags.extend([
-    "--strict-mcp-config".to_owned(),
-    "--no-chrome".to_owned(),
-    "--disallowedTools".to_owned(),
-    CLAUDE_DISALLOWED_TOOLS.to_owned(),
-  ]);
-  flags
+fn claude_flags(model: &str, kind: SessionKind) -> Vec<&str> {
+  let slash_commands: &[&str] = match kind {
+    SessionKind::Implementer => &["--disable-slash-commands"],
+    SessionKind::Commentator => &[],
+  };
+  ["--model", model, "--effort", "high"]
+    .into_iter()
+    .chain(slash_commands.iter().copied())
+    .chain([
+      "--strict-mcp-config",
+      "--no-chrome",
+      "--disallowedTools",
+      CLAUDE_DISALLOWED_TOOLS,
+    ])
+    .collect()
 }
 
-fn cursor_flags(model: Option<&str>) -> Vec<String> {
-  let mut flags = vec!["--trust".to_owned(), "--force".to_owned()];
-  if let Some(model) = model {
-    flags.push("--model".to_owned());
-    flags.push(model.to_owned());
-  }
-  flags
+fn cursor_flags(model: Option<&str>) -> Vec<&str> {
+  ["--trust", "--force"]
+    .into_iter()
+    .chain(model_flag(model))
+    .collect()
+}
+
+fn model_flag(model: Option<&str>) -> Vec<&str> {
+  model
+    .map(|model| vec!["--model", model])
+    .unwrap_or_default()
 }
 
 pub fn home_dir() -> Result<PathBuf> {
