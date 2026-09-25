@@ -271,37 +271,61 @@ struct LaunchOptions {
 
 /// The session's transcript: the CLI's usual path, then beside the database
 /// when Claude Code agrees about the project directory, otherwise wherever
-/// a matching jsonl was found. None until the transcript exists.
-fn session_log(store: &Store, session: &Session) -> Option<PathBuf> {
+/// a matching jsonl was found. None until the transcript exists; an unreadable
+/// `chainsaw.json` or projects directory is an error, never a guess.
+fn session_log(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
   let cli = Settings::load(&store.run_dir)
-    .ok()
-    .map(|settings| settings.agent(session.role()).cli())
-    .unwrap_or(AgentCli::Claude);
-  if let Some(path) = find_session_transcript(cli, &store.run_dir, session.external_session_id()) {
-    return Some(path);
+    .with_context(|| {
+      format!(
+        "cannot find the transcript of {} ({}): chainsaw.json names the CLI that writes it",
+        session.name(),
+        session.role()
+      )
+    })?
+    .agent(session.role())
+    .cli();
+  if let Some(path) = find_session_transcript(cli, &store.run_dir, session.external_session_id())? {
+    return Ok(Some(path));
   }
   let expected = store
     .logs_dir
     .join(format!("{}.jsonl", session.external_session_id()));
   if expected.is_file() {
-    Some(expected)
+    Ok(Some(expected))
   } else {
     find_session_log(store, session.external_session_id())
   }
 }
 
-fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf> {
-  let projects_dir = store.logs_dir.parent()?;
+fn find_session_log(store: &Store, external_session_id: &str) -> Result<Option<PathBuf>> {
+  let Some(projects_dir) = store.logs_dir.parent() else {
+    return Ok(None);
+  };
+  let entries = match fs::read_dir(projects_dir) {
+    Ok(entries) => entries,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    Err(error) => {
+      return Err(error).with_context(|| format!("cannot read {}", projects_dir.display()));
+    }
+  };
   let filename = format!("{external_session_id}.jsonl");
-  fs::read_dir(projects_dir)
-    .ok()?
-    .filter_map(Result::ok)
-    .map(|entry| entry.path().join(&filename))
-    .find(|path| path.is_file())
+  for entry in entries {
+    let path = entry
+      .with_context(|| format!("cannot read {}", projects_dir.display()))?
+      .path()
+      .join(&filename);
+    if path.is_file() {
+      return Ok(Some(path));
+    }
+  }
+  Ok(None)
 }
 
 fn session_log_named(store: &Store, name: &str) -> Result<Option<PathBuf>> {
-  Ok(latest_session_named(store, name)?.and_then(|session| session_log(store, &session)))
+  match latest_session_named(store, name)? {
+    Some(session) => session_log(store, &session),
+    None => Ok(None),
+  }
 }
 
 fn session_snapshot(store: &Store, id: i64) -> Result<Option<Session>> {
@@ -702,7 +726,7 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let log_offset = file_size(session_log(store, &session).as_deref());
+  let log_offset = file_size(session_log(store, &session)?.as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
@@ -926,7 +950,7 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   };
   let mut log = match task.session_id() {
     Some(session_id) => match session_snapshot(store, session_id)? {
-      Some(session) => session_log(store, &session),
+      Some(session) => session_log(store, &session)?,
       None => None,
     },
     None => None,
@@ -943,7 +967,7 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
     log = match task.session_id() {
       Some(session_id) => match session_snapshot(store, session_id)? {
-        Some(session) => session_log(store, &session),
+        Some(session) => session_log(store, &session)?,
         None => None,
       },
       None => None,
@@ -1120,7 +1144,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     .map(|(start, end)| (end - start) as f64 / 1000.0);
   let log = match task.session_id() {
     Some(session_id) => match session_snapshot(store, session_id)? {
-      Some(session) => session_log(store, &session),
+      Some(session) => session_log(store, &session)?,
       None => None,
     },
     None => None,
@@ -1334,7 +1358,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_log(store, &session).is_some() {
+    if session_log(store, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -1492,7 +1516,7 @@ fn implementer_transcript_sizes(store: &Store) -> Result<BTreeMap<String, u64>> 
       .iter()
       .filter(|session| session.role() == Role::Implementer)
     {
-      if let Some(path) = session_log(store, session) {
+      if let Some(path) = session_log(store, session)? {
         sizes.insert(
           session.external_session_id().to_owned(),
           file_size(Some(&path)),
@@ -1508,7 +1532,7 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(log) = session_log(store, &session) {
+    if let Some(log) = session_log(store, &session)? {
       println!("{}\t{}", session.name(), context_size(Some(&log)));
     } else {
       println!("{}\tUNAVAILABLE (session log not found)", session.name());
@@ -1581,7 +1605,7 @@ fn daemon(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(log) = session_log(store, &session) else {
+      let Some(log) = session_log(store, &session)? else {
         if missing_logs.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"

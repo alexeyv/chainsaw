@@ -178,7 +178,9 @@ mod find_named_jsonl {
     fs::write(&file, "{}\n").unwrap();
 
     assert_eq!(
-      find_named_jsonl(&scratch.0, "sess-1.jsonl", 4).as_deref(),
+      find_named_jsonl(&scratch.0, "sess-1.jsonl", 4)
+        .unwrap()
+        .as_deref(),
       Some(file.as_path())
     );
   }
@@ -193,7 +195,9 @@ mod find_named_jsonl {
     fs::write(&file, "{}\n").unwrap();
 
     assert_eq!(
-      find_jsonl_containing(&scratch.0, "sess-codex", 4).as_deref(),
+      find_jsonl_containing(&scratch.0, "sess-codex", 4)
+        .unwrap()
+        .as_deref(),
       Some(file.as_path())
     );
   }

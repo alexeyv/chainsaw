@@ -855,6 +855,19 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertEqual(result.stdout, "worker\t33\n")
 
+    def test_context_fails_naming_the_session_and_file_when_settings_are_invalid(self):
+        self.launch()
+        self.append_usage("worker", input_tokens=10)
+        (self.run_dir / "chainsaw.json").write_text('{"agents": {"worker": {}}}\n')
+
+        result = self.assert_failure(self.cli("context", "worker"))
+
+        self.assertIn(
+            "cannot find the transcript of worker (implementer)", result.stderr
+        )
+        self.assertIn(f"invalid settings in {(self.run_dir / 'chainsaw.json').resolve()}", result.stderr)
+        self.assertIn('unknown agent role "worker"', result.stderr)
+
     def test_calibration_reports_git_and_task_context_cost(self):
         task = self.new_task(lines=20)
         self.launch()

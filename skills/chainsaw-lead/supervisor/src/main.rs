@@ -13,7 +13,7 @@ fn main() {
   });
   if let Err(error) = result {
     if !error.to_string().is_empty() {
-      eprintln!("{error}");
+      eprintln!("{error:#}");
     }
     std::process::exit(1);
   }

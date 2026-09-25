@@ -107,7 +107,10 @@ mod parse {
   #[test]
   fn should_fail_when_an_agent_role_is_unknown() {
     let error = Settings::parse(r#"{"agents":{"reviewer":{"cli":"claude"}}}"#).unwrap_err();
-    assert_eq!(error.to_string(), r#"unknown agent role "reviewer""#);
+    assert_eq!(
+      error.to_string(),
+      r#"unknown agent role "reviewer"; expected lead, implementer, or commentator"#
+    );
   }
 
   #[test]

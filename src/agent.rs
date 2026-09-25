@@ -239,40 +239,42 @@ pub fn expected_transcript(
   })
 }
 
+/// The session's transcript wherever its CLI wrote it, or None while it does
+/// not exist yet. A missing CLI home is "not yet"; any other failure to look
+/// is an error.
 pub fn find_session_transcript(
   cli: AgentCli,
   canonical_run_dir: &Path,
   session_id: &str,
-) -> Option<PathBuf> {
-  if let Ok(path) = expected_transcript(cli, canonical_run_dir, session_id)
-    && path.is_file()
-  {
-    return Some(path);
+) -> Result<Option<PathBuf>> {
+  let path = expected_transcript(cli, canonical_run_dir, session_id)?;
+  if path.is_file() {
+    return Ok(Some(path));
   }
   match cli {
     AgentCli::Claude => {
-      let projects = claude_home().ok()?.join("projects");
+      let projects = claude_home()?.join("projects");
       find_named_jsonl(&projects, &format!("{session_id}.jsonl"), 2)
     }
     AgentCli::Cursor => {
-      let projects = cursor_home().ok()?.join("projects");
-      let filename = format!("{session_id}.jsonl");
-      find_named_jsonl(&projects, &filename, 4)
+      let projects = cursor_home()?.join("projects");
+      find_named_jsonl(&projects, &format!("{session_id}.jsonl"), 4)
     }
     AgentCli::Codex => {
-      let sessions = codex_home().ok()?.join("sessions");
+      let sessions = codex_home()?.join("sessions");
       find_jsonl_containing(&sessions, session_id, 4)
     }
   }
+  .with_context(|| format!("cannot look for the {cli} transcript of session {session_id}"))
 }
 
-fn find_named_jsonl(root: &Path, filename: &str, max_depth: usize) -> Option<PathBuf> {
+fn find_named_jsonl(root: &Path, filename: &str, max_depth: usize) -> Result<Option<PathBuf>> {
   walk(root, max_depth, &mut |path| {
     path.file_name().and_then(|name| name.to_str()) == Some(filename)
   })
 }
 
-fn find_jsonl_containing(root: &Path, needle: &str, max_depth: usize) -> Option<PathBuf> {
+fn find_jsonl_containing(root: &Path, needle: &str, max_depth: usize) -> Result<Option<PathBuf>> {
   walk(root, max_depth, &mut |path| {
     path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
       && path
@@ -286,7 +288,12 @@ fn walk(
   root: &Path,
   max_depth: usize,
   predicate: &mut impl FnMut(&Path) -> bool,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>> {
+  match fs::metadata(root) {
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    Err(error) => return Err(error).with_context(|| format!("cannot read {}", root.display())),
+    Ok(_) => {}
+  }
   walk_from(root, 0, max_depth, predicate)
 }
 
@@ -295,26 +302,28 @@ fn walk_from(
   depth: usize,
   max_depth: usize,
   predicate: &mut impl FnMut(&Path) -> bool,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>> {
   if depth > max_depth {
-    return None;
+    return Ok(None);
   }
-  let entries = fs::read_dir(dir).ok()?;
+  let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
   let mut dirs = Vec::new();
-  for entry in entries.filter_map(Result::ok) {
-    let path = entry.path();
+  for entry in entries {
+    let path = entry
+      .with_context(|| format!("cannot read {}", dir.display()))?
+      .path();
     if path.is_dir() {
       dirs.push(path);
     } else if predicate(&path) {
-      return Some(path);
+      return Ok(Some(path));
     }
   }
   for dir in dirs {
-    if let Some(found) = walk_from(&dir, depth + 1, max_depth, predicate) {
-      return Some(found);
+    if let Some(found) = walk_from(&dir, depth + 1, max_depth, predicate)? {
+      return Ok(Some(found));
     }
   }
-  None
+  Ok(None)
 }
 
 #[cfg(test)]

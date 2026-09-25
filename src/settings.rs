@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::agent::AgentSpec;
@@ -40,8 +40,9 @@ impl Settings {
   pub fn load(run_dir: &Path) -> Result<Self> {
     let path = run_dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
-      Ok(text) => Self::parse(&text)
-        .map_err(|error| anyhow!("invalid settings in {}: {error}", path.display())),
+      Ok(text) => {
+        Self::parse(&text).with_context(|| format!("invalid settings in {}", path.display()))
+      }
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
       Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
     }
@@ -90,13 +91,13 @@ fn parse_agents(settings: &mut Settings, value: &Value) -> Result<()> {
     bail!("setting \"agents\" must be a JSON object");
   };
   for (key, value) in object {
-    let spec = AgentSpec::parse(value).with_context(|| format!("setting \"agents.{key}\""))?;
-    match key.as_str() {
-      "lead" => settings.lead = spec,
-      "implementer" => settings.implementer = spec,
-      "commentator" => settings.commentator = spec,
-      other => bail!("unknown agent role {other:?}"),
-    }
+    let target = match key.as_str() {
+      "lead" => &mut settings.lead,
+      "implementer" => &mut settings.implementer,
+      "commentator" => &mut settings.commentator,
+      other => bail!("unknown agent role {other:?}; expected lead, implementer, or commentator"),
+    };
+    *target = AgentSpec::parse(value).with_context(|| format!("setting \"agents.{key}\""))?;
   }
   Ok(())
 }
