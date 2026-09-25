@@ -129,6 +129,72 @@ mod launch_flags {
   }
 
   #[test]
+  fn should_replace_a_default_flag_and_its_value_when_args_name_it() {
+    let spec = AgentSpec::new(
+      AgentCli::Claude,
+      Some("opus".to_owned()),
+      vec!["--effort".to_owned(), "low".to_owned()],
+    )
+    .unwrap();
+
+    assert_eq!(
+      spec.launch_flags(SessionKind::Commentator),
+      [
+        "--model",
+        "opus",
+        "--strict-mcp-config",
+        "--no-chrome",
+        "--disallowedTools",
+        "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
+        "--effort",
+        "low",
+      ]
+    );
+  }
+
+  #[test]
+  fn should_replace_a_default_flag_when_args_give_it_with_an_equals_sign() {
+    let spec = AgentSpec::new(
+      AgentCli::Cursor,
+      Some("gpt-5".to_owned()),
+      vec!["--model=composer-2.5".to_owned()],
+    )
+    .unwrap();
+
+    assert_eq!(
+      spec.launch_flags(SessionKind::Implementer),
+      ["--trust", "--force", "--model=composer-2.5"]
+    );
+  }
+
+  #[test]
+  fn should_replace_a_default_flag_when_args_use_its_short_form() {
+    let spec = AgentSpec::new(
+      AgentCli::Codex,
+      Some("gpt-5.4".to_owned()),
+      vec!["-m".to_owned(), "o3".to_owned()],
+    )
+    .unwrap();
+
+    assert_eq!(spec.launch_flags(SessionKind::Implementer), ["-m", "o3"]);
+  }
+
+  #[test]
+  fn should_replace_a_default_switch_when_args_name_its_opposite() {
+    let spec = AgentSpec::new(
+      AgentCli::Claude,
+      Some("opus".to_owned()),
+      vec!["--chrome".to_owned()],
+    )
+    .unwrap();
+
+    let flags = spec.launch_flags(SessionKind::Commentator);
+
+    assert!(!flags.iter().any(|flag| flag == "--no-chrome"));
+    assert_eq!(flags.last().unwrap(), "--chrome");
+  }
+
+  #[test]
   fn should_pass_no_flags_when_codex_has_no_model() {
     let spec = AgentSpec::new(AgentCli::Codex, None, Vec::new()).unwrap();
 

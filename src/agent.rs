@@ -134,48 +134,89 @@ impl AgentSpec {
   }
 
   /// Flags passed to the CLI after `herdr agent start … --`: the CLI's
-  /// defaults, then the role's extra `args`.
+  /// defaults, then the role's extra `args`. A default that `args` names by
+  /// any of its spellings is dropped, so `args` overrides it.
   pub fn launch_flags(&self, kind: SessionKind) -> Vec<String> {
     let defaults = match self.cli {
       AgentCli::Claude => claude_flags(self.model.as_deref().unwrap_or("opus"), kind),
       AgentCli::Cursor => cursor_flags(self.model.as_deref()),
       AgentCli::Codex => model_flag(self.model.as_deref()),
     };
+    let named: Vec<&str> = self
+      .args
+      .iter()
+      .filter_map(|argument| flag_name(argument))
+      .collect();
     defaults
       .into_iter()
+      .filter(|flag| !flag.names.iter().any(|name| named.contains(name)))
+      .flat_map(|flag| flag.words)
       .chain(self.args.iter().map(String::as_str))
       .map(str::to_owned)
       .collect()
   }
 }
 
-fn claude_flags(model: &str, kind: SessionKind) -> Vec<&str> {
-  let slash_commands: &[&str] = match kind {
-    SessionKind::Implementer => &["--disable-slash-commands"],
-    SessionKind::Commentator => &[],
+/// One default flag with its value, if it takes one, and every spelling of
+/// it that `args` can use to override it: short forms, aliases, and the
+/// opposite switch (`--chrome` overrides `--no-chrome`).
+struct DefaultFlag<'a> {
+  names: &'static [&'static str],
+  words: Vec<&'a str>,
+}
+
+fn default_flag<'a>(names: &'static [&'static str], words: &[&'a str]) -> DefaultFlag<'a> {
+  DefaultFlag {
+    names,
+    words: words.to_vec(),
+  }
+}
+
+/// The flag an argument names, without any `=value`; None for a value.
+fn flag_name(argument: &str) -> Option<&str> {
+  argument
+    .starts_with('-')
+    .then(|| argument.split('=').next().unwrap_or(argument))
+}
+
+fn claude_flags(model: &str, kind: SessionKind) -> Vec<DefaultFlag<'_>> {
+  let slash_commands = match kind {
+    SessionKind::Implementer => vec![default_flag(
+      &["--disable-slash-commands"],
+      &["--disable-slash-commands"],
+    )],
+    SessionKind::Commentator => Vec::new(),
   };
-  ["--model", model, "--effort", "high"]
-    .into_iter()
-    .chain(slash_commands.iter().copied())
-    .chain([
-      "--strict-mcp-config",
-      "--no-chrome",
-      "--disallowedTools",
-      CLAUDE_DISALLOWED_TOOLS,
-    ])
-    .collect()
+  [
+    default_flag(&["--model"], &["--model", model]),
+    default_flag(&["--effort"], &["--effort", "high"]),
+  ]
+  .into_iter()
+  .chain(slash_commands)
+  .chain([
+    default_flag(&["--strict-mcp-config"], &["--strict-mcp-config"]),
+    default_flag(&["--no-chrome", "--chrome"], &["--no-chrome"]),
+    default_flag(
+      &["--disallowedTools", "--disallowed-tools"],
+      &["--disallowedTools", CLAUDE_DISALLOWED_TOOLS],
+    ),
+  ])
+  .collect()
 }
 
-fn cursor_flags(model: Option<&str>) -> Vec<&str> {
-  ["--trust", "--force"]
-    .into_iter()
-    .chain(model_flag(model))
-    .collect()
+fn cursor_flags(model: Option<&str>) -> Vec<DefaultFlag<'_>> {
+  [
+    default_flag(&["--trust"], &["--trust"]),
+    default_flag(&["--force", "-f", "--yolo"], &["--force"]),
+  ]
+  .into_iter()
+  .chain(model_flag(model))
+  .collect()
 }
 
-fn model_flag(model: Option<&str>) -> Vec<&str> {
+fn model_flag(model: Option<&str>) -> Vec<DefaultFlag<'_>> {
   model
-    .map(|model| vec!["--model", model])
+    .map(|model| vec![default_flag(&["--model", "-m"], &["--model", model])])
     .unwrap_or_default()
 }
 

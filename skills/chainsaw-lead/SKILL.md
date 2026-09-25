@@ -39,7 +39,8 @@ the commentator's findings — not implementation detail.
 
 Each role is an interactive Herdr session. `chainsaw.toml` in the run directory
 sets CLI and model per role. `cli` is `claude`, `cursor`, or `codex`. `model` is
-that CLI's model id. `args` are extra flags after the supervisor's defaults.
+that CLI's model id. `args` are extra flags after the supervisor's defaults; a flag
+named in `args` replaces the default for that flag.
 
 ```toml
 [agents.lead]

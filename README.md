@@ -48,4 +48,4 @@ cli = "claude"
 model = "opus"
 ```
 
-`cli` is `claude`, `cursor`, or `codex`. `model` is whatever that CLI accepts. Extra flags go in `args`. Cursor sessions get `--trust --force` so they do not stop on workspace trust or shell approval. Start the lead yourself with the same CLI as `agents.lead`.
+`cli` is `claude`, `cursor`, or `codex`. `model` is whatever that CLI accepts. Extra flags go in `args`; a flag named there replaces the supervisor's default for it, e.g. `args = ["--effort", "low"]`. Cursor sessions get `--trust --force` so they do not stop on workspace trust or shell approval. Start the lead yourself with the same CLI as `agents.lead`.
