@@ -31,24 +31,28 @@ the commentator's findings — not implementation detail.
    from yours.
 
 5. The supervisor launches implementers and the commentator with the CLI and model in
-   `chainsaw.json` (see **Agent CLIs** below). Missing files: Claude Code, `--model opus
+   `chainsaw.toml` (see **Agent CLIs** below). No file: Claude Code, `--model opus
    --effort high`. The lead runs on whatever CLI and model the human started this
    session with; set `agents.lead` so the supervisor can find the lead transcript.
 
 ## Agent CLIs
 
-Each role is an interactive Herdr session. `chainsaw.json` in the run directory
+Each role is an interactive Herdr session. `chainsaw.toml` in the run directory
 sets CLI and model per role. `cli` is `claude`, `cursor`, or `codex`. `model` is
 that CLI's model id. `args` are extra flags after the supervisor's defaults.
 
-```json
-{
-  "agents": {
-    "lead": { "cli": "claude", "model": "opus" },
-    "implementer": { "cli": "cursor", "model": "composer-2.5" },
-    "commentator": { "cli": "claude", "model": "opus" }
-  }
-}
+```toml
+[agents.lead]
+cli = "claude"
+model = "opus"
+
+[agents.implementer]
+cli = "cursor"
+model = "composer-2.5"
+
+[agents.commentator]
+cli = "claude"
+model = "opus"
 ```
 
 Start the lead yourself with the same CLI named in `agents.lead`. Implementers and

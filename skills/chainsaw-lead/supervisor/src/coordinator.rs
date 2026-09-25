@@ -272,12 +272,12 @@ struct LaunchOptions {
 /// The session's transcript: the CLI's usual path, then beside the database
 /// when Claude Code agrees about the project directory, otherwise wherever
 /// a matching jsonl was found. None until the transcript exists; an unreadable
-/// `chainsaw.json` or projects directory is an error, never a guess.
+/// `chainsaw.toml` or projects directory is an error, never a guess.
 fn session_log(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
   let cli = Settings::load(&store.run_dir)
     .with_context(|| {
       format!(
-        "cannot find the transcript of {} ({}): chainsaw.json names the CLI that writes it",
+        "cannot find the transcript of {} ({}): chainsaw.toml names the CLI that writes it",
         session.name(),
         session.role()
       )

@@ -1,7 +1,7 @@
 //! Which interactive CLI a role runs, and how to launch and find it.
 //!
 //! The supervisor talks to Herdr; Herdr starts `claude`, `cursor-agent`, or
-//! `codex`. Each role in `chainsaw.json` picks a CLI and a model. Transcripts
+//! `codex`. Each role in `chainsaw.toml` picks a CLI and a model. Transcripts
 //! stay where that CLI writes them.
 
 use std::env;
@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use toml::Value;
 
 use crate::session_runtime::SessionKind;
 use crate::store::project_directory_name;
@@ -83,13 +83,13 @@ impl AgentSpec {
   }
 
   pub fn parse(value: &Value) -> Result<Self> {
-    let Some(object) = value.as_object() else {
-      bail!("agent spec must be a JSON object");
+    let Some(table) = value.as_table() else {
+      bail!("agent spec must be a table");
     };
     let mut cli = None;
     let mut model = None;
     let mut args = Vec::new();
-    for (key, value) in object {
+    for (key, value) in table {
       match key.as_str() {
         "cli" => {
           let text = value.as_str().context("agent cli must be a string")?;

@@ -108,8 +108,8 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         )
 
     def test_a_prompt_lands_when_the_agent_is_working_before_the_transcript_grows(self):
-        (self.run_dir / "chainsaw.json").write_text(
-            '{"prompt-landing-seconds": 1}\n'
+        (self.run_dir / "chainsaw.toml").write_text(
+            "prompt-landing-seconds = 1\n"
         )
         self.launch()
         self.update_zero_cost_dummy(hold_transcript=True)
@@ -124,8 +124,8 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         self.assertNotIn("prompt-failed worker", state.stdout)
 
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
-        (self.run_dir / "chainsaw.json").write_text(
-            '{"prompt-landing-seconds": 0}\n'
+        (self.run_dir / "chainsaw.toml").write_text(
+            "prompt-landing-seconds = 0\n"
         )
         self.launch()
         self.update_zero_cost_dummy(drop_prompts=3)
@@ -607,7 +607,7 @@ class FreshSessionContractTests(SupervisorContractCase):
     def test_dispatch_refuses_an_unreadable_settings_file(self):
         self.verified_first_task()
         self.assert_success(self.cli("launch", "replacement"))
-        (self.run_dir / "chainsaw.json").write_text('{"prompt-landing-secnds": 1}\n')
+        (self.run_dir / "chainsaw.toml").write_text("prompt-landing-secnds = 1\n")
         second = self.new_task(text="Second task.", files="second.txt")
 
         result = self.dispatch(second, "replacement")
@@ -858,14 +858,14 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
     def test_context_fails_naming_the_session_and_file_when_settings_are_invalid(self):
         self.launch()
         self.append_usage("worker", input_tokens=10)
-        (self.run_dir / "chainsaw.json").write_text('{"agents": {"worker": {}}}\n')
+        (self.run_dir / "chainsaw.toml").write_text("[agents.worker]\n")
 
         result = self.assert_failure(self.cli("context", "worker"))
 
         self.assertIn(
             "cannot find the transcript of worker (implementer)", result.stderr
         )
-        self.assertIn(f"invalid settings in {(self.run_dir / 'chainsaw.json').resolve()}", result.stderr)
+        self.assertIn(f"invalid settings in {(self.run_dir / 'chainsaw.toml').resolve()}", result.stderr)
         self.assertIn('unknown agent role "worker"', result.stderr)
 
     def test_calibration_reports_git_and_task_context_cost(self):
@@ -1035,8 +1035,8 @@ class BusySessionContractTests(SupervisorContractCase):
     """A busy agent queues a prompt and works through it once it goes idle."""
 
     def test_a_prompt_is_withheld_while_busy_and_lands_when_the_session_goes_idle(self):
-        (self.run_dir / "chainsaw.json").write_text(
-            '{"prompt-landing-seconds": 1}\n'
+        (self.run_dir / "chainsaw.toml").write_text(
+            "prompt-landing-seconds = 1\n"
         )
         self.launch()
         self.set_agent_status("worker", "busy")

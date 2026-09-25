@@ -30,13 +30,17 @@ mod parse {
 mod spec_parse {
   use super::*;
 
+  fn spec(text: &str) -> toml::Value {
+    toml::Value::Table(text.parse().unwrap())
+  }
+
   #[test]
   fn should_work() {
-    let spec = AgentSpec::parse(&serde_json::json!({
-      "cli": "cursor",
-      "model": "gpt-5",
-      "args": ["--force"]
-    }))
+    let spec = AgentSpec::parse(&spec(
+      r#"cli = "cursor"
+model = "gpt-5"
+args = ["--force"]"#,
+    ))
     .unwrap();
 
     assert_eq!(spec.cli(), AgentCli::Cursor);
@@ -46,27 +50,27 @@ mod spec_parse {
 
   #[test]
   fn should_default_claude_to_opus_when_the_model_is_omitted() {
-    let spec = AgentSpec::parse(&serde_json::json!({"cli": "claude"})).unwrap();
+    let spec = AgentSpec::parse(&spec(r#"cli = "claude""#)).unwrap();
 
     assert_eq!(spec, AgentSpec::claude_opus());
   }
 
   #[test]
   fn should_omit_the_model_when_cursor_does_not_name_one() {
-    let spec = AgentSpec::parse(&serde_json::json!({"cli": "cursor"})).unwrap();
+    let spec = AgentSpec::parse(&spec(r#"cli = "cursor""#)).unwrap();
 
     assert_eq!(spec.model(), None);
   }
 
   #[test]
   fn should_fail_when_cli_is_missing() {
-    let error = AgentSpec::parse(&serde_json::json!({"model": "opus"})).unwrap_err();
+    let error = AgentSpec::parse(&spec(r#"model = "opus""#)).unwrap_err();
     assert_eq!(error.to_string(), "agent spec needs a cli");
   }
 
   #[test]
   fn should_fail_when_a_key_is_unknown() {
-    let error = AgentSpec::parse(&serde_json::json!({"cli": "claude", "foo": 1})).unwrap_err();
+    let error = AgentSpec::parse(&spec("cli = \"claude\"\nfoo = 1")).unwrap_err();
     assert_eq!(error.to_string(), r#"unknown agent setting "foo""#);
   }
 }

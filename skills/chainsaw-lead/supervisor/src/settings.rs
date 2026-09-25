@@ -1,4 +1,4 @@
-//! Human-tuned settings, read from `chainsaw.json` in the run directory.
+//! Human-tuned settings, read from `chainsaw.toml` in the run directory.
 //!
 //! These are inputs to a run, not state of it, so they live in a file the
 //! human edits rather than in the supervisor database, which is disposable.
@@ -7,12 +7,14 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use toml::{Table, Value};
 
 use crate::agent::AgentSpec;
 use crate::domain::Role;
 
-pub const FILE_NAME: &str = "chainsaw.json";
+pub const FILE_NAME: &str = "chainsaw.toml";
+/// The settings file before it became TOML; still present means a stale setup.
+const RETIRED_FILE_NAME: &str = "chainsaw.json";
 pub const DEFAULT_PROMPT_LANDING_SECONDS: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +37,19 @@ impl Default for Settings {
 }
 
 impl Settings {
-  /// Reads `chainsaw.json` from `run_dir`. A missing file means defaults; a
-  /// present file must be a JSON object whose known keys hold the documented types.
+  /// Reads `chainsaw.toml` from `run_dir`. A missing file means defaults; a
+  /// present file must be a TOML table whose known keys hold the documented
+  /// types. A leftover `chainsaw.json` is an error, so settings are never
+  /// silently ignored.
   pub fn load(run_dir: &Path) -> Result<Self> {
+    let retired = run_dir.join(RETIRED_FILE_NAME);
+    if retired.exists() {
+      bail!(
+        "{} is no longer read; move its settings to {} as TOML and delete it",
+        retired.display(),
+        run_dir.join(FILE_NAME).display()
+      );
+    }
     let path = run_dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
       Ok(text) => {
@@ -67,15 +79,12 @@ impl Settings {
   }
 
   fn apply(&mut self, text: &str) -> Result<()> {
-    let value: Value = serde_json::from_str(text)?;
-    let Some(object) = value.as_object() else {
-      bail!("expected a JSON object at the top level");
-    };
-    for (key, value) in object {
+    let table: Table = text.parse()?;
+    for (key, value) in &table {
       match key.as_str() {
         "prompt-landing-seconds" => {
           self.prompt_landing_seconds = value
-            .as_i64()
+            .as_integer()
             .with_context(|| format!("setting {key:?} must be an integer, got {value}"))?;
         }
         "agents" => parse_agents(self, value)?,
@@ -87,10 +96,10 @@ impl Settings {
 }
 
 fn parse_agents(settings: &mut Settings, value: &Value) -> Result<()> {
-  let Some(object) = value.as_object() else {
-    bail!("setting \"agents\" must be a JSON object");
+  let Some(table) = value.as_table() else {
+    bail!("setting \"agents\" must be a table");
   };
-  for (key, value) in object {
+  for (key, value) in table {
     let target = match key.as_str() {
       "lead" => &mut settings.lead,
       "implementer" => &mut settings.implementer,
