@@ -1,7 +1,9 @@
 use super::*;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::domain::Role;
 
 struct ScratchDir(PathBuf);
 
@@ -28,38 +30,51 @@ impl Drop for ScratchDir {
   }
 }
 
-mod load {
+mod read_file {
   use super::*;
 
   #[test]
   fn should_work() {
     let dir = ScratchDir::new();
-    fs::write(
-      dir.path().join(FILE_NAME),
-      r#"{"prompt-landing-seconds": 3}"#,
-    )
-    .unwrap();
+    fs::write(dir.path().join(FILE_NAME), "prompt-landing-seconds = 3\n").unwrap();
 
-    let settings = Settings::load(dir.path()).unwrap();
+    let text = Settings::read_file(dir.path()).unwrap();
 
-    assert_eq!(settings.prompt_landing_seconds(), 3);
+    assert_eq!(text, "prompt-landing-seconds = 3\n");
   }
 
   #[test]
-  fn should_use_defaults_when_the_file_is_absent() {
+  fn should_read_nothing_when_the_file_is_absent() {
     let dir = ScratchDir::new();
 
-    let settings = Settings::load(dir.path()).unwrap();
+    let text = Settings::read_file(dir.path()).unwrap();
 
-    assert_eq!(settings, Settings::default());
+    assert_eq!(text, "");
+  }
+
+  #[test]
+  fn should_fail_when_a_retired_chainsaw_json_is_present() {
+    let dir = ScratchDir::new();
+    fs::write(dir.path().join("chainsaw.json"), "{}").unwrap();
+
+    let error = Settings::read_file(dir.path()).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      format!(
+        "{} is no longer read; move its settings to {} as TOML and delete it",
+        dir.path().join("chainsaw.json").display(),
+        dir.path().join(FILE_NAME).display()
+      )
+    );
   }
 
   #[test]
   fn should_fail_naming_the_file_when_it_is_invalid() {
     let dir = ScratchDir::new();
-    fs::write(dir.path().join(FILE_NAME), "[]").unwrap();
+    fs::write(dir.path().join(FILE_NAME), "nope").unwrap();
 
-    let error = Settings::load(dir.path()).unwrap_err();
+    let error = Settings::read_file(dir.path()).unwrap_err();
 
     assert!(format!("{error:#}").contains(&format!(
       "invalid settings in {}",
@@ -73,25 +88,65 @@ mod parse {
 
   #[test]
   fn should_work() {
-    let settings = Settings::parse(r#"{"prompt-landing-seconds": -1}"#).unwrap();
+    let settings = Settings::parse("prompt-landing-seconds = -1\n").unwrap();
 
     assert_eq!(settings.prompt_landing_seconds(), -1);
   }
 
   #[test]
-  fn should_use_defaults_when_the_object_is_empty() {
-    assert_eq!(Settings::parse("{}").unwrap(), Settings::default());
+  fn should_parse_per_role_agent_clis() {
+    let settings = Settings::parse(
+      r#"
+        [agents.lead]
+        cli = "cursor"
+        model = "composer-2"
+
+        [agents.implementer]
+        cli = "codex"
+        model = "gpt-5.4"
+        args = ["--full-auto"]
+
+        [agents.commentator]
+        cli = "claude"
+        model = "sonnet"
+      "#,
+    )
+    .unwrap();
+
+    assert_eq!(settings.agent(Role::Lead).cli().as_str(), "cursor");
+    assert_eq!(settings.agent(Role::Lead).model(), Some("composer-2"));
+    assert_eq!(settings.agent(Role::Implementer).cli().as_str(), "codex");
+    assert_eq!(settings.agent(Role::Implementer).model(), Some("gpt-5.4"));
+    assert_eq!(
+      settings.agent(Role::Implementer).args(),
+      &["--full-auto".to_owned()]
+    );
+    assert_eq!(settings.agent(Role::Commentator).model(), Some("sonnet"));
   }
 
   #[test]
-  fn should_fail_when_the_top_level_is_not_an_object() {
-    let error = Settings::parse("[1]").unwrap_err();
-    assert_eq!(error.to_string(), "expected a JSON object at the top level");
+  fn should_fail_when_an_agent_role_is_unknown() {
+    let error = Settings::parse("[agents.reviewer]\ncli = \"claude\"\n").unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      r#"unknown agent role "reviewer"; expected lead, implementer, or commentator"#
+    );
+  }
+
+  #[test]
+  fn should_use_defaults_when_the_file_is_empty() {
+    assert_eq!(Settings::parse("").unwrap(), Settings::default());
+  }
+
+  #[test]
+  fn should_fail_when_agents_is_not_a_table() {
+    let error = Settings::parse("agents = 1\n").unwrap_err();
+    assert_eq!(error.to_string(), r#"setting "agents" must be a table"#);
   }
 
   #[test]
   fn should_fail_when_a_key_is_unknown() {
-    let error = Settings::parse(r#"{"prompt-landing-secnds": 1}"#).unwrap_err();
+    let error = Settings::parse("prompt-landing-secnds = 1\n").unwrap_err();
     assert_eq!(
       error.to_string(),
       r#"unknown setting "prompt-landing-secnds""#
@@ -100,7 +155,7 @@ mod parse {
 
   #[test]
   fn should_fail_when_a_value_is_not_an_integer() {
-    let error = Settings::parse(r#"{"prompt-landing-seconds": "15"}"#).unwrap_err();
+    let error = Settings::parse("prompt-landing-seconds = \"15\"\n").unwrap_err();
     assert_eq!(
       error.to_string(),
       r#"setting "prompt-landing-seconds" must be an integer, got "15""#
@@ -108,7 +163,7 @@ mod parse {
   }
 
   #[test]
-  fn should_fail_when_the_text_is_not_json() {
+  fn should_fail_when_the_text_is_not_toml() {
     assert!(Settings::parse("nope").is_err());
   }
 }

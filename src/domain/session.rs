@@ -43,7 +43,7 @@ impl fmt::Display for Role {
   }
 }
 
-/// One Claude Code session under the supervisor's watch. A row is one
+/// One agent session under the supervisor's watch. A row is one
 /// incarnation: relaunching the same name stops this one and starts another.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {

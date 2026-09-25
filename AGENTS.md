@@ -12,7 +12,7 @@ Agentic software development process, minimizing downtime between coding session
 - Lead prompt: `skills/chainsaw-lead/SKILL.md`
 - Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
 - Supervisor binary: `target/debug/chainsaw`, built from `src/`
-- How to write tests: `tests/AGENTS.md` 
+- How to write tests: `tests/AGENTS.md`
 
 ## Running and verifying
 
@@ -36,13 +36,14 @@ How tests should be written is in `tests/AGENTS.md`.
 
 ## Conventions that differ from defaults
 
-- Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
+- Supervisor durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree. Session transcripts follow the role's CLI: Claude Code beside that directory, Cursor under `~/.cursor/projects/`, Codex under `~/.codex/sessions/`.
 
-## Error handling
+## Coordinator error handling
 
-- Let errors propagate to the top of the call stack by default.
+- Do not mask errors in deterministic code. Let them propagate to the top of the call stack by default, with enough details to allow a caller LLM to investigate what went wrong and either fix it or accurately report a bug.
 - In Rust, use `anyhow::Error` and `anyhow::Result` as the default catch-all error type,
   adding context where it helps explain the failure.
 - Create a custom error type or enum variant only when a caller actually needs to
   match it and take different action. Tests matching a variant do not justify an error
   taxonomy on their own.
+
