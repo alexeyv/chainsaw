@@ -37,11 +37,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-  /// Reads `chainsaw.toml` from `run_dir`. A missing file means defaults; a
-  /// present file must be a TOML table whose known keys hold the documented
-  /// types. A leftover `chainsaw.json` is an error, so settings are never
-  /// silently ignored.
-  pub fn load(run_dir: &Path) -> Result<Self> {
+  /// Reads the text of `chainsaw.toml` from `run_dir`, empty when the file is
+  /// absent. The text must parse as settings. A leftover `chainsaw.json` is an
+  /// error, so settings are never silently ignored. A run reads this once;
+  /// see `Store::open`.
+  pub fn read_file(run_dir: &Path) -> Result<String> {
     let retired = run_dir.join(RETIRED_FILE_NAME);
     if retired.exists() {
       bail!(
@@ -53,9 +53,10 @@ impl Settings {
     let path = run_dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
       Ok(text) => {
-        Self::parse(&text).with_context(|| format!("invalid settings in {}", path.display()))
+        Self::parse(&text).with_context(|| format!("invalid settings in {}", path.display()))?;
+        Ok(text)
       }
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
       Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
     }
   }

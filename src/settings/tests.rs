@@ -30,7 +30,7 @@ impl Drop for ScratchDir {
   }
 }
 
-mod load {
+mod read_file {
   use super::*;
 
   #[test]
@@ -38,18 +38,18 @@ mod load {
     let dir = ScratchDir::new();
     fs::write(dir.path().join(FILE_NAME), "prompt-landing-seconds = 3\n").unwrap();
 
-    let settings = Settings::load(dir.path()).unwrap();
+    let text = Settings::read_file(dir.path()).unwrap();
 
-    assert_eq!(settings.prompt_landing_seconds(), 3);
+    assert_eq!(text, "prompt-landing-seconds = 3\n");
   }
 
   #[test]
-  fn should_use_defaults_when_the_file_is_absent() {
+  fn should_read_nothing_when_the_file_is_absent() {
     let dir = ScratchDir::new();
 
-    let settings = Settings::load(dir.path()).unwrap();
+    let text = Settings::read_file(dir.path()).unwrap();
 
-    assert_eq!(settings, Settings::default());
+    assert_eq!(text, "");
   }
 
   #[test]
@@ -57,7 +57,7 @@ mod load {
     let dir = ScratchDir::new();
     fs::write(dir.path().join("chainsaw.json"), "{}").unwrap();
 
-    let error = Settings::load(dir.path()).unwrap_err();
+    let error = Settings::read_file(dir.path()).unwrap_err();
 
     assert_eq!(
       error.to_string(),
@@ -74,7 +74,7 @@ mod load {
     let dir = ScratchDir::new();
     fs::write(dir.path().join(FILE_NAME), "nope").unwrap();
 
-    let error = Settings::load(dir.path()).unwrap_err();
+    let error = Settings::read_file(dir.path()).unwrap_err();
 
     assert!(format!("{error:#}").contains(&format!(
       "invalid settings in {}",

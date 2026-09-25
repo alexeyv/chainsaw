@@ -25,7 +25,6 @@ use crate::logs::{
 };
 use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::settings::Settings;
 use crate::store::{Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
@@ -283,21 +282,14 @@ struct LaunchOptions {
   kind: SessionKind,
 }
 
-/// The session's transcript: the CLI's usual path, then beside the database
-/// when Claude Code agrees about the project directory, otherwise wherever
-/// a matching jsonl was found. None until the transcript exists; an unreadable
-/// `chainsaw.toml` or projects directory is an error, never a guess.
+/// Finds the session's transcript.
+///
+/// Looks first where the role's CLI (claude, codex etc) writes
+/// them, then in the supervisor's own directory, then in the
+/// directories next to it. Returns None if the transcript does not exist
+/// (yet?). Fails if a directory it searches cannot be read.
 fn session_log(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
-  let cli = Settings::load(&store.run_dir)
-    .with_context(|| {
-      format!(
-        "cannot find the transcript of {} ({}): chainsaw.toml names the CLI that writes it",
-        session.name(),
-        session.role()
-      )
-    })?
-    .agent(session.role())
-    .cli();
+  let cli = store.settings.agent(session.role()).cli();
   if let Some(path) = find_session_transcript(cli, &store.run_dir, session.external_session_id())? {
     return Ok(Some(path));
   }
@@ -411,7 +403,7 @@ fn cmd_launch(
   name: &str,
   options: LaunchOptions,
 ) -> Result<()> {
-  let settings = Settings::load(&store.run_dir)?;
+  let settings = &store.settings;
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
@@ -461,7 +453,7 @@ fn cmd_prompt(
     params![name, text, now()],
   )?;
   let prompt_id = store.db.last_insert_rowid();
-  let prompt_landing_millis = Settings::load(&store.run_dir)?.prompt_landing_seconds() * 1000;
+  let prompt_landing_millis = store.settings.prompt_landing_seconds() * 1000;
   let mut prior_idle = false;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
@@ -546,7 +538,7 @@ fn cmd_start_commentator(
   )?;
   store.set_cfg("commentator", &name)?;
   let role_prompt = absolute_path(role_prompt)?;
-  let settings = Settings::load(&store.run_dir)?;
+  let settings = &store.settings;
   let implementer = settings.agent(Role::Implementer);
   let commentator = settings.agent(Role::Commentator);
   cmd_prompt(
@@ -1522,9 +1514,7 @@ fn implementer_transcript_sizes(store: &Store) -> Result<BTreeMap<String, u64>> 
     .collect();
   let mut sizes = transcript_sizes(&store.logs_dir);
   sizes.retain(|name, _| !excluded.contains(name));
-  let cli = Settings::load(&store.run_dir)?
-    .agent(Role::Implementer)
-    .cli();
+  let cli = store.settings.agent(Role::Implementer).cli();
   if cli != AgentCli::Claude {
     for session in sessions
       .iter()

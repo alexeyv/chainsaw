@@ -6,7 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+use crate::settings::Settings;
+
 const SCHEMA_VERSION: i64 = 1;
+/// Config key holding the `chainsaw.toml` text the run was started with.
+const SETTINGS_KEY: &str = "settings";
 
 const SCHEMA: &str = r#"
 create table config(key text primary key, value text);
@@ -56,6 +60,8 @@ pub struct Store {
   pub logs_dir: PathBuf,
   pub path: PathBuf,
   pub db: Connection,
+  /// The run's settings, frozen at its first command; see `frozen_settings`.
+  pub settings: Settings,
 }
 
 /// Claude Code names a project directory after the session's cwd, replacing
@@ -90,11 +96,13 @@ impl Store {
     let db = Connection::open(&path)?;
     db.busy_timeout(Duration::from_secs(30))?;
     initialize_schema(&db)?;
+    let settings = frozen_settings(&db, &run_dir)?;
     Ok(Self {
       run_dir,
       logs_dir,
       path,
       db,
+      settings,
     })
   }
 
@@ -135,6 +143,35 @@ impl Store {
       TransactionBehavior::Immediate,
     )?)
   }
+}
+
+/// The run's first command reads `chainsaw.toml` and keeps its text in the
+/// database; every later command uses that text, whatever happens to the file.
+/// A running session's CLI, and so where its transcript is, cannot change
+/// under it. An invalid file is not kept, so the human can fix it and retry.
+fn frozen_settings(db: &Connection, run_dir: &Path) -> Result<Settings> {
+  let kept = |db: &Connection| -> Result<Option<String>> {
+    Ok(
+      db.query_row(
+        "select value from config where key=?",
+        [SETTINGS_KEY],
+        |row| row.get(0),
+      )
+      .optional()?,
+    )
+  };
+  let text = match kept(db)? {
+    Some(text) => text,
+    None => {
+      db.execute(
+        "insert or ignore into config values(?,?)",
+        params![SETTINGS_KEY, Settings::read_file(run_dir)?],
+      )?;
+      // Another command may have frozen the settings first; its text wins.
+      kept(db)?.context("frozen settings vanished from the database")?
+    }
+  };
+  Settings::parse(&text).context("invalid settings frozen for this run")
 }
 
 /// Milliseconds since the epoch: the unit of every stored timestamp.
@@ -233,6 +270,7 @@ mod tests {
         logs_dir: PathBuf::new(),
         path: path.clone(),
         db,
+        settings: crate::settings::Settings::default(),
       };
       let barrier = Arc::new(Barrier::new(2));
       let blocker_barrier = Arc::clone(&barrier);
