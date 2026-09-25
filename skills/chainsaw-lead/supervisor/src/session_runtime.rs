@@ -19,8 +19,8 @@ pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
 
 /// Cursor (and some Herdr kinds) do not report a session id until the first
-/// prompt. A one-line wake mints that id so launch can register the session.
-const SESSION_ID_WAKE: &str = "Ready. Wait for your task; do not edit files.";
+/// prompt. A single `.` mints that id so launch can register the session.
+const SESSION_ID_WAKE: &str = ".";
 
 #[derive(Clone, Copy, Debug)]
 pub enum SessionKind {

@@ -58,7 +58,7 @@ model = "opus"
 Start the lead yourself with the same CLI named in `agents.lead`. Implementers and
 the commentator are started by the supervisor (`herdr agent start --kind <cli>`).
 Cursor sessions get `--trust --force`. If Herdr has no session id after start, the
-supervisor sends a one-line ready prompt so it can register the session; that is
+supervisor sends a single "." prompt so it can register the session; that is
 not a task. Cursor transcripts usually have no token counts, so the 250k lead-stop
 WARNING will not fire for a Cursor lead.
 

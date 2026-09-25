@@ -16,8 +16,8 @@ the named directory holds no transcripts, look where that implementer's CLI writ
 Claude Code under `~/.claude/projects/` (run directory with every `/` and `.` turned into
 `-`), Cursor under `~/.cursor/projects/<run-dir-with-slashes-as-dashes>/agent-transcripts/`,
 Codex under `~/.codex/sessions/` as `rollout-*-<session-id>.jsonl`. Say so in an
-observation, and use that. A first user line of "Ready. Wait for your task; do not edit
-files." is the supervisor minting a session id, not a confused implementer.
+observation, and use that. A first user line of just "." is the supervisor minting a
+session id, not a task.
 
 Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
 running for the whole run. Each line it prints names transcripts that grew since its
