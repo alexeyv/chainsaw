@@ -1,0 +1,2 @@
+# The shipped supervisor is a copy of src/ made by scripts/release.sh.
+skills/chainsaw-lead/supervisor/** linguist-generated=true
