@@ -881,6 +881,22 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             "lead\tUNAVAILABLE (transcript not found)\n",
         )
 
+    def test_a_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
+        self.launch()
+        self.append_usage("worker", input_tokens=7)
+        daemon = self.start_daemon(expected_exit=1)
+        self.wait_for_state("context       7")
+        transcript = self.session_transcript("worker")
+
+        transcript.unlink()
+        daemon.wait(timeout=10)
+        state = self.cli("state")
+
+        message = f"supervisor: transcript of worker vanished from {transcript}"
+        self.assertEqual(daemon.returncode, 1, self.daemon_report())
+        self.assertIn(message, daemon.stderr_path.read_text())
+        self.assert_failure(state, message)
+
     def test_daemon_observes_a_commit_marker_and_marks_task_committed(self):
         task, sha = self.prepare_committed_task()
 

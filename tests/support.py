@@ -305,7 +305,8 @@ class SupervisorContractCase(unittest.TestCase):
         daemon.wait(timeout=10)
         return state
 
-    def start_daemon(self, lead="lead", session_id=None):
+    def start_daemon(self, lead="lead", session_id=None, expected_exit=0):
+        """Start a daemon that must have exited with `expected_exit` by teardown."""
         session_id = session_id or f"session-{lead}"
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
@@ -329,8 +330,10 @@ class SupervisorContractCase(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.terminate()
                     process.wait(timeout=5)
-            if process.returncode != 0:
-                self.fail(f"daemon did not exit cleanly:{self.daemon_report()}")
+            if process.returncode != expected_exit:
+                self.fail(
+                    f"daemon did not exit with {expected_exit}:{self.daemon_report()}"
+                )
 
         self.addCleanup(cleanup)
         return process

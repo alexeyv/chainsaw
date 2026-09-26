@@ -286,9 +286,18 @@ fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
 
 /// Where the session's transcript is, or None until its agent has written
 /// one. The search can scan every project directory, so a hit is remembered
-/// on the session row and never looked for again.
+/// on the session row and never looked for again. Nothing in a run deletes a
+/// transcript, so a remembered one that is gone means something outside the
+/// run removed it, and that is an error rather than a session reading zero.
 fn session_transcript(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
   if let Some(path) = session.transcript() {
+    if !path.is_file() {
+      bail!(
+        "supervisor: transcript of {} vanished from {}",
+        session.name(),
+        path.display()
+      );
+    }
     return Ok(Some(path.to_owned()));
   }
   let found = agent::for_session(session).transcript(&store.run_dir, session.external_session_id());
