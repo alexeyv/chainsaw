@@ -21,13 +21,13 @@ const LEGACY_FILE_NAME: &str = "chainsaw.json";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
   prompt_timeout: Duration,
-  implementer: Launch,
-  commentator: Launch,
+  implementer: LaunchSettings,
+  commentator: LaunchSettings,
 }
 
 /// What a session of one kind starts with: its agent and that agent's flags
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Launch {
+struct LaunchSettings {
   agent: AgentKind,
   args: Vec<String>,
 }
@@ -72,7 +72,7 @@ impl Settings {
   }
 
   fn build(file: File) -> Result<Self> {
-    let launch = |kind: SessionKind, role: Option<Role>| -> Result<Launch> {
+    let launch = |kind: SessionKind, role: Option<RoleSettings>| -> Result<LaunchSettings> {
       let role = role.unwrap_or_default();
       let agent = match role.agent {
         None => AgentKind::Claude,
@@ -89,7 +89,7 @@ impl Settings {
         .unwrap_or_else(|| agent::implementing(agent).default_args(kind));
       let args = shell_words::split(&args)
         .map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))?;
-      Ok(Launch { agent, args })
+      Ok(LaunchSettings { agent, args })
     };
     Ok(Self {
       prompt_timeout: Duration::from_secs(file.prompt_timeout_seconds.unwrap_or(15)),
@@ -113,7 +113,7 @@ impl Settings {
     &self.launch(kind).args
   }
 
-  fn launch(&self, kind: SessionKind) -> &Launch {
+  fn launch(&self, kind: SessionKind) -> &LaunchSettings {
     match kind {
       SessionKind::Implementer => &self.implementer,
       SessionKind::Commentator => &self.commentator,
@@ -138,8 +138,8 @@ fn accepted_agents() -> String {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct File {
   prompt_timeout_seconds: Option<u64>,
-  implementer: Option<Role>,
-  commentator: Option<Role>,
+  implementer: Option<RoleSettings>,
+  commentator: Option<RoleSettings>,
 }
 
 /// `agent` names the coding agent the role runs, Claude when left out.
@@ -147,7 +147,7 @@ struct File {
 /// value with spaces) and passed to the agent verbatim
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct Role {
+struct RoleSettings {
   agent: Option<String>,
   args: Option<String>,
 }
