@@ -384,7 +384,7 @@ fn cmd_launch(
     id: name,
     run_dir: &store.run_dir,
     kind: launch_options.kind,
-    agent: agent::implementing(agent),
+    agent,
     args: settings.launch_args(launch_options.kind),
   })?;
   let external_session_id = started.external_id;

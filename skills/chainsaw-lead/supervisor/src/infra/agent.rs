@@ -1,7 +1,7 @@
-//! The agent a session runs: which coding CLI sits in the terminal, what
-//! flags it launches with, and where and how its transcript is read. A
-//! session runtime drives the terminal; the agent reads what the process in
-//! it wrote. Every session runs Claude Code today.
+//! The agent a session runs: what flags it launches with, and where and how
+//! its transcript is read. A session runtime launches the CLI an `AgentKind`
+//! names and drives the terminal; the agent reads what the process in it
+//! wrote. Every session runs Claude Code today.
 
 use std::path::{Path, PathBuf};
 
@@ -26,9 +26,6 @@ pub enum PromptState {
 }
 
 pub trait Agent {
-  /// The agent's canonical executable name, as a runtime launches it.
-  fn name(&self) -> &'static str;
-
   /// The flags a session of this kind launches with when settings name none.
   fn default_args(&self, kind: SessionKind) -> String;
 

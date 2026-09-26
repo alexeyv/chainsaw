@@ -11,7 +11,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
-use super::agent::{Agent, Claude};
+use super::agent::Claude;
+use crate::domain::AgentKind;
 
 pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
@@ -36,7 +37,7 @@ pub struct StartSession<'a> {
   pub run_dir: &'a Path,
   pub kind: SessionKind,
   /// Which coding CLI to launch in the pane.
-  pub agent: &'a dyn Agent,
+  pub agent: AgentKind,
   /// The agent's flags, verbatim.
   pub args: &'a [String],
 }
@@ -111,6 +112,13 @@ impl HerdrSessionRuntime {
     serde_json::from_slice(&output.stdout).context("herdr returned invalid JSON")
   }
 
+  /// What Herdr calls an agent chainsaw knows.
+  fn agent_kind(agent: AgentKind) -> &'static str {
+    match agent {
+      AgentKind::Claude => "claude",
+    }
+  }
+
   fn json_string(value: &Value, pointer: &str) -> Result<String> {
     value
       .pointer(pointer)
@@ -168,7 +176,7 @@ impl SessionRuntime for HerdrSessionRuntime {
       "start",
       session.id,
       "--kind",
-      session.agent.name(),
+      Self::agent_kind(session.agent),
       "--pane",
       &pane_id,
       "--",

@@ -15,10 +15,6 @@ use crate::infra::session_runtime::SessionKind;
 pub struct Claude;
 
 impl Agent for Claude {
-  fn name(&self) -> &'static str {
-    "claude"
-  }
-
   /// Today's flags; the commentator keeps slash commands
   fn default_args(&self, kind: SessionKind) -> String {
     let slash = match kind {
