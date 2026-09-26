@@ -12,7 +12,7 @@ use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
 use super::agent::Claude;
-use crate::domain::AgentKind;
+use crate::domain::{AgentKind, Role};
 
 pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
@@ -25,9 +25,15 @@ pub enum SessionKind {
 
 impl SessionKind {
   pub fn label(self) -> &'static str {
+    self.role().as_str()
+  }
+
+  /// The role a session of this kind is recorded with. The lead is never
+  /// launched, so it has no kind.
+  pub fn role(self) -> Role {
     match self {
-      Self::Implementer => "implementer",
-      Self::Commentator => "commentator",
+      Self::Implementer => Role::Implementer,
+      Self::Commentator => Role::Commentator,
     }
   }
 }

@@ -176,16 +176,9 @@ fn run(
     Command::StartCommentator { role_prompt } => {
       cmd_start_commentator(store, runtime, settings, &role_prompt)
     }
-    Command::Launch { name } => cmd_launch(
-      store,
-      runtime,
-      settings,
-      &name,
-      LaunchOptions {
-        role: Role::Implementer,
-        kind: SessionKind::Implementer,
-      },
-    ),
+    Command::Launch { name } => {
+      cmd_launch(store, runtime, settings, &name, SessionKind::Implementer)
+    }
     Command::Prompt {
       name,
       text,
@@ -256,11 +249,6 @@ fn run(
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
   }
-}
-
-struct LaunchOptions {
-  role: Role,
-  kind: SessionKind,
 }
 
 fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
@@ -377,15 +365,15 @@ fn cmd_launch(
   runtime: &dyn SessionRuntime,
   settings: &Settings,
   name: &str,
-  launch_options: LaunchOptions,
+  kind: SessionKind,
 ) -> Result<()> {
-  let agent = settings.launch_agent(launch_options.kind);
+  let agent = settings.launch_agent(kind);
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
-    kind: launch_options.kind,
+    kind,
     agent,
-    args: settings.launch_args(launch_options.kind),
+    args: settings.launch_args(kind),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
@@ -396,7 +384,7 @@ fn cmd_launch(
   session::create(
     &transaction,
     name,
-    launch_options.role,
+    kind.role(),
     agent,
     &external_session_id,
     launched_head.as_deref(),
@@ -503,16 +491,7 @@ fn cmd_start_commentator(
   role_prompt: &Path,
 ) -> Result<()> {
   let name = commentator_agent_name(&store.run_dir);
-  cmd_launch(
-    store,
-    runtime,
-    settings,
-    &name,
-    LaunchOptions {
-      role: Role::Commentator,
-      kind: SessionKind::Commentator,
-    },
-  )?;
+  cmd_launch(store, runtime, settings, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
     store,
