@@ -1089,9 +1089,10 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
     """`watch-transcripts` prints one line per interval naming transcripts that grew."""
 
     def test_reports_growth_of_existing_and_new_transcripts_once_per_interval(self):
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        existing = self.logs_dir / "impl-1.jsonl"
-        existing.write_text("{}\n")
+        self.launch("impl-1")
+        self.launch("impl-2")
+        self.append_text("impl-1", "working")
+        existing = self.session_log("impl-1")
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "watch-transcripts", "--interval-ms", "200"]
         process = subprocess.Popen(
@@ -1101,12 +1102,41 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
-        with existing.open("a") as transcript:
-            transcript.write("{\"more\":1}\n")
-        (self.logs_dir / "impl-2.jsonl").write_text("{}\n")
+        before = existing.stat().st_size
+        self.append_text("impl-1", "still working")
+        self.append_text("impl-2", "starting")
+        grown = existing.stat().st_size - before
+        new = self.session_log("impl-2")
 
         line = process.stdout.readline()
-        self.assertEqual(line, "transcripts grew: impl-1 +11, impl-2 +3\n")
+        expected = sorted([
+            (existing.stem, grown),
+            (new.stem, new.stat().st_size),
+        ])
+        self.assertEqual(
+            line,
+            "transcripts grew: " + ", ".join(f"{name} +{size}" for name, size in expected) + "\n",
+        )
+
+    def test_ignores_a_transcript_that_belongs_to_no_live_implementer(self):
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        stray = self.logs_dir / "stray.jsonl"
+        stray.write_text("{}\n")
+        self.launch("worker")
+        self.append_text("worker", "working")
+        command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
+                   "watch-transcripts", "--interval-ms", "50"]
+        process = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
+        )
+
+        time.sleep(0.1)
+        with stray.open("a") as transcript:
+            transcript.write("{\"more\":1}\n")
+        time.sleep(0.3)
+        process.kill()
+        stdout, _ = process.communicate(timeout=5)
+        self.assertEqual(stdout, "")
 
     def test_ignores_the_commentators_own_transcript(self):
         """Each wake appends to the commentator's transcript; reporting that growth
@@ -1132,8 +1162,8 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.assertEqual(line, f"transcripts grew: {worker_id} +84\n")
 
     def test_stays_silent_while_nothing_grows(self):
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        (self.logs_dir / "impl-1.jsonl").write_text("{}\n")
+        self.launch("worker")
+        self.append_text("worker", "working")
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "watch-transcripts", "--interval-ms", "50"]
         process = subprocess.Popen(

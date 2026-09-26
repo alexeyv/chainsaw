@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -19,10 +19,10 @@ use strum::IntoEnumIterator;
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
 use crate::infra::agent::{self, PromptState};
-use crate::infra::logs::{file_size, format_growth, transcript_growth, transcript_sizes};
 use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
+use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
 use crate::persistence::{calibration, finding, observation, run, session, task};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
@@ -435,7 +435,7 @@ fn cmd_prompt(
     // queued; the state check below then reads what actually arrived.
     let _ = runtime.query(name);
     let path_before = transcript()?;
-    let mut offset = file_size(path_before.as_deref());
+    let mut offset = transcript_size(path_before.as_deref());
     store.db.execute(
       "update prompts set attempts=attempts+1 where id=?",
       [prompt_id],
@@ -693,7 +693,7 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let log_offset = file_size(session_transcript(store, &session)?.as_deref());
+  let log_offset = transcript_size(session_transcript(store, &session)?.as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
@@ -1425,27 +1425,28 @@ fn print_time_summary(store: &Store) -> Result<()> {
 fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
   use std::io::Write;
 
-  let mut before = implementer_transcript_sizes(store)?;
+  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(store)?);
   loop {
     std::thread::sleep(Duration::from_millis(interval_ms));
-    let after = implementer_transcript_sizes(store)?;
-    if let Some(line) = format_growth(&transcript_growth(&before, &after)) {
+    if let Some(line) = monitor.poll(&implementer_transcripts(store)?) {
       println!("{line}");
       std::io::stdout().flush()?;
     }
-    before = after;
   }
 }
 
-fn implementer_transcript_sizes(store: &Store) -> Result<BTreeMap<String, u64>> {
-  let excluded: HashSet<String> = session_snapshots(store)?
+/// The transcripts of the live implementers that have one, by session id.
+fn implementer_transcripts(store: &Store) -> Result<Vec<(String, PathBuf)>> {
+  let mut transcripts = Vec::new();
+  for session in session_snapshots(store)?
     .into_iter()
-    .filter(|session| session.role() != Role::Implementer)
-    .map(|session| session.external_session_id().to_owned())
-    .collect();
-  let mut sizes = transcript_sizes(&store.logs_dir);
-  sizes.retain(|name, _| !excluded.contains(name));
-  Ok(sizes)
+    .filter(Session::can_take_task)
+  {
+    if let Some(path) = session_transcript(store, &session)? {
+      transcripts.push((session.external_session_id().to_owned(), path));
+    }
+  }
+  Ok(transcripts)
 }
 
 fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
@@ -1567,7 +1568,7 @@ fn daemon(
         );
         store.event("session-log-found", &format!("{name}: {}", log.display()))?;
       }
-      let size = file_size(Some(&log));
+      let size = transcript_size(Some(&log));
       let context = agent::for_session(&session).context_size(&log) as i64;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
@@ -1666,7 +1667,7 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.log_offset() as u64;
-    if file_size(Some(log)) <= dispatch_offset {
+    if transcript_size(Some(log)) <= dispatch_offset {
       return Ok(());
     }
     let head = git_stdout(store, &["rev-parse", "HEAD"])?;
