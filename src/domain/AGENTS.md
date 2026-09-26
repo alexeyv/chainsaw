@@ -2,10 +2,10 @@
 
 **`Run`** (`run.rs`): the run as a whole. Always only one, backed by single row database table. Basically, a persistent store for some state that doesn't have any better home. 
 
-**`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Has zero-to-many Tasks.
+**`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Records the agent it was launched with and keeps it for life. Has zero-to-many Tasks.
 
 **`Task`** (`task.rs`): One unit of work. Typically belongs to an implementer Session, sometimes more than one Task belong to the same implementer Session. May be a retry of another Task. Owns ordered list of TaskEvents. The last TaskEvent in the list determines Task's state. Also owns zero-to-many Findings, Observations, and Calibrations.  
-Task is a state machine. Drafted -&gt; Dispatched -&gt; InFlight -&gt; CommittedUnverified -&gt; Accepted | Aborted. Transitions may skip forward; Accepted and Aborted are terminal.
+Task is a state machine. Drafted → Dispatched → InFlight → CommittedUnverified → Accepted | Aborted. Transitions may skip forward; Accepted and Aborted are terminal.
 
 **`TaskEvent`** (`task_event.rs`): Record of a Task state transition. Owned by `Task`.
 

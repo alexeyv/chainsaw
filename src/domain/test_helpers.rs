@@ -5,7 +5,8 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  Calibration, Finding, FindingVerdict, Observation, Role, Run, Session, Task, TaskEvent, TaskState,
+  AgentKind, Calibration, Finding, FindingVerdict, Observation, Role, Run, Session, Task,
+  TaskEvent, TaskState,
 };
 
 pub fn created_at() -> DateTime<Utc> {
@@ -352,6 +353,7 @@ pub struct SessionSpec {
   pub id: i64,
   pub name: &'static str,
   pub role: Role,
+  pub agent: AgentKind,
   pub external_session_id: &'static str,
   pub launched_head: Option<&'static str>,
   pub started_at: DateTime<Utc>,
@@ -370,6 +372,7 @@ pub fn launched_implementer() -> SessionSpec {
     id: 7,
     name: "implementer-1",
     role: Role::Implementer,
+    agent: AgentKind::Claude,
     external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e",
     launched_head: Some("base123"),
     started_at: created_at(),
@@ -400,6 +403,7 @@ pub fn build_session(spec: SessionSpec) -> Result<Session> {
     spec.id,
     spec.name.to_owned(),
     spec.role,
+    spec.agent,
     spec.external_session_id.to_owned(),
     spec.launched_head.map(str::to_owned),
     spec.started_at,
@@ -415,10 +419,11 @@ pub fn build_session(spec: SessionSpec) -> Result<Session> {
 
 pub fn format_session(session: &Session) -> String {
   format!(
-    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\ntranscript: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
+    "id: {}\nname: {:?}\nrole: {}\nagent: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\ntranscript: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
     session.id(),
     session.name(),
     session.role(),
+    session.agent(),
     session.external_session_id(),
     format_option_text(session.launched_head()),
     format_time(session.started_at()),

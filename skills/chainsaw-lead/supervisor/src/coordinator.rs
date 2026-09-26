@@ -17,7 +17,7 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
+use crate::domain::{AgentKind, FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
 use crate::infra::agent::{self, PromptState};
 use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
@@ -377,14 +377,15 @@ fn cmd_launch(
   runtime: &dyn SessionRuntime,
   settings: &Settings,
   name: &str,
-  options: LaunchOptions,
+  launch_options: LaunchOptions,
 ) -> Result<()> {
+  let agent = agent::for_role(launch_options.kind);
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,
-    kind: options.kind,
-    agent: agent::for_role(options.kind),
-    args: settings.launch_args(options.kind),
+    kind: launch_options.kind,
+    agent: agent::implementing(agent),
+    args: settings.launch_args(launch_options.kind),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
@@ -395,7 +396,8 @@ fn cmd_launch(
   session::create(
     &transaction,
     name,
-    options.role,
+    launch_options.role,
+    agent,
     &external_session_id,
     launched_head.as_deref(),
   )?;
@@ -1113,13 +1115,14 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     None => None,
   };
   let mut end = match &session {
-    Some(session) => session_transcript(store, session)?.map_or(0, |transcript| {
-      agent::for_session(session).context_peak(
+    Some(session) => match session_transcript(store, session)? {
+      Some(transcript) => agent::for_session(session).context_peak(
         &transcript,
         task.transcript_offset() as u64,
         next_offset,
-      )
-    }),
+      ),
+      None => 0,
+    },
     None => 0,
   } as i64;
   if end == 0 {
@@ -1624,9 +1627,10 @@ fn daemon(
   store.event("daemon-exit", "")
 }
 
-/// The lead is started by the human, so the daemon registers it from what the
-/// lead says about itself. The same session id keeps its row across daemon
-/// restarts; a different one is a new incarnation and stops the old row.
+/// The lead is started by the human in Claude Code, so the daemon registers
+/// it from what the lead says about itself. The same session id keeps its row
+/// across daemon restarts; a different one is a new incarnation and stops the
+/// old row.
 fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
   let transaction = store.write_transaction()?;
   let current = session::latest_named(&transaction, lead)?;
@@ -1636,7 +1640,14 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
       && session.external_session_id() == lead_session_id
   }) {
     session::stop_named(&transaction, lead)?;
-    session::create(&transaction, lead, Role::Lead, lead_session_id, None)?;
+    session::create(
+      &transaction,
+      lead,
+      Role::Lead,
+      AgentKind::Claude,
+      lead_session_id,
+      None,
+    )?;
   }
   transaction.commit()?;
   Ok(())

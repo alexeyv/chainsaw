@@ -11,7 +11,7 @@ use super::{
 use crate::domain::test_helpers::{
   format_session, format_sessions, format_time, timestamp, within,
 };
-use crate::domain::{Role, Session};
+use crate::domain::{AgentKind, Role, Session};
 use crate::persistence::test_fixture::database;
 
 fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Result<Session> {
@@ -19,6 +19,7 @@ fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Res
     transaction,
     name,
     Role::Implementer,
+    AgentKind::Claude,
     external,
     Some("base123"),
   )
@@ -28,26 +29,27 @@ fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Res
 fn stored_row(db: &Connection, id: i64) -> Result<String> {
   let row = db.query_row(
     "
-      select name, role, external_session_id, launched_head, started_at, stopped_at,
+      select name, role, agent, external_session_id, launched_head, started_at, stopped_at,
              context, context_max, last_growth, kicked_at, over_limit_at, transcript
       from sessions where id=?
       ",
     [id],
     |row| {
       Ok(format!(
-        "{} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?} transcript={:?}",
+        "{} {} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?} transcript={:?}",
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
-        row.get::<_, Option<String>>(3)?,
-        row.get::<_, i64>(4)?,
-        row.get::<_, Option<i64>>(5)?,
-        row.get::<_, i64>(6)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, i64>(5)?,
+        row.get::<_, Option<i64>>(6)?,
         row.get::<_, i64>(7)?,
         row.get::<_, i64>(8)?,
-        row.get::<_, Option<i64>>(9)?,
+        row.get::<_, i64>(9)?,
         row.get::<_, Option<i64>>(10)?,
-        row.get::<_, Option<String>>(11)?,
+        row.get::<_, Option<i64>>(11)?,
+        row.get::<_, Option<String>>(12)?,
       ))
     },
   )?;
@@ -74,6 +76,7 @@ mod create {
         r#"id: 1
 name: "implementer-1"
 role: implementer
+agent: claude
 external_session_id: "uuid-1"
 launched_head: "base123"
 started_at: {started}
@@ -94,7 +97,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None transcript=None",
+        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None transcript=None",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -106,7 +109,14 @@ can_latch_over_limit: true"#,
     let mut db = database();
 
     let transaction = db.transaction()?;
-    let session = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let session = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead",
+      None,
+    )?;
     transaction.commit()?;
 
     assert_eq!(session.role(), Role::Lead);
@@ -156,12 +166,12 @@ mod get {
   }
 
   #[test]
-  fn should_fail_when_the_stored_role_is_unknown() -> Result<()> {
+  fn should_fail_naming_the_session_when_the_stored_role_is_unknown() -> Result<()> {
     let mut db = database();
     db.execute(
       "
-        insert into sessions(name, role, external_session_id, started_at, last_growth)
-        values('implementer-1', 'reviewer', 'uuid-1', 0, 0)
+        insert into sessions(name, role, agent, external_session_id, started_at, last_growth)
+        values('implementer-1', 'reviewer', 'claude', 'uuid-1', 0, 0)
         ",
       [],
     )?;
@@ -169,7 +179,31 @@ mod get {
 
     let error = get(&transaction, 1).unwrap_err();
 
-    assert_eq!(error.to_string(), "unknown session role \"reviewer\"");
+    assert_eq!(
+      error.to_string(),
+      "session implementer-1: unknown session role \"reviewer\""
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_naming_the_session_when_the_stored_agent_is_unknown() -> Result<()> {
+    let mut db = database();
+    db.execute(
+      "
+        insert into sessions(name, role, agent, external_session_id, started_at, last_growth)
+        values('implementer-1', 'implementer', 'cursor', 'uuid-1', 0, 0)
+        ",
+      [],
+    )?;
+    let transaction = db.transaction()?;
+
+    let error = get(&transaction, 1).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "session implementer-1: unknown agent \"cursor\""
+    );
     Ok(())
   }
 }
@@ -210,7 +244,14 @@ mod all {
   fn should_work() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let lead = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead",
+      None,
+    )?;
     let first = implementer(&transaction, "implementer-1", "uuid-1")?;
     stop_named(&transaction, "implementer-1")?;
     let second = implementer(&transaction, "implementer-1", "uuid-2")?;
@@ -337,6 +378,7 @@ mod record_reading {
         r#"id: 1
 name: "implementer-1"
 role: implementer
+agent: claude
 external_session_id: "uuid-1"
 launched_head: "base123"
 started_at: {started}
@@ -462,7 +504,14 @@ mod record_over_limit {
   fn should_work() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let lead = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead",
+      None,
+    )?;
 
     let before = Utc::now();
     let latched = record_over_limit(&transaction, lead.id())?;
@@ -480,7 +529,14 @@ mod record_over_limit {
   fn should_keep_the_latch_when_the_transcript_grows() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let lead = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead",
+      None,
+    )?;
     let latched = record_over_limit(&transaction, lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
 
@@ -495,11 +551,25 @@ mod record_over_limit {
   fn should_leave_a_relaunched_lead_unlatched() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let first = create(&transaction, "lead", Role::Lead, "uuid-lead-1", None)?;
+    let first = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead-1",
+      None,
+    )?;
     record_over_limit(&transaction, first.id())?;
     stop_named(&transaction, "lead")?;
 
-    let second = create(&transaction, "lead", Role::Lead, "uuid-lead-2", None)?;
+    let second = create(
+      &transaction,
+      "lead",
+      Role::Lead,
+      AgentKind::Claude,
+      "uuid-lead-2",
+      None,
+    )?;
 
     assert_eq!(second.over_limit_at(), None);
     assert!(second.can_latch_over_limit());

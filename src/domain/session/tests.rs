@@ -1,7 +1,7 @@
-use crate::domain::Role;
 use crate::domain::test_helpers::{
   SessionSpec, build_session, format_session, launched_implementer, timestamp, working_implementer,
 };
+use crate::domain::{AgentKind, Role};
 
 mod role_try_from {
   use super::*;
@@ -25,6 +25,22 @@ mod role_try_from {
   }
 }
 
+mod agent_kind_try_from {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(AgentKind::try_from("claude").unwrap(), AgentKind::Claude);
+    assert_eq!(AgentKind::Claude.to_string(), "claude");
+  }
+
+  #[test]
+  fn should_fail_when_the_agent_is_unknown() {
+    let error = AgentKind::try_from("cursor").unwrap_err();
+    assert_eq!(error.to_string(), "unknown agent \"cursor\"");
+  }
+}
+
 mod new {
   use super::*;
 
@@ -37,6 +53,7 @@ mod new {
       r#"id: 7
 name: "implementer-1"
 role: implementer
+agent: claude
 external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
 launched_head: "base123"
 started_at: 2023-11-14T22:13:20Z
@@ -63,6 +80,7 @@ can_latch_over_limit: true"#
       r#"id: 7
 name: "implementer-1"
 role: implementer
+agent: claude
 external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
 launched_head: "base123"
 started_at: 2023-11-14T22:13:20Z
@@ -109,6 +127,7 @@ can_latch_over_limit: true"#
       r#"id: 7
 name: "implementer-1"
 role: implementer
+agent: claude
 external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
 launched_head: "base123"
 started_at: 2023-11-14T22:13:20Z
@@ -144,6 +163,7 @@ can_latch_over_limit: false"#
       r#"id: 7
 name: "lead"
 role: lead
+agent: claude
 external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
 launched_head: none
 started_at: 2023-11-14T22:13:20Z

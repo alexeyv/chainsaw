@@ -1,15 +1,16 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{Role, Session};
+use crate::domain::{AgentKind, Role, Session};
 
 struct SessionRow {
   id: i64,
   name: String,
   role: String,
+  agent: String,
   external_session_id: String,
   launched_head: Option<String>,
   started_at: i64,
@@ -23,17 +24,18 @@ struct SessionRow {
 }
 
 const SELECT: &str = "
-  select id, name, role, external_session_id, launched_head, started_at, stopped_at,
+  select id, name, role, agent, external_session_id, launched_head, started_at, stopped_at,
          context, context_max, last_growth, kicked_at, over_limit_at, transcript
   from sessions
 ";
 
-/// Register a session that has just started. Its transcript has not grown yet,
-/// so its last growth is its start.
+/// Register a session that has just started with `agent`. Its transcript has
+/// not grown yet, so its last growth is its start.
 pub fn create(
   transaction: &Transaction<'_>,
   name: &str,
   role: Role,
+  agent: AgentKind,
   external_session_id: &str,
   launched_head: Option<&str>,
 ) -> Result<Session> {
@@ -41,13 +43,14 @@ pub fn create(
   let id = transaction.query_row(
     "
       insert into sessions(
-        name, role, external_session_id, launched_head, started_at, last_growth
-      ) values (?1, ?2, ?3, ?4, ?5, ?5)
+        name, role, agent, external_session_id, launched_head, started_at, last_growth
+      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6)
       returning id
       ",
     params![
       name,
       role.as_str(),
+      agent.as_str(),
       external_session_id,
       launched_head,
       started_at.timestamp_millis(),
@@ -149,6 +152,7 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     id: row.get("id")?,
     name: row.get("name")?,
     role: row.get("role")?,
+    agent: row.get("agent")?,
     external_session_id: row.get("external_session_id")?,
     launched_head: row.get("launched_head")?,
     started_at: row.get("started_at")?,
@@ -163,10 +167,14 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
 }
 
 fn materialize(row: SessionRow) -> Result<Session> {
+  let on_session = |error: anyhow::Error| anyhow!("session {}: {error}", row.name);
+  let role = Role::try_from(row.role.as_str()).map_err(on_session)?;
+  let agent = AgentKind::try_from(row.agent.as_str()).map_err(on_session)?;
   Session::new(
     row.id,
     row.name,
-    Role::try_from(row.role.as_str())?,
+    role,
+    agent,
     row.external_session_id,
     row.launched_head,
     time(row.started_at, "started_at")?,

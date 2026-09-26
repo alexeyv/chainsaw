@@ -16,7 +16,8 @@ create table run(
 insert into run(id) values(1);
 create table sessions(
   id integer primary key, name text not null, role text not null,
-  external_session_id text not null unique, launched_head text,
+  agent text not null, external_session_id text not null unique,
+  launched_head text,
   started_at int not null, stopped_at int,
   context int not null default 0, context_max int not null default 0,
   last_growth int not null, kicked_at int, over_limit_at int,

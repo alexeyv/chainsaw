@@ -44,6 +44,38 @@ impl fmt::Display for Role {
   }
 }
 
+/// Which coding agent runs a session. Only Claude Code today. The name is
+/// what the session row stores.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentKind {
+  Claude,
+}
+
+impl AgentKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Claude => "claude",
+    }
+  }
+}
+
+impl TryFrom<&str> for AgentKind {
+  type Error = anyhow::Error;
+
+  fn try_from(value: &str) -> Result<Self> {
+    match value {
+      "claude" => Ok(Self::Claude),
+      value => bail!("unknown agent {value:?}"),
+    }
+  }
+}
+
+impl fmt::Display for AgentKind {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(self.as_str())
+  }
+}
+
 /// One agent session under the supervisor's watch. A row is one
 /// incarnation: relaunching the same name stops this one and starts another.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,6 +83,7 @@ pub struct Session {
   id: i64,
   name: String,
   role: Role,
+  agent: AgentKind,
   external_session_id: String,
   launched_head: Option<String>,
   started_at: DateTime<Utc>,
@@ -69,6 +102,7 @@ impl Session {
     id: i64,
     name: String,
     role: Role,
+    agent: AgentKind,
     external_session_id: String,
     launched_head: Option<String>,
     started_at: DateTime<Utc>,
@@ -112,6 +146,7 @@ impl Session {
       id,
       name,
       role,
+      agent,
       external_session_id,
       launched_head,
       started_at,
@@ -135,6 +170,10 @@ impl Session {
 
   pub fn role(&self) -> Role {
     self.role
+  }
+
+  pub fn agent(&self) -> AgentKind {
+    self.agent
   }
 
   pub fn external_session_id(&self) -> &str {

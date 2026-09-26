@@ -868,6 +868,14 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertEqual(context.stdout, "lead\t123\n")
 
+    def test_a_session_naming_an_unknown_agent_is_an_error(self):
+        self.launch()
+        self.write_supervisor_db("update sessions set agent='cursor' where name='worker'")
+
+        result = self.cli("context", "worker")
+
+        self.assert_failure(result, 'session worker: unknown agent "cursor"')
+
     def test_missing_lead_transcript_is_not_reported_as_zero_context(self):
         daemon = self.start_daemon()
         state = self.wait_for_state("context UNAVAILABLE")

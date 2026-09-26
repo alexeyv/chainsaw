@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 use super::session_runtime::SessionKind;
-use crate::domain::Session;
+use crate::domain::{AgentKind, Session};
 
 mod claude;
 
@@ -73,13 +73,20 @@ pub trait Agent {
 }
 
 /// The agent a session of this kind launches with.
-pub fn for_role(_kind: SessionKind) -> &'static dyn Agent {
-  &Claude
+pub fn for_role(_kind: SessionKind) -> AgentKind {
+  AgentKind::Claude
 }
 
-/// The agent behind a session already started.
-pub fn for_session(_session: &Session) -> &'static dyn Agent {
-  &Claude
+/// The agent behind a session already started: the one its row names.
+pub fn for_session(session: &Session) -> &'static dyn Agent {
+  implementing(session.agent())
+}
+
+/// The implementation of a named agent.
+pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
+  match kind {
+    AgentKind::Claude => &Claude,
+  }
 }
 
 /// The transcript between two byte offsets, or to its end, tolerating a cut

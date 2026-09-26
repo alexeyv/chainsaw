@@ -67,7 +67,7 @@ impl Settings {
       let args = role
         .unwrap_or_default()
         .args
-        .unwrap_or_else(|| agent::for_role(kind).default_args(kind));
+        .unwrap_or_else(|| agent::implementing(agent::for_role(kind)).default_args(kind));
       shell_words::split(&args).map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))
     };
     Ok(Self {
