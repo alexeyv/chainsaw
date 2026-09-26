@@ -17,12 +17,15 @@ struct TaskRow {
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
   context_size_start: Option<i64>,
+  commentary_requested_at: Option<i64>,
+  commentary_delivered_at: Option<i64>,
 }
 
 const SELECT: &str = "
   select id, text, predicted_files, predicted_lines, session_id,
          commit_sha, created_at, retry_of_task_id, log_offset,
-         base_head, predicted_file_list, context_size_start
+         base_head, predicted_file_list, context_size_start,
+         commentary_requested_at, commentary_delivered_at
   from tasks
 ";
 
@@ -222,6 +225,37 @@ pub fn abort(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Tas
   )
 }
 
+/// Stamp the moment commentary on the task's commit was first requested from
+/// the commentator. Returns `false` when a request is already recorded; the
+/// first stamp stands.
+pub fn record_commentary_request(transaction: &Transaction<'_>, id: i64) -> Result<bool> {
+  record_commentary_stamp(transaction, id, "commentary_requested_at")
+}
+
+/// Stamp the moment the commentator's review of the task's commit was first
+/// observed. Returns `false` when a delivery is already recorded.
+pub fn record_commentary_delivery(transaction: &Transaction<'_>, id: i64) -> Result<bool> {
+  record_commentary_stamp(transaction, id, "commentary_delivered_at")
+}
+
+/// Write-once: the column is set only while it is still null, and only on a
+/// task that has a commit for the commentator to review.
+fn record_commentary_stamp(transaction: &Transaction<'_>, id: i64, column: &str) -> Result<bool> {
+  let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
+  if !matches!(
+    current.state(),
+    TaskState::CommittedUnverified | TaskState::Accepted
+  ) || current.commit_sha().is_none()
+  {
+    bail!("task {id} is {}, not ready for commentary", current.state());
+  }
+  let changed = transaction.execute(
+    &format!("update tasks set {column}=? where id=? and {column} is null"),
+    params![Utc::now().timestamp_millis(), id],
+  )?;
+  Ok(changed == 1)
+}
+
 /// Move a task forward to `next`, recording an optional reason for the move.
 /// Advancing to the state a task already occupies is idempotent: `same_fact`
 /// checks that what the caller re-observed is what was recorded, and then
@@ -290,6 +324,8 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     base_head: row.get("base_head")?,
     predicted_file_list,
     context_size_start: row.get("context_size_start")?,
+    commentary_requested_at: row.get("commentary_requested_at")?,
+    commentary_delivered_at: row.get("commentary_delivered_at")?,
   })
 }
 
@@ -302,13 +338,20 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.predicted_lines,
     row.session_id,
     row.commit_sha,
-    DateTime::from_timestamp_millis(row.created_at)
-      .context("task created_at is outside the supported range")?,
+    time(row.created_at, "created_at")?,
     row.retry_of_task_id,
     row.log_offset,
     row.base_head,
     row.predicted_file_list,
     row.context_size_start,
+    row
+      .commentary_requested_at
+      .map(|millis| time(millis, "commentary_requested_at"))
+      .transpose()?,
+    row
+      .commentary_delivered_at
+      .map(|millis| time(millis, "commentary_delivered_at"))
+      .transpose()?,
     events,
   )
 }
@@ -332,11 +375,15 @@ fn load_events(transaction: &Transaction<'_>, task_id: i64) -> Result<Vec<TaskEv
     .map(|row| {
       let (id, state, reason, created_at) = row?;
       let state = TaskState::try_from(state.as_str())?;
-      let created_at = DateTime::from_timestamp_millis(created_at)
-        .context("task event created_at is outside the supported range")?;
+      let created_at = time(created_at, "event created_at")?;
       TaskEvent::new(id, state, reason, created_at)
     })
     .collect()
+}
+
+fn time(millis: i64, field: &str) -> Result<DateTime<Utc>> {
+  DateTime::from_timestamp_millis(millis)
+    .with_context(|| format!("task {field} is outside the supported range"))
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ use crate::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
   format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
 };
-use crate::persistence::{calibration, commentary_delivery, finding, observation, session, task};
+use crate::persistence::{calibration, finding, observation, session, task};
 use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::settings::Settings;
 use crate::store::{Store, now};
@@ -867,7 +867,7 @@ fn cmd_task_record_commentary(
     );
   }
   let transaction = store.write_transaction()?;
-  if !commentary_delivery::record(&transaction, task_id)? {
+  if !task::record_commentary_delivery(&transaction, task_id)? {
     bail!("supervisor: commentary delivery is already recorded for task {task_id}");
   }
   transaction.commit()?;
@@ -1284,15 +1284,6 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
   println!("tasks");
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
-  let deliveries = tasks
-    .iter()
-    .map(|task| {
-      Ok((
-        task.id(),
-        commentary_delivery::delivered_at(&transaction, task.id())?,
-      ))
-    })
-    .collect::<Result<HashMap<_, _>>>()?;
   transaction.commit()?;
   for task in tasks {
     let mut timeline = TaskState::iter()
@@ -1301,7 +1292,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
           .map(|at| format!("{state}@{}", clock_time(at)))
       })
       .collect::<Vec<_>>();
-    if let Some(delivered_at) = deliveries.get(&task.id()).copied().flatten() {
+    if let Some(delivered_at) = task.commentary_delivered_at() {
       timeline.push(format!(
         "commentary-delivered@{}",
         clock_time(delivered_at.timestamp_millis())
@@ -1730,33 +1721,25 @@ fn observe_commentator(
     quiet,
   } = reading;
   let transaction = store.db.unchecked_transaction()?;
-  let mut pending = Vec::new();
-  for task in task::all(&transaction)? {
-    if matches!(
-      task.state(),
-      TaskState::CommittedUnverified | TaskState::Accepted
-    ) && task.commit_sha().is_some()
-      && commentary_delivery::delivered_at(&transaction, task.id())?.is_none()
-    {
-      let woken_at = commentary_delivery::woken_at(&transaction, task.id())?;
-      pending.push((task, woken_at));
-    }
-  }
+  let pending = task::all(&transaction)?
+    .into_iter()
+    .filter(Task::awaits_commentary)
+    .collect::<Vec<_>>();
   transaction.commit()?;
   let text = log
     .map(|log| fs::read_to_string(log).unwrap_or_default())
     .unwrap_or_default();
-  for (task, woken_at) in pending {
+  for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
     if commentator_log_mentions(&text, abbreviation) {
       let transaction = store.write_transaction()?;
-      let recorded = commentary_delivery::record(&transaction, task.id())?;
+      let recorded = task::record_commentary_delivery(&transaction, task.id())?;
       transaction.commit()?;
       if recorded {
         store.event("commentary-delivered", &format!("task {}", task.id()))?;
       }
-    } else if woken_at.is_none()
+    } else if task.commentary_requested_at().is_none()
       && daemon_prompt(
         store,
         runtime,
@@ -1769,7 +1752,7 @@ fn observe_commentator(
       )
     {
       let transaction = store.write_transaction()?;
-      let recorded = commentary_delivery::record_wake(&transaction, task.id())?;
+      let recorded = task::record_commentary_request(&transaction, task.id())?;
       transaction.commit()?;
       if recorded {
         store.event("commentary-wake", &format!("task {} {sha}", task.id()))?;

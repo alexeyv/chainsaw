@@ -89,6 +89,8 @@ pub struct Task {
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
   context_size_start: Option<i64>,
+  commentary_requested_at: Option<DateTime<Utc>>,
+  commentary_delivered_at: Option<DateTime<Utc>>,
   events: Vec<TaskEvent>,
 }
 
@@ -107,6 +109,8 @@ impl Task {
     base_head: Option<String>,
     predicted_file_list: Option<Vec<String>>,
     context_size_start: Option<i64>,
+    commentary_requested_at: Option<DateTime<Utc>>,
+    commentary_delivered_at: Option<DateTime<Utc>>,
     events: Vec<TaskEvent>,
   ) -> Result<Self> {
     require_positive("id", id)?;
@@ -131,6 +135,11 @@ impl Task {
     if state.requires_commit() && commit_sha.is_none() {
       bail!("{state:?} task requires a commit");
     }
+    if (commentary_requested_at.is_some() || commentary_delivered_at.is_some())
+      && commit_sha.is_none()
+    {
+      bail!("commentary on task {id} requires a commit");
+    }
     validate_predicted_files(predicted_files, predicted_file_list.as_deref())?;
 
     Ok(Self {
@@ -146,6 +155,8 @@ impl Task {
       base_head,
       predicted_file_list,
       context_size_start,
+      commentary_requested_at,
+      commentary_delivered_at,
       events,
     })
   }
@@ -215,6 +226,23 @@ impl Task {
 
   pub fn context_size_start(&self) -> Option<i64> {
     self.context_size_start
+  }
+
+  /// When commentary on this task's commit was first requested from the commentator.
+  pub fn commentary_requested_at(&self) -> Option<DateTime<Utc>> {
+    self.commentary_requested_at
+  }
+
+  /// When the commentator's review of this task's commit was first observed.
+  pub fn commentary_delivered_at(&self) -> Option<DateTime<Utc>> {
+    self.commentary_delivered_at
+  }
+
+  /// A committed task whose commit the commentator has not yet reviewed.
+  pub fn awaits_commentary(&self) -> bool {
+    self.state().requires_commit()
+      && self.commit_sha.is_some()
+      && self.commentary_delivered_at.is_none()
   }
 
   pub fn events(&self) -> &[TaskEvent] {

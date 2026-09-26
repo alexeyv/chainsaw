@@ -2,7 +2,9 @@ use strum::IntoEnumIterator;
 
 use super::TaskState;
 use crate::domain::TaskEvent;
-use crate::domain::test_helpers::{TaskSpec, build, drafted_task, event, format_task, task_in};
+use crate::domain::test_helpers::{
+  TaskSpec, build, drafted_task, event, format_task, task_in, timestamp,
+};
 
 mod can_transition_to {
   use super::*;
@@ -130,6 +132,8 @@ log_offset: 0
 base_head: none
 predicted_file_list: none
 context_size_start: none
+commentary_requested_at: none
+commentary_delivered_at: none
 events:
   1 drafted none"#
     );
@@ -160,6 +164,8 @@ log_offset: 100
 base_head: "base123"
 predicted_file_list: ["src/a.rs", "src/b.rs"]
 context_size_start: 900
+commentary_requested_at: none
+commentary_delivered_at: none
 events:
   1 drafted none
   2 dispatched none
@@ -370,6 +376,83 @@ events:
         format!("{state:?} task requires a commit")
       );
     }
+  }
+
+  #[test]
+  fn should_fail_when_commentary_is_recorded_without_a_commit() {
+    let requested = build(TaskSpec {
+      commentary_requested_at: Some(timestamp(1_700_000_010)),
+      ..drafted_task()
+    })
+    .unwrap_err();
+    let delivered = build(TaskSpec {
+      commit_sha: None,
+      commentary_delivered_at: Some(timestamp(1_700_000_020)),
+      ..task_in(TaskState::InFlight, None)
+    })
+    .unwrap_err();
+
+    assert_eq!(
+      requested.to_string(),
+      "commentary on task 3 requires a commit"
+    );
+    assert_eq!(
+      delivered.to_string(),
+      "commentary on task 3 requires a commit"
+    );
+  }
+}
+
+mod awaits_commentary {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let committed = build(task_in(TaskState::CommittedUnverified, None)).unwrap();
+    let accepted = build(task_in(TaskState::Accepted, Some("gate passed"))).unwrap();
+
+    assert!(committed.awaits_commentary());
+    assert!(accepted.awaits_commentary());
+  }
+
+  #[test]
+  fn should_still_await_when_commentary_was_only_requested() {
+    let task = build(TaskSpec {
+      commentary_requested_at: Some(timestamp(1_700_000_010)),
+      ..task_in(TaskState::CommittedUnverified, None)
+    })
+    .unwrap();
+
+    assert!(task.awaits_commentary());
+  }
+
+  #[test]
+  fn should_be_false_when_commentary_was_delivered() {
+    let task = build(TaskSpec {
+      commentary_requested_at: Some(timestamp(1_700_000_010)),
+      commentary_delivered_at: Some(timestamp(1_700_000_020)),
+      ..task_in(TaskState::Accepted, Some("gate passed"))
+    })
+    .unwrap();
+
+    assert!(!task.awaits_commentary());
+  }
+
+  #[test]
+  fn should_be_false_when_the_task_has_not_committed() {
+    let drafted = build(drafted_task()).unwrap();
+    let in_flight = build(task_in(TaskState::InFlight, None)).unwrap();
+
+    assert!(!drafted.awaits_commentary());
+    assert!(!in_flight.awaits_commentary());
+  }
+
+  #[test]
+  fn should_be_false_when_the_task_was_aborted_after_committing() {
+    let task = build(task_in(TaskState::Aborted, Some("gate failed"))).unwrap();
+
+    assert_eq!(task.commit_sha(), Some("abc123"));
+    assert!(!task.awaits_commentary());
   }
 }
 

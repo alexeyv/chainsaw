@@ -3,8 +3,8 @@ use chrono::Utc;
 use rusqlite::Transaction;
 
 use super::{
-  abort, accept, advance, all, create, dispatch, get, predecessor, record_commit, take_flight,
-  tasks_for_session,
+  abort, accept, advance, all, create, dispatch, get, predecessor, record_commentary_delivery,
+  record_commentary_request, record_commit, take_flight, tasks_for_session,
 };
 use crate::domain::test_helpers::{format_task, format_tasks, format_time, within};
 use crate::domain::{Task, TaskState};
@@ -19,6 +19,22 @@ fn draft(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
 fn dispatched(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
   let task = draft(transaction, text)?;
   dispatch(transaction, task.id(), 7, 0, None)
+}
+
+/// A task dispatched to session 7, flown, and committed as `landed123`.
+fn committed(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
+  let task = dispatched(transaction, text)?;
+  take_flight(transaction, task.id(), "base123", 900)?;
+  record_commit(transaction, task.id(), "landed123", None)
+}
+
+fn stored_commentary(db: &rusqlite::Connection, id: i64) -> Result<(Option<i64>, Option<i64>)> {
+  let stored = db.query_row(
+    "select commentary_requested_at, commentary_delivered_at from tasks where id=?",
+    [id],
+    |row| Ok((row.get(0)?, row.get(1)?)),
+  )?;
+  Ok(stored)
 }
 
 fn states_of(task: &Task) -> Vec<TaskState> {
@@ -88,6 +104,8 @@ log_offset: 0
 base_head: none
 predicted_file_list: ["src/domain/task.rs", "src/store.rs"]
 context_size_start: none
+commentary_requested_at: none
+commentary_delivered_at: none
 events:
   1 drafted none"#,
         format_time(task.created_at())
@@ -714,6 +732,264 @@ mod abort {
       error.to_string(),
       "task 1 cannot advance from accepted to aborted"
     );
+    Ok(())
+  }
+}
+
+mod record_commentary_request {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "request commentary")?;
+
+    let before = Utc::now();
+    let recorded = record_commentary_request(&transaction, task.id())?;
+    let requested = get(&transaction, task.id())?.expect("requested task");
+    transaction.commit()?;
+    let after = Utc::now();
+
+    assert!(recorded);
+    let requested_at = requested
+      .commentary_requested_at()
+      .expect("request timestamp");
+    assert!(within(requested_at, before, after));
+    assert_eq!(requested.commentary_delivered_at(), None);
+    assert_eq!(
+      stored_commentary(&db, task.id())?,
+      (Some(requested_at.timestamp_millis()), None)
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_the_first_request_when_recorded_again() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "request once")?;
+    record_commentary_request(&transaction, task.id())?;
+    let first = get(&transaction, task.id())?.expect("requested task");
+
+    let recorded_again = record_commentary_request(&transaction, task.id())?;
+    let second = get(&transaction, task.id())?.expect("requested task");
+    transaction.commit()?;
+
+    assert!(!recorded_again);
+    assert!(first.commentary_requested_at().is_some());
+    assert_eq!(format_task(&second), format_task(&first));
+    Ok(())
+  }
+
+  #[test]
+  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "request then roll back")?;
+    transaction.commit()?;
+
+    let transaction = db.transaction()?;
+    record_commentary_request(&transaction, task.id())?;
+    transaction.rollback()?;
+
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_without_writing_when_the_task_has_no_commit() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "not committed")?;
+
+    let error = record_commentary_request(&transaction, task.id()).unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("dispatched task");
+    transaction.commit()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is dispatched, not ready for commentary"
+    );
+    assert_eq!(format_task(&unchanged), format_task(&task));
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_without_writing_when_the_task_was_aborted_after_committing() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "aborted after commit")?;
+    let task = abort(&transaction, task.id(), "gate failed")?;
+
+    let error = record_commentary_request(&transaction, task.id()).unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("aborted task");
+    transaction.commit()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is aborted, not ready for commentary"
+    );
+    assert_eq!(format_task(&unchanged), format_task(&task));
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_task_does_not_exist() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    let error = record_commentary_request(&transaction, 7).unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(error.to_string(), "task 7 is missing");
+    Ok(())
+  }
+}
+
+mod record_commentary_delivery {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "deliver commentary")?;
+
+    let before = Utc::now();
+    let recorded = record_commentary_delivery(&transaction, task.id())?;
+    let delivered = get(&transaction, task.id())?.expect("delivered task");
+    transaction.commit()?;
+    let after = Utc::now();
+
+    assert!(recorded);
+    let delivered_at = delivered
+      .commentary_delivered_at()
+      .expect("delivery timestamp");
+    assert!(within(delivered_at, before, after));
+    assert_eq!(delivered.commentary_requested_at(), None);
+    assert!(!delivered.awaits_commentary());
+    assert_eq!(
+      stored_commentary(&db, task.id())?,
+      (None, Some(delivered_at.timestamp_millis()))
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_the_first_delivery_when_recorded_again() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "deliver once")?;
+    record_commentary_delivery(&transaction, task.id())?;
+    let first = get(&transaction, task.id())?.expect("delivered task");
+
+    let recorded_again = record_commentary_delivery(&transaction, task.id())?;
+    let second = get(&transaction, task.id())?.expect("delivered task");
+    transaction.commit()?;
+
+    assert!(!recorded_again);
+    assert!(first.commentary_delivered_at().is_some());
+    assert_eq!(format_task(&second), format_task(&first));
+    Ok(())
+  }
+
+  #[test]
+  fn should_leave_the_request_untouched_when_delivering_a_requested_task() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "request then deliver")?;
+    record_commentary_request(&transaction, task.id())?;
+    let requested = get(&transaction, task.id())?.expect("requested task");
+
+    let recorded = record_commentary_delivery(&transaction, task.id())?;
+    let delivered = get(&transaction, task.id())?.expect("delivered task");
+    transaction.commit()?;
+
+    assert!(recorded);
+    assert_eq!(
+      delivered.commentary_requested_at(),
+      requested.commentary_requested_at()
+    );
+    assert!(delivered.commentary_delivered_at().is_some());
+    Ok(())
+  }
+
+  #[test]
+  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "deliver then roll back")?;
+    transaction.commit()?;
+
+    let transaction = db.transaction()?;
+    record_commentary_delivery(&transaction, task.id())?;
+    transaction.rollback()?;
+
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_without_writing_when_the_task_has_no_commit() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let task = draft(&transaction, "not committed")?;
+
+    let error = record_commentary_delivery(&transaction, task.id()).unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("drafted task");
+    transaction.commit()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is drafted, not ready for commentary"
+    );
+    assert_eq!(format_task(&unchanged), format_task(&task));
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_without_writing_when_the_task_was_aborted_after_committing() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = committed(&transaction, "aborted after commit")?;
+    let task = abort(&transaction, task.id(), "gate failed")?;
+
+    let error = record_commentary_delivery(&transaction, task.id()).unwrap_err();
+    let unchanged = get(&transaction, task.id())?.expect("aborted task");
+    transaction.commit()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is aborted, not ready for commentary"
+    );
+    assert_eq!(format_task(&unchanged), format_task(&task));
+    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_task_does_not_exist() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    let error = record_commentary_delivery(&transaction, 7).unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(error.to_string(), "task 7 is missing");
     Ok(())
   }
 }

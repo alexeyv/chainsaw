@@ -20,13 +20,11 @@ create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),
   log_offset int default 0, base_head text, predicted_file_list text,
-  context_size_start int);
+  context_size_start int, commentary_requested_at int, commentary_delivered_at int);
 create table task_events(
   id integer primary key autoincrement,
   task_id int not null references tasks(id), state text not null,
   reason text, created_at int not null);
-create table commentary_deliveries(
-  task_id int primary key references tasks(id), delivered_at int, woken_at int);
 create table prompts(id integer primary key, session text, text text,
   sent_at int, landed_at int, attempts int);
 create table calibrations(
@@ -298,8 +296,14 @@ mod tests {
       [],
       |row| row.get::<_, i64>(0),
     )?;
-    let commentary_delivery_columns = db.query_row(
-      "select count(*) from pragma_table_info('commentary_deliveries')",
+    let commentary_columns = db.query_row(
+      "select count(*) from pragma_table_info('tasks')
+       where name in ('commentary_requested_at', 'commentary_delivered_at')",
+      [],
+      |row| row.get::<_, i64>(0),
+    )?;
+    let commentary_delivery_tables = db.query_row(
+      "select count(*) from sqlite_schema where type='table' and name='commentary_deliveries'",
       [],
       |row| row.get::<_, i64>(0),
     )?;
@@ -309,7 +313,22 @@ mod tests {
     assert_eq!(observation_foreign_keys, 1);
     assert_eq!(task_state_columns, 0);
     assert_eq!(legacy_finding_columns, 0);
-    assert_eq!(commentary_delivery_columns, 3);
+    assert_eq!(commentary_columns, 2);
+    assert_eq!(commentary_delivery_tables, 0);
+    Ok(())
+  }
+
+  #[test]
+  fn refuses_a_database_from_another_schema_version() -> Result<()> {
+    let db = Connection::open_in_memory()?;
+    db.execute_batch("pragma user_version=2;")?;
+
+    let error = initialize_schema(&db).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "database schema version 2 is unsupported; expected 1: remove the database and start a new run"
+    );
     Ok(())
   }
 

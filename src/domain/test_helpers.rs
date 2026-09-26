@@ -236,6 +236,8 @@ pub struct TaskSpec {
   pub base_head: Option<&'static str>,
   pub predicted_file_list: Option<Vec<&'static str>>,
   pub context_size_start: Option<i64>,
+  pub commentary_requested_at: Option<DateTime<Utc>>,
+  pub commentary_delivered_at: Option<DateTime<Utc>>,
   pub events: Vec<TaskEvent>,
 }
 
@@ -254,6 +256,8 @@ pub fn drafted_task() -> TaskSpec {
     base_head: None,
     predicted_file_list: None,
     context_size_start: None,
+    commentary_requested_at: None,
+    commentary_delivered_at: None,
     events: events_through(TaskState::Drafted, None),
   }
 }
@@ -288,6 +292,8 @@ pub fn build(spec: TaskSpec) -> Result<Task> {
       .predicted_file_list
       .map(|files| files.into_iter().map(str::to_owned).collect()),
     spec.context_size_start,
+    spec.commentary_requested_at,
+    spec.commentary_delivered_at,
     spec.events,
   )
 }
@@ -311,7 +317,7 @@ pub fn format_task(task: &Task) -> String {
     .collect::<Vec<_>>()
     .join("\n");
   format!(
-    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\ncontext_size_start: {}\nevents:\n{}",
+    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\ncontext_size_start: {}\ncommentary_requested_at: {}\ncommentary_delivered_at: {}\nevents:\n{}",
     task.id(),
     task.text(),
     task.predicted_files(),
@@ -326,6 +332,8 @@ pub fn format_task(task: &Task) -> String {
     format_option_text(task.base_head()),
     file_list,
     format_option(task.context_size_start()),
+    format_option(task.commentary_requested_at().map(format_time)),
+    format_option(task.commentary_delivered_at().map(format_time)),
     events,
   )
 }
