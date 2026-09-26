@@ -9,6 +9,11 @@ pub struct Cli {
   #[arg(long, global = true, default_value = ".")]
   pub run_dir: PathBuf,
 
+  /// Override one chainsaw.toml setting for this process, by dotted key:
+  /// --set prompt-landing-seconds=20, --set 'implementer.args=--model sonnet --effort medium'.
+  #[arg(long, global = true, value_name = "KEY=VALUE")]
+  pub set: Vec<String>,
+
   #[command(subcommand)]
   pub command: Command,
 }

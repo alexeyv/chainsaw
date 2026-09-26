@@ -1,64 +1,149 @@
-//! Human-tuned settings, read from `chainsaw.json` in the run directory.
-//!
-//! These are inputs to a run, not state of it, so they live in a file the
-//! human edits rather than in the supervisor database, which is disposable.
+//! User-editable settings, living in an optional chainsaw.toml file.
+//! Loaded at the beginning of each coordinator process.
+//! Can be overridden with CLI args a la `--set prompt-landing-seconds=20`
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
+use anyhow::{Result, anyhow, bail};
+use serde::Deserialize;
+use toml::{Table, Value};
 
-pub const FILE_NAME: &str = "chainsaw.json";
-pub const DEFAULT_PROMPT_LANDING_SECONDS: i64 = 15;
+use crate::session_runtime::SessionKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub const FILE_NAME: &str = "chainsaw.toml";
+const LEGACY_FILE_NAME: &str = "chainsaw.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-  prompt_landing_seconds: i64,
-}
-
-impl Default for Settings {
-  fn default() -> Self {
-    Self {
-      prompt_landing_seconds: DEFAULT_PROMPT_LANDING_SECONDS,
-    }
-  }
+  prompt_landing: Duration,
+  implementer_args: Vec<String>,
+  commentator_args: Vec<String>,
 }
 
 impl Settings {
-  /// Reads `chainsaw.json` from `run_dir`. A missing file means defaults; a
-  /// present file must be a JSON object whose known keys hold integers.
-  pub fn load(run_dir: &Path) -> Result<Self> {
-    let path = run_dir.join(FILE_NAME);
-    match fs::read_to_string(&path) {
-      Ok(text) => Self::parse(&text)
-        .map_err(|error| anyhow!("invalid settings in {}: {error}", path.display())),
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-      Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+  /// Reads `chainsaw.toml` from `run_dir` and applies each `--set` over it.
+  /// A missing file means defaults; a leftover `chainsaw.json` is an error
+  pub fn load(run_dir: &Path, sets: &[String]) -> Result<Self> {
+    if run_dir.join(LEGACY_FILE_NAME).exists() {
+      bail!(
+        "{LEGACY_FILE_NAME} is no longer used; transfer its settings to {FILE_NAME} and delete"
+      );
     }
-  }
-
-  pub fn parse(text: &str) -> Result<Self> {
-    let value: Value = serde_json::from_str(text)?;
-    let Some(object) = value.as_object() else {
-      bail!("expected a JSON object at the top level");
+    let invalid = |error: anyhow::Error| {
+      anyhow!(
+        "invalid settings in {FILE_NAME}: {}",
+        error.to_string().trim_end()
+      )
     };
-    let mut settings = Self::default();
-    for (key, value) in object {
-      let target = match key.as_str() {
-        "prompt-landing-seconds" => &mut settings.prompt_landing_seconds,
-        other => bail!("unknown setting {other:?}"),
-      };
-      *target = value
-        .as_i64()
-        .with_context(|| format!("setting {key:?} must be an integer, got {value}"))?;
+    let mut table = match fs::read_to_string(run_dir.join(FILE_NAME)) {
+      Ok(text) => text
+        .parse::<Table>()
+        .map_err(|error| invalid(error.into()))?,
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Table::new(),
+      Err(error) => bail!("cannot read {FILE_NAME}: {error}"),
+    };
+    let mut file: File = table
+      .clone()
+      .try_into()
+      .map_err(|error| invalid(anyhow!(error)))?;
+    let mut seen = Vec::new();
+    for set in sets {
+      file = set_over(&mut table, set, &mut seen)
+        .and_then(|()| Ok(table.clone().try_into()?))
+        .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))?;
     }
-    Ok(settings)
+    Ok(Self::build(file))
   }
 
-  pub fn prompt_landing_seconds(&self) -> i64 {
-    self.prompt_landing_seconds
+  fn build(file: File) -> Self {
+    let launch = |kind, role: Option<Role>| {
+      let args = role
+        .unwrap_or_default()
+        .args
+        .unwrap_or_else(|| default_args(kind));
+      args.split_whitespace().map(str::to_owned).collect()
+    };
+    Self {
+      prompt_landing: Duration::from_secs(file.prompt_landing_seconds.unwrap_or(15)),
+      implementer_args: launch(SessionKind::Implementer, file.implementer),
+      commentator_args: launch(SessionKind::Commentator, file.commentator),
+    }
   }
+
+  /// How long a sent prompt gets to reach the transcript before it is resent
+  pub fn prompt_landing(&self) -> Duration {
+    self.prompt_landing
+  }
+
+  /// The Claude flags a session of this kind launches with
+  pub fn launch_args(&self, kind: SessionKind) -> &[String] {
+    match kind {
+      SessionKind::Implementer => &self.implementer_args,
+      SessionKind::Commentator => &self.commentator_args,
+    }
+  }
+}
+
+/// The shape of chainsaw.toml. Every key is optional; serde rejects unknown
+/// keys and wrong types
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct File {
+  prompt_landing_seconds: Option<u64>,
+  implementer: Option<Role>,
+  commentator: Option<Role>,
+}
+
+/// `args` is the whole flag list, split on whitespace and passed to Claude
+/// verbatim
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Role {
+  args: Option<String>,
+}
+
+/// Lays one `KEY=VALUE` over `table`. The value is a TOML literal when it
+/// parses as one (`20`, `"x"`), otherwise a string
+fn set_over(table: &mut Table, set: &str, seen: &mut Vec<String>) -> Result<()> {
+  let Some((key, raw)) = set.split_once('=') else {
+    bail!("expected KEY=VALUE");
+  };
+  if seen.contains(&key.to_owned()) {
+    bail!("{key} was already set by an earlier --set");
+  }
+  let literal = match format!("v = {raw}").parse::<Table>() {
+    Ok(_) => raw.to_owned(),
+    Err(_) => Value::String(raw.to_owned()).to_string(),
+  };
+  let source = format!("{key} = {literal}").parse::<Table>()?;
+  merge(table, source);
+  seen.push(key.to_owned());
+  Ok(())
+}
+
+/// Lays `source` over `target`, descending into tables both sides have
+fn merge(target: &mut Table, source: Table) {
+  for (key, value) in source {
+    match (target.get_mut(&key), value) {
+      (Some(Value::Table(current)), Value::Table(value)) => merge(current, value),
+      (_, value) => {
+        target.insert(key, value);
+      }
+    }
+  }
+}
+
+/// Today's flags; the commentator keeps slash commands
+fn default_args(kind: SessionKind) -> String {
+  let slash = match kind {
+    SessionKind::Implementer => " --disable-slash-commands",
+    SessionKind::Commentator => "",
+  };
+  format!(
+    "--model opus --effort high{slash} --strict-mcp-config --no-chrome --disallowedTools WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput"
+  )
 }
 
 #[cfg(test)]

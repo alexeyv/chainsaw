@@ -46,9 +46,14 @@ const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on 
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
-pub fn execute(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
+pub fn execute(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  settings: &Settings,
+  command: Command,
+) -> Result<()> {
   let lead_facing = is_lead_facing(&command);
-  run(store, runtime, command)?;
+  run(store, runtime, settings, command)?;
   if lead_facing {
     for warning in standing_warnings(store)? {
       eprintln!("WARNING: {warning}");
@@ -161,7 +166,12 @@ fn duration_text(seconds: i64) -> String {
   }
 }
 
-fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<()> {
+fn run(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  settings: &Settings,
+  command: Command,
+) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
@@ -170,16 +180,18 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
     } => daemon(
       store,
       runtime,
+      settings,
       &lead,
       &session_id,
       Duration::from_millis(poll_interval_ms),
     ),
     Command::StartCommentator { role_prompt } => {
-      cmd_start_commentator(store, runtime, &role_prompt)
+      cmd_start_commentator(store, runtime, settings, &role_prompt)
     }
     Command::Launch { name } => cmd_launch(
       store,
       runtime,
+      settings,
       &name,
       LaunchOptions {
         role: Role::Implementer,
@@ -191,7 +203,7 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
       text,
       wait,
       timeout,
-    } => cmd_prompt(store, runtime, &name, &text, wait, timeout),
+    } => cmd_prompt(store, runtime, settings, &name, &text, wait, timeout),
     Command::Task { action } => match action {
       TaskCommand::New {
         files,
@@ -202,11 +214,14 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
       } => cmd_task_new(
         store,
         runtime,
-        predicted_files,
-        predicted_lines,
-        retry_of_task_id,
-        files.as_deref(),
-        reason.as_deref(),
+        settings,
+        NewTaskOptions {
+          predicted_files,
+          predicted_lines,
+          retry_of_task_id,
+          files: files.as_deref(),
+          reason: reason.as_deref(),
+        },
       ),
       TaskCommand::RecordCommit {
         task,
@@ -220,9 +235,9 @@ fn run(store: &Store, runtime: &dyn SessionRuntime, command: Command) -> Result<
         reason,
       } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
     },
-    Command::Abort { task, reason } => cmd_abort(store, runtime, task, &reason),
+    Command::Abort { task, reason } => cmd_abort(store, runtime, settings, task, &reason),
     Command::Dispatch { task, to, reason } => {
-      cmd_dispatch(store, runtime, task, &to, reason.as_deref())
+      cmd_dispatch(store, runtime, settings, task, &to, reason.as_deref())
     }
     Command::Accept {
       task,
@@ -362,6 +377,7 @@ fn stat_number(text: &str, noun: &str) -> i64 {
 fn cmd_launch(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   name: &str,
   options: LaunchOptions,
 ) -> Result<()> {
@@ -369,6 +385,7 @@ fn cmd_launch(
     id: name,
     run_dir: &store.run_dir,
     kind: options.kind,
+    args: settings.launch_args(options.kind),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
@@ -395,6 +412,7 @@ fn cmd_launch(
 fn cmd_prompt(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   name: &str,
   text: &str,
   wait: bool,
@@ -413,7 +431,8 @@ fn cmd_prompt(
     params![name, text, now()],
   )?;
   let prompt_id = store.db.last_insert_rowid();
-  let prompt_landing_millis = Settings::load(&store.run_dir)?.prompt_landing_seconds() * 1000;
+  let prompt_landing_millis = i64::try_from(settings.prompt_landing().as_millis())
+    .context("prompt-landing-seconds is too large")?;
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
@@ -465,12 +484,14 @@ fn cmd_prompt(
 fn cmd_start_commentator(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   role_prompt: &Path,
 ) -> Result<()> {
   let name = commentator_agent_name(&store.run_dir);
   cmd_launch(
     store,
     runtime,
+    settings,
     &name,
     LaunchOptions {
       role: Role::Commentator,
@@ -482,6 +503,7 @@ fn cmd_start_commentator(
   cmd_prompt(
     store,
     runtime,
+    settings,
     &name,
     &format!(
       "Read and follow this role prompt entirely: {}\nSession-log directory: {}\nRun directory: {}",
@@ -503,9 +525,9 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn commentator_agent_name(run_dir: &Path) -> String {
-  let mut hasher = Sha1::new();
-  hasher.update(run_dir.to_string_lossy().as_bytes());
-  format!("commentator-{:x}", hasher.finalize())[..20].to_owned()
+  let digest = Sha1::digest(run_dir.to_string_lossy().as_bytes());
+  let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+  format!("commentator-{}", &hex[..8])
 }
 
 fn task_snapshot(store: &Store, task_id: i64) -> Result<Option<Task>> {
@@ -522,15 +544,27 @@ fn task_snapshots_for_session(store: &Store, session_id: i64) -> Result<Vec<Task
   Ok(tasks)
 }
 
+struct NewTaskOptions<'a> {
+  predicted_files: Option<i64>,
+  predicted_lines: i64,
+  retry_of_task_id: Option<i64>,
+  files: Option<&'a str>,
+  reason: Option<&'a str>,
+}
+
 fn cmd_task_new(
   store: &Store,
   runtime: &dyn SessionRuntime,
-  mut predicted_files: Option<i64>,
-  predicted_lines: i64,
-  retry_of_task_id: Option<i64>,
-  files: Option<&str>,
-  reason: Option<&str>,
+  settings: &Settings,
+  options: NewTaskOptions<'_>,
 ) -> Result<()> {
+  let NewTaskOptions {
+    mut predicted_files,
+    predicted_lines,
+    retry_of_task_id,
+    files,
+    reason,
+  } = options;
   let mut text = String::new();
   std::io::stdin().read_to_string(&mut text)?;
   if text.trim().is_empty() {
@@ -583,7 +617,7 @@ fn cmd_task_new(
   let predicted_file_list =
     (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
   if let Some((retry_of_task_id, reason)) = active_retry {
-    abort_task(store, runtime, retry_of_task_id, reason)?;
+    abort_task(store, runtime, settings, retry_of_task_id, reason)?;
   }
   let transaction = store.write_transaction()?;
   let task = task::create(
@@ -602,6 +636,7 @@ fn cmd_task_new(
 fn cmd_dispatch(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   task_id: i64,
   implementer: &str,
   reason: Option<&str>,
@@ -653,7 +688,7 @@ fn cmd_dispatch(
   );
   // The task is only dispatched once the prompt has landed in the session log,
   // so a send that never lands leaves it drafted and dispatchable again.
-  if let Err(error) = cmd_prompt(store, runtime, implementer, &prompt, false, 300) {
+  if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
     store.event(
       "dispatch-failed",
       &format!("task {task_id} -> {implementer}: prompt never landed"),
@@ -994,6 +1029,7 @@ fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
 fn abort_task(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   task_id: i64,
   reason: &str,
 ) -> Result<(i64, String)> {
@@ -1020,6 +1056,7 @@ fn abort_task(
       daemon_prompt(
         store,
         runtime,
+        settings,
         session.name(),
         &format!(
           "supervisor: task {task_id} is aborted: {reason}. Stop, leave the tree clean, do not commit."
@@ -1040,10 +1077,11 @@ fn abort_task(
 fn cmd_abort(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   task_id: i64,
   reason: &str,
 ) -> Result<()> {
-  let (failures, dirty) = abort_task(store, runtime, task_id, reason)?;
+  let (failures, dirty) = abort_task(store, runtime, settings, task_id, reason)?;
   let plural = if failures == 1 { "" } else { "s" };
   println!("task {task_id} aborted ({failures} abort{plural} on this task): {reason}");
   if !dirty.is_empty() {
@@ -1490,8 +1528,14 @@ fn cmd_stop(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn daemon_prompt(store: &Store, runtime: &dyn SessionRuntime, name: &str, text: &str) -> bool {
-  match cmd_prompt(store, runtime, name, text, false, 300) {
+fn daemon_prompt(
+  store: &Store,
+  runtime: &dyn SessionRuntime,
+  settings: &Settings,
+  name: &str,
+  text: &str,
+) -> bool {
+  match cmd_prompt(store, runtime, settings, name, text, false, 300) {
     Ok(()) => true,
     Err(error) => {
       let _ = store.event("prompt-unreachable", &format!("{name}: {error}"));
@@ -1503,6 +1547,7 @@ fn daemon_prompt(store: &Store, runtime: &dyn SessionRuntime, name: &str, text: 
 fn daemon(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   lead: &str,
   lead_session_id: &str,
   poll_interval: Duration,
@@ -1553,16 +1598,19 @@ fn daemon(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(store, runtime, &session, Some(&log), quiet)?;
+          observe_implementer(store, runtime, settings, &session, Some(&log), quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
             store,
             runtime,
+            settings,
             &session,
-            Some(&log),
-            context,
-            quiet,
+            Reading {
+              log: Some(&log),
+              context,
+              quiet,
+            },
             &mut compacting,
           )?;
         }
@@ -1597,6 +1645,7 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
 fn kick_if_stalled(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   session: &Session,
   quiet: f64,
 ) -> Result<()> {
@@ -1609,7 +1658,7 @@ fn kick_if_stalled(
       .map(|session| session.status)
       .as_deref()
       .is_some_and(|status| matches!(status, "idle" | "done"))
-    && daemon_prompt(store, runtime, session.name(), "continue")
+    && daemon_prompt(store, runtime, settings, session.name(), "continue")
   {
     store.event("kick", session.name())?;
     let transaction = store.write_transaction()?;
@@ -1622,6 +1671,7 @@ fn kick_if_stalled(
 fn observe_implementer(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   session: &Session,
   log: Option<&Path>,
   quiet: f64,
@@ -1654,20 +1704,31 @@ fn observe_implementer(
     transaction.commit()?;
     store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else {
-    kick_if_stalled(store, runtime, session, quiet)?;
+    kick_if_stalled(store, runtime, settings, session, quiet)?;
   }
   Ok(())
+}
+
+/// What one daemon poll saw of a session's transcript.
+struct Reading<'a> {
+  log: Option<&'a Path>,
+  context: i64,
+  quiet: f64,
 }
 
 fn observe_commentator(
   store: &Store,
   runtime: &dyn SessionRuntime,
+  settings: &Settings,
   session: &Session,
-  log: Option<&Path>,
-  context: i64,
-  quiet: f64,
+  reading: Reading<'_>,
   compacting: &mut bool,
 ) -> Result<()> {
+  let Reading {
+    log,
+    context,
+    quiet,
+  } = reading;
   let transaction = store.db.unchecked_transaction()?;
   let mut pending = Vec::new();
   for task in task::all(&transaction)? {
@@ -1699,6 +1760,7 @@ fn observe_commentator(
       && daemon_prompt(
         store,
         runtime,
+        settings,
         session.name(),
         &format!(
           "supervisor: commit {sha} landed for task {}; review it from git",
@@ -1715,14 +1777,14 @@ fn observe_commentator(
     }
   }
   if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
-    if daemon_prompt(store, runtime, session.name(), "/compact") {
+    if daemon_prompt(store, runtime, settings, session.name(), "/compact") {
       *compacting = true;
       store.event("compact", &format!("{} at {context}", session.name()))?;
     }
   } else if context < COMMENTATOR_COMPACT_TOKENS {
     *compacting = false;
   }
-  kick_if_stalled(store, runtime, session, quiet)
+  kick_if_stalled(store, runtime, settings, session, quiet)
 }
 
 fn commentator_log_mentions(text: &str, needle: &str) -> bool {

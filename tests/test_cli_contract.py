@@ -108,9 +108,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         )
 
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
-        (self.run_dir / "chainsaw.json").write_text(
-            '{"prompt-landing-seconds": 0}\n'
-        )
+        self.write_settings("prompt-landing-seconds = 0\n")
         self.launch()
         self.update_zero_cost_dummy(drop_prompts=3)
 
@@ -588,17 +586,6 @@ class FreshSessionContractTests(SupervisorContractCase):
 
         self.assert_success(self.cli("launch", "replacement"))
 
-    def test_dispatch_refuses_an_unreadable_settings_file(self):
-        self.verified_first_task()
-        self.assert_success(self.cli("launch", "replacement"))
-        (self.run_dir / "chainsaw.json").write_text('{"prompt-landing-secnds": 1}\n')
-        second = self.new_task(text="Second task.", files="second.txt")
-
-        result = self.dispatch(second, "replacement")
-
-        self.assert_failure(result, "invalid settings in")
-        self.assert_failure(result, 'unknown setting "prompt-landing-secnds"')
-
     def test_a_committed_predecessor_releases_the_next_dispatch(self):
         self.prepare_committed_task()
         daemon = self.start_daemon()
@@ -1006,9 +993,7 @@ class BusySessionContractTests(SupervisorContractCase):
     """A busy agent queues a prompt and works through it once it goes idle."""
 
     def test_a_prompt_is_withheld_while_busy_and_lands_when_the_session_goes_idle(self):
-        (self.run_dir / "chainsaw.json").write_text(
-            '{"prompt-landing-seconds": 1}\n'
-        )
+        self.write_settings("prompt-landing-seconds = 1\n")
         self.launch()
         self.set_agent_status("worker", "busy")
         log = self.session_log("worker")
@@ -1303,3 +1288,131 @@ class StandingWarningTests(SupervisorContractCase):
 
         self.assertIn("WARNING:", result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+
+DISALLOWED_TOOLS = (
+    "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,"
+    "ExitPlanMode,TaskOutput"
+)
+IMPLEMENTER_DEFAULTS = [
+    "--model", "opus", "--effort", "high", "--disable-slash-commands",
+    "--strict-mcp-config", "--no-chrome", "--disallowedTools", DISALLOWED_TOOLS,
+]
+COMMENTATOR_DEFAULTS = [
+    "--model", "opus", "--effort", "high", "--strict-mcp-config", "--no-chrome",
+    "--disallowedTools", DISALLOWED_TOOLS,
+]
+
+
+class SettingsContractTests(SupervisorContractCase):
+    """What the lead can tune through chainsaw.toml and --set, and when it takes effect."""
+
+    def test_sessions_launch_with_todays_lists_when_nothing_is_configured(self):
+        self.launch()
+        commentator = self.start_commentator()
+
+        self.assertEqual(self.launch_args("worker"), IMPLEMENTER_DEFAULTS)
+        self.assertEqual(self.launch_args(commentator), COMMENTATOR_DEFAULTS)
+
+    def test_each_role_is_tuned_from_its_own_table(self):
+        self.write_settings(
+            '[implementer]\n'
+            'args = "--model sonnet --effort medium"\n'
+            '\n'
+            '[commentator]\n'
+        )
+
+        self.launch()
+        commentator = self.start_commentator()
+
+        self.assertEqual(self.launch_args("worker"), ["--model", "sonnet", "--effort", "medium"])
+        self.assertEqual(self.launch_args(commentator), COMMENTATOR_DEFAULTS)
+
+    def test_set_beats_the_file(self):
+        self.write_settings('[implementer]\nargs = "--model sonnet"\n')
+
+        self.assert_success(
+            self.cli("--set", "implementer.args=--model haiku", "launch", "worker")
+        )
+
+        self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
+
+    def test_an_invalid_set_fails_the_command_that_succeeds_without_it(self):
+        self.write_settings('[implementer]\nargs = "--model sonnet"\n')
+
+        result = self.cli("--set", "implementer.model=x", "state")
+
+        self.assert_failure(
+            result,
+            "invalid --set implementer.model=x: unknown field `model`, expected `args`",
+        )
+        self.assert_success(self.cli("state"))
+
+    def test_an_invalid_file_fails_every_command_until_it_is_fixed(self):
+        self.write_settings('[reviewer]\nargs = "x"\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(result, "invalid settings in chainsaw.toml")
+        self.assert_failure(result, "unknown field `reviewer`")
+        self.write_settings('[commentator]\nargs = "x"\n')
+        self.assert_success(self.cli("state"))
+
+    def test_each_process_reads_the_file_once_at_start(self):
+        self.launch("first")
+        self.write_settings('[implementer]\nargs = "--model sonnet"\n')
+
+        self.launch("second")
+
+        self.assertEqual(self.launch_args("first"), IMPLEMENTER_DEFAULTS)
+        self.assertEqual(self.launch_args("second"), ["--model", "sonnet"])
+
+    def test_a_running_daemon_keeps_its_settings_while_a_fresh_process_fails(self):
+        """The daemon prompts with the settings it started with even after the file
+        breaks: the commentator wake for a landed commit is the prompt under test."""
+        task_id = self.new_task()
+        self.launch()
+        commentator = self.start_commentator()
+        self.assert_success(self.dispatch(task_id))
+        database = self.logs_dir / "chainsaw-supervisor.db"
+        daemon = self.start_daemon()
+        self.append_text("worker", "fixture work started")
+        self.wait_for_state(f"{task_id} in_flight")
+        self.write_settings("promt-landing-seconds = 1\n")
+
+        sha = self.commit_file()
+        self.record_commit("worker", sha)
+        wake = f"supervisor: commit {sha[:10]} landed for task {task_id}; review it from git"
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline and wake not in self.prompts_to(commentator):
+            time.sleep(0.1)
+        time.sleep(0.2)
+        fresh = self.cli("state")
+
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1, self.daemon_report())
+        with sqlite3.connect(database) as connection:
+            states = [
+                state for (state,) in connection.execute(
+                    "select state from task_events where task_id=? order by id", (task_id,),
+                )
+            ]
+            unreachable = connection.execute(
+                "select detail from events where kind='prompt-unreachable'"
+            ).fetchall()
+        self.assertIn("committed_unverified", states, self.daemon_report())
+        self.assertEqual(unreachable, [])
+        self.assert_failure(fresh, "invalid settings in")
+        (self.run_dir / "chainsaw.toml").unlink()
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        self.assertEqual(daemon.returncode, 0, self.daemon_report())
+
+    def test_a_leftover_chainsaw_json_tells_the_human_where_settings_live(self):
+        (self.run_dir / "chainsaw.json").write_text('{"prompt-landing-seconds": 1}\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(
+            result,
+            "chainsaw.json is no longer used; transfer its settings to chainsaw.toml and delete",
+        )

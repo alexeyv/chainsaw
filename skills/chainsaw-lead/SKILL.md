@@ -30,8 +30,14 @@ the commentator's findings — not implementation detail.
    from yours.
 
 5. The supervisor launches implementers and the commentator with `--model opus
-   --effort high` (hardcoded in the supervisor's `session_runtime.rs`); the lead runs
-   on whatever model the human started this session with.
+   --effort high` plus its other default Claude flags. An optional `chainsaw.toml` in
+   the run directory tunes them per role: `<role>.args` is the whole flag list,
+   passed to Claude as written (`chainsaw.toml.example` in this repository shows
+   the defaults). `--set KEY=VALUE` before the subcommand overrides the file for
+   one process. Every
+   process reads the file once, at start: the daemon keeps what it started with,
+   and the next command sees an edit. The lead runs on whatever model the human
+   started this session with.
 
 ## Basics
 Every role is a visible interactive session in its own pane or tab, addressable by

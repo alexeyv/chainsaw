@@ -1,0 +1,14 @@
+# Sample chainsaw.toml: copy into the run directory as chainsaw.toml.
+# Every key is optional and the values here are the defaults.
+# `--set KEY=VALUE` before the subcommand overrides a key for one process.
+
+# Seconds a sent prompt gets to reach the transcript before it is resent.
+prompt-landing-seconds = 15
+
+# Each role's args are passed to Claude as written.
+
+[implementer]
+args = "--model opus --effort high --disable-slash-commands --strict-mcp-config --no-chrome --disallowedTools WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput"
+
+[commentator]
+args = "--model opus --effort high --strict-mcp-config --no-chrome --disallowedTools WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput"

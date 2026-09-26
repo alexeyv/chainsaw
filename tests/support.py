@@ -169,6 +169,17 @@ class SupervisorContractCase(unittest.TestCase):
     def launch(self, name="worker"):
         return self.assert_success(self.cli("launch", name))
 
+    def write_settings(self, text):
+        """Put a chainsaw.toml in the run directory; the next process reads it."""
+        (self.run_dir / "chainsaw.toml").write_text(text)
+
+    def launch_args(self, name):
+        """The Claude flags the runtime was handed when it last started `name`."""
+        return next(
+            operation["args"] for operation in reversed(self.runtime_operations())
+            if operation["operation"] == "start" and operation["session_id"] == name
+        )
+
     def start_commentator(self):
         self.assert_success(self.cli(
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),

@@ -3,13 +3,15 @@ use clap::Parser;
 use chainsaw::cli::Cli;
 use chainsaw::coordinator;
 use chainsaw::session_runtime;
+use chainsaw::settings::Settings;
 use chainsaw::store::Store;
 
 fn main() {
   let cli = Cli::parse();
   let result = session_runtime::from_environment().and_then(|runtime| {
-    Store::open(&cli.run_dir)
-      .and_then(|store| coordinator::execute(&store, runtime.as_ref(), cli.command))
+    let settings = Settings::load(&cli.run_dir, &cli.set)?;
+    let store = Store::open(&cli.run_dir)?;
+    coordinator::execute(&store, runtime.as_ref(), &settings, cli.command)
   });
   if let Err(error) = result {
     if !error.to_string().is_empty() {

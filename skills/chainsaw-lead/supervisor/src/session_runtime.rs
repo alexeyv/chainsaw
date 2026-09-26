@@ -14,33 +14,10 @@ use serde_json::{Map, Value, json};
 
 use crate::store;
 
-const IMPLEMENTER_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--disable-slash-commands",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
-
-const COMMENTATOR_FLAGS: &[&str] = &[
-  "--model",
-  "opus",
-  "--effort",
-  "high",
-  "--strict-mcp-config",
-  "--no-chrome",
-  "--disallowedTools",
-  "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput",
-];
-
 pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
   Implementer,
   Commentator,
@@ -53,19 +30,14 @@ impl SessionKind {
       Self::Commentator => "commentator",
     }
   }
-
-  fn flags(self) -> &'static [&'static str] {
-    match self {
-      Self::Implementer => IMPLEMENTER_FLAGS,
-      Self::Commentator => COMMENTATOR_FLAGS,
-    }
-  }
 }
 
 pub struct StartSession<'a> {
   pub id: &'a str,
   pub run_dir: &'a Path,
   pub kind: SessionKind,
+  /// The Claude flags the session launches with, verbatim.
+  pub args: &'a [String],
 }
 
 #[derive(Debug)]
@@ -193,7 +165,7 @@ impl SessionRuntime for HerdrSessionRuntime {
     let mut arguments = vec![
       "agent", "start", session.id, "--kind", "claude", "--pane", &pane_id, "--",
     ];
-    arguments.extend_from_slice(session.kind.flags());
+    arguments.extend(session.args.iter().map(String::as_str));
     let mut started = None;
     for attempt in 0..5 {
       match self.request(&arguments) {
@@ -463,6 +435,7 @@ impl SessionRuntime for ZeroCostDummy {
         "operation": "start",
         "session_id": session.id,
         "kind": session.kind.label(),
+        "args": session.args,
       }));
       Ok(StartedSession {
         external_id,
@@ -709,12 +682,14 @@ esac
     fn should_work() {
       let herdr = FakeHerdr::new();
       let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+      let args = ["--model", "sonnet", "--effort", "medium"].map(str::to_owned);
 
       let started = runtime
         .start(StartSession {
           id: "worker",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          args: &args,
         })
         .unwrap();
 
@@ -742,10 +717,7 @@ esac
           "agent", "start", "worker", "--kind", "claude", "--pane", "pane-7", "--"
         ]
       );
-      assert_eq!(
-        calls[1][8..].iter().map(String::as_str).collect::<Vec<_>>(),
-        IMPLEMENTER_FLAGS
-      );
+      assert_eq!(calls[1][8..], args);
     }
 
     #[test]
@@ -758,6 +730,7 @@ esac
           id: "commentator",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Commentator,
+          args: &[],
         })
         .unwrap();
 
@@ -788,6 +761,7 @@ esac
           id: "late-id",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          args: &[],
         })
         .unwrap();
 
@@ -814,6 +788,7 @@ esac
           id: "no-id",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          args: &[],
         })
         .unwrap_err();
 
@@ -836,6 +811,7 @@ esac
           id: "worker",
           run_dir: Path::new("/tmp/run"),
           kind: SessionKind::Implementer,
+          args: &[],
         })
         .unwrap_err();
 
