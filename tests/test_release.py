@@ -97,6 +97,17 @@ class ReleaseAssemblyTests(unittest.TestCase):
         )
         self.assertEqual(shipped, [])
 
+    def test_ships_only_rust_sources(self):
+        """Agent instructions such as AGENTS.md guide work on the repo, not the
+        installed copy."""
+        src = self.assembled / "src"
+        other = sorted(
+            str(path.relative_to(src))
+            for path in src.rglob("*")
+            if path.is_file() and path.suffix != ".rs"
+        )
+        self.assertEqual(other, [])
+
     def test_wrapper_is_present_and_executable(self):
         wrapper = self.skill / "bin" / "chainsaw"
         self.assertTrue(wrapper.exists())
