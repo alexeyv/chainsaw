@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
+use strum::IntoEnumIterator;
 use toml::{Table, Value};
 
 use super::agent;
@@ -122,8 +123,7 @@ impl Settings {
 
 /// The accepted agent names, worded the way serde words an expected field
 fn accepted_agents() -> String {
-  let names: Vec<String> = AgentKind::ALL
-    .iter()
+  let names: Vec<String> = AgentKind::iter()
     .map(|agent| format!("`{agent}`"))
     .collect();
   match names.as_slice() {

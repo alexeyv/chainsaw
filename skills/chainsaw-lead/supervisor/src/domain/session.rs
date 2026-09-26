@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
+use strum::EnumIter;
 
 use super::{require_nonblank, require_nonnegative, require_optional_nonblank, require_positive};
 
@@ -45,16 +46,14 @@ impl fmt::Display for Role {
 }
 
 /// Which coding agent runs a session. Only Claude Code today. The name is
-/// what the session row stores.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// what the session row stores. Iterating the enum lists every agent the
+/// supervisor accepts.
+#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
 pub enum AgentKind {
   Claude,
 }
 
 impl AgentKind {
-  /// Every agent the supervisor accepts.
-  pub const ALL: [Self; 1] = [Self::Claude];
-
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Claude => "claude",
