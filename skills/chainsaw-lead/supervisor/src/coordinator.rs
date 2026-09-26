@@ -272,14 +272,29 @@ fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
 
 /// Commit ids the task's session has recorded since the task was dispatched.
 fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
-  Ok(
-    task_session(store, task)?
-      .and_then(|session| {
-        agent::transcript(&store.run_dir, &session)
-          .map(|log| agent::for_session(&session).commits_in_log(&log, task.log_offset() as u64))
-      })
-      .unwrap_or_default(),
-  )
+  let Some(session) = task_session(store, task)? else {
+    return Ok(Vec::new());
+  };
+  let Some(log) = session_transcript(store, &session)? else {
+    return Ok(Vec::new());
+  };
+  Ok(agent::for_session(&session).commits_in_log(&log, task.log_offset() as u64))
+}
+
+/// Where the session's transcript is, or None until its agent has written
+/// one. The search can scan every project directory, so a hit is remembered
+/// on the session row and never looked for again.
+fn session_transcript(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
+  if let Some(path) = session.transcript() {
+    return Ok(Some(path.to_owned()));
+  }
+  let found = agent::for_session(session).transcript(&store.run_dir, session.external_session_id());
+  if let Some(path) = &found {
+    let transaction = store.write_transaction()?;
+    session::record_transcript(&transaction, session.id(), path)?;
+    transaction.commit()?;
+  }
+  Ok(found)
 }
 
 fn session_snapshot(store: &Store, id: i64) -> Result<Option<Session>> {
@@ -407,10 +422,11 @@ fn cmd_prompt(
   let prompt_landing_millis = i64::try_from(settings.prompt_landing().as_millis())
     .context("prompt-landing-seconds is too large")?;
   let session = latest_session_named(store, name)?;
-  let transcript = || {
-    session
-      .as_ref()
-      .and_then(|session| agent::transcript(&store.run_dir, session))
+  let transcript = || -> Result<Option<PathBuf>> {
+    match &session {
+      Some(session) => session_transcript(store, session),
+      None => Ok(None),
+    }
   };
   let agent = session.as_ref().map(agent::for_session);
 
@@ -418,7 +434,7 @@ fn cmd_prompt(
     // Polling the runtime gives it a turn to deliver what a busy session has
     // queued; the state check below then reads what actually arrived.
     let _ = runtime.query(name);
-    let path_before = transcript();
+    let path_before = transcript()?;
     let mut offset = file_size(path_before.as_deref());
     store.db.execute(
       "update prompts set attempts=attempts+1 where id=?",
@@ -428,7 +444,7 @@ fn cmd_prompt(
     let deadline = now() + prompt_landing_millis;
     while now() < deadline {
       let _ = runtime.query(name);
-      let path = transcript();
+      let path = transcript()?;
       if path != path_before {
         offset = 0;
       }
@@ -677,7 +693,7 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let log_offset = file_size(agent::transcript(&store.run_dir, &session).as_deref());
+  let log_offset = file_size(session_transcript(store, &session)?.as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
@@ -1082,14 +1098,12 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
       .map(|candidate| candidate.log_offset() as u64),
     None => None,
   };
-  let mut end = session
-    .as_ref()
-    .and_then(|session| {
-      agent::transcript(&store.run_dir, session).map(|log| {
-        agent::for_session(session).context_peak(&log, task.log_offset() as u64, next_offset)
-      })
-    })
-    .unwrap_or_default() as i64;
+  let mut end = match &session {
+    Some(session) => session_transcript(store, session)?.map_or(0, |log| {
+      agent::for_session(session).context_peak(&log, task.log_offset() as u64, next_offset)
+    }),
+    None => 0,
+  } as i64;
   if end == 0 {
     end = session.map_or(0, |session| session.context_max());
   }
@@ -1282,7 +1296,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if agent::transcript(&store.run_dir, &session).is_some() {
+    if session_transcript(store, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -1439,7 +1453,7 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(log) = agent::transcript(&store.run_dir, &session) {
+    if let Some(log) = session_transcript(store, &session)? {
       println!(
         "{}\t{}",
         session.name(),
@@ -1533,7 +1547,7 @@ fn daemon(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(log) = agent::transcript(&store.run_dir, &session) else {
+      let Some(log) = session_transcript(store, &session)? else {
         if missing_logs.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"

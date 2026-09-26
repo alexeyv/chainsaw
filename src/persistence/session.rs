@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -17,11 +19,12 @@ struct SessionRow {
   last_growth: i64,
   kicked_at: Option<i64>,
   over_limit_at: Option<i64>,
+  transcript: Option<String>,
 }
 
 const SELECT: &str = "
   select id, name, role, external_session_id, launched_head, started_at, stopped_at,
-         context, context_max, last_growth, kicked_at, over_limit_at
+         context, context_max, last_growth, kicked_at, over_limit_at, transcript
   from sessions
 ";
 
@@ -88,6 +91,16 @@ pub fn stop_named(transaction: &Transaction<'_>, name: &str) -> Result<usize> {
   Ok(stopped)
 }
 
+/// Remember where the session's transcript was found. It never moves, so
+/// nothing ever clears the column.
+pub fn record_transcript(transaction: &Transaction<'_>, id: i64, path: &Path) -> Result<Session> {
+  transaction.execute(
+    "update sessions set transcript=? where id=?",
+    params![path.to_string_lossy(), id],
+  )?;
+  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+}
+
 /// Record one poll's reading of the transcript. Growth moves the last-growth
 /// mark to `at` and re-arms the kick; the maximum only ever rises.
 pub fn record_reading(
@@ -145,6 +158,7 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     last_growth: row.get("last_growth")?,
     kicked_at: row.get("kicked_at")?,
     over_limit_at: row.get("over_limit_at")?,
+    transcript: row.get("transcript")?,
   })
 }
 
@@ -168,6 +182,7 @@ fn materialize(row: SessionRow) -> Result<Session> {
       .over_limit_at
       .map(|at| time(at, "over_limit_at"))
       .transpose()?,
+    row.transcript.map(From::from),
   )
 }
 

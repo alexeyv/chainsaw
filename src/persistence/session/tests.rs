@@ -1,9 +1,12 @@
+use std::path::Path;
+
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{Connection, Transaction};
 
 use super::{
-  all, create, get, latest_named, record_kick, record_over_limit, record_reading, stop_named,
+  all, create, get, latest_named, record_kick, record_over_limit, record_reading,
+  record_transcript, stop_named,
 };
 use crate::domain::test_helpers::{
   format_session, format_sessions, format_time, timestamp, within,
@@ -26,13 +29,13 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
   let row = db.query_row(
     "
       select name, role, external_session_id, launched_head, started_at, stopped_at,
-             context, context_max, last_growth, kicked_at, over_limit_at
+             context, context_max, last_growth, kicked_at, over_limit_at, transcript
       from sessions where id=?
       ",
     [id],
     |row| {
       Ok(format!(
-        "{} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?}",
+        "{} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?} transcript={:?}",
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
@@ -44,6 +47,7 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
         row.get::<_, i64>(8)?,
         row.get::<_, Option<i64>>(9)?,
         row.get::<_, Option<i64>>(10)?,
+        row.get::<_, Option<String>>(11)?,
       ))
     },
   )?;
@@ -79,6 +83,7 @@ context_max: 0
 last_growth: {started}
 kicked_at: none
 over_limit_at: none
+transcript: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -89,7 +94,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None",
+        "implementer-1 implementer uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None transcript=None",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -284,6 +289,35 @@ mod stop_named {
   }
 }
 
+mod record_transcript {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let session = implementer(&transaction, "implementer-1", "uuid-1")?;
+    let path = Path::new("/home/alex/.claude/projects/-run/uuid-1.jsonl");
+
+    let found = record_transcript(&transaction, session.id(), path)?;
+
+    assert_eq!(found.transcript(), Some(path));
+    assert_eq!(get(&transaction, session.id())?, Some(found));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_session_does_not_exist() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+
+    let error = record_transcript(&transaction, 42, Path::new("/nowhere.jsonl")).unwrap_err();
+
+    assert_eq!(error.to_string(), "session 42 is missing");
+    Ok(())
+  }
+}
+
 mod record_reading {
   use super::*;
 
@@ -312,6 +346,7 @@ context_max: 4000
 last_growth: {polled}
 kicked_at: none
 over_limit_at: none
+transcript: none
 is_live: true
 can_take_task: true
 can_be_kicked: true

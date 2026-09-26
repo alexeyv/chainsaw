@@ -46,6 +46,7 @@ context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: none
+transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -71,6 +72,7 @@ context_max: 0
 last_growth: 2023-11-14T22:13:20Z
 kicked_at: none
 over_limit_at: none
+transcript: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -116,6 +118,7 @@ context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: 2023-11-14T22:28:20Z
 over_limit_at: none
+transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 is_live: false
 can_take_task: false
 can_be_kicked: false
@@ -150,6 +153,7 @@ context_max: 260000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: 2023-11-14T22:28:20Z
+transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 is_live: true
 can_take_task: false
 can_be_kicked: true
@@ -214,6 +218,16 @@ can_latch_over_limit: false"#
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "launched_head cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_the_transcript_is_blank() {
+    let error = build_session(SessionSpec {
+      transcript: Some(""),
+      ..working_implementer()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "transcript cannot be blank");
   }
 
   #[test]

@@ -82,12 +82,6 @@ pub fn for_session(_session: &Session) -> &'static dyn Agent {
   &Claude
 }
 
-/// The transcript of a session started in `run_dir`, wherever its agent
-/// keeps it. None until it exists.
-pub fn transcript(canonical_run_dir: &Path, session: &Session) -> Option<PathBuf> {
-  for_session(session).transcript(canonical_run_dir, session.external_session_id())
-}
-
 /// The transcript between two byte offsets, or to its end, tolerating a cut
 /// through a multibyte character at either end.
 fn read_lossy(path: &Path, start: u64, end: Option<u64>) -> std::io::Result<String> {

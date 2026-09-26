@@ -19,7 +19,8 @@ create table sessions(
   external_session_id text not null unique, launched_head text,
   started_at int not null, stopped_at int,
   context int not null default 0, context_max int not null default 0,
-  last_growth int not null, kicked_at int, over_limit_at int);
+  last_growth int not null, kicked_at int, over_limit_at int,
+  transcript text);
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),

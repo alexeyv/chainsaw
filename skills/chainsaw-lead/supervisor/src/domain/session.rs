@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -59,6 +60,7 @@ pub struct Session {
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
+  transcript: Option<PathBuf>,
 }
 
 impl Session {
@@ -76,11 +78,18 @@ impl Session {
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
     over_limit_at: Option<DateTime<Utc>>,
+    transcript: Option<PathBuf>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("name", &name)?;
     require_nonblank("external_session_id", &external_session_id)?;
     require_optional_nonblank("launched_head", launched_head.as_deref())?;
+    if transcript
+      .as_deref()
+      .is_some_and(|path| path.as_os_str().is_empty())
+    {
+      bail!("transcript cannot be blank");
+    }
     require_nonnegative("context", context)?;
     require_nonnegative("context_max", context_max)?;
     if context_max < context {
@@ -112,6 +121,7 @@ impl Session {
       last_growth,
       kicked_at,
       over_limit_at,
+      transcript,
     })
   }
 
@@ -161,6 +171,12 @@ impl Session {
 
   pub fn over_limit_at(&self) -> Option<DateTime<Utc>> {
     self.over_limit_at
+  }
+
+  /// Where the agent writes this session's transcript, once it has been
+  /// found. It never moves.
+  pub fn transcript(&self) -> Option<&Path> {
+    self.transcript.as_deref()
   }
 
   /// A session is live until it is superseded or stopped.

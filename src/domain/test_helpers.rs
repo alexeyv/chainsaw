@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -360,6 +361,7 @@ pub struct SessionSpec {
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
   pub over_limit_at: Option<DateTime<Utc>>,
+  pub transcript: Option<&'static str>,
 }
 
 /// A live implementer that has just been launched and read nothing yet.
@@ -377,15 +379,18 @@ pub fn launched_implementer() -> SessionSpec {
     last_growth: created_at(),
     kicked_at: None,
     over_limit_at: None,
+    transcript: None,
   }
 }
 
-/// A live implementer that has been polled: context read, transcript grown.
+/// A live implementer that has been polled: its transcript was found, has
+/// grown, and its context read.
 pub fn working_implementer() -> SessionSpec {
   SessionSpec {
     context: 4_000,
     context_max: 5_000,
     last_growth: timestamp(1_700_000_600),
+    transcript: Some("/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"),
     ..launched_implementer()
   }
 }
@@ -404,12 +409,13 @@ pub fn build_session(spec: SessionSpec) -> Result<Session> {
     spec.last_growth,
     spec.kicked_at,
     spec.over_limit_at,
+    spec.transcript.map(PathBuf::from),
   )
 }
 
 pub fn format_session(session: &Session) -> String {
   format!(
-    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
+    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\ntranscript: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
     session.id(),
     session.name(),
     session.role(),
@@ -422,6 +428,7 @@ pub fn format_session(session: &Session) -> String {
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),
+    format_option(session.transcript().map(|path| path.display().to_string())),
     session.is_live(),
     session.can_take_task(),
     session.can_be_kicked(),
