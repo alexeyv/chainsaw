@@ -16,11 +16,12 @@ struct SessionRow {
   context_max: i64,
   last_growth: i64,
   kicked_at: Option<i64>,
+  over_limit_at: Option<i64>,
 }
 
 const SELECT: &str = "
   select id, name, role, external_session_id, launched_head, started_at, stopped_at,
-         context, context_max, last_growth, kicked_at
+         context, context_max, last_growth, kicked_at, over_limit_at
   from sessions
 ";
 
@@ -119,6 +120,17 @@ pub fn record_kick(transaction: &Transaction<'_>, id: i64) -> Result<Session> {
   get(transaction, id)?.with_context(|| format!("session {id} is missing"))
 }
 
+/// Stamp that the session crossed its context stop threshold. The update
+/// overwrites, so callers check `can_latch_over_limit` first to make it once
+/// per session; nothing ever clears the column.
+pub fn record_over_limit(transaction: &Transaction<'_>, id: i64) -> Result<Session> {
+  transaction.execute(
+    "update sessions set over_limit_at=? where id=?",
+    params![Utc::now().timestamp_millis(), id],
+  )?;
+  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+}
+
 fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
   Ok(SessionRow {
     id: row.get("id")?,
@@ -132,6 +144,7 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     context_max: row.get("context_max")?,
     last_growth: row.get("last_growth")?,
     kicked_at: row.get("kicked_at")?,
+    over_limit_at: row.get("over_limit_at")?,
   })
 }
 
@@ -151,6 +164,10 @@ fn materialize(row: SessionRow) -> Result<Session> {
     row.context_max,
     time(row.last_growth, "last_growth")?,
     row.kicked_at.map(|at| time(at, "kicked_at")).transpose()?,
+    row
+      .over_limit_at
+      .map(|at| time(at, "over_limit_at"))
+      .transpose()?,
   )
 }
 

@@ -58,6 +58,7 @@ pub struct Session {
   context_max: i64,
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
+  over_limit_at: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -74,6 +75,7 @@ impl Session {
     context_max: i64,
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
+    over_limit_at: Option<DateTime<Utc>>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("name", &name)?;
@@ -93,6 +95,9 @@ impl Session {
     if kicked_at.is_some_and(|kicked| kicked < started_at) {
       bail!("kicked_at cannot precede started_at");
     }
+    if over_limit_at.is_some_and(|over| over < started_at) {
+      bail!("over_limit_at cannot precede started_at");
+    }
 
     Ok(Self {
       id,
@@ -106,6 +111,7 @@ impl Session {
       context_max,
       last_growth,
       kicked_at,
+      over_limit_at,
     })
   }
 
@@ -153,6 +159,10 @@ impl Session {
     self.kicked_at
   }
 
+  pub fn over_limit_at(&self) -> Option<DateTime<Utc>> {
+    self.over_limit_at
+  }
+
   /// A session is live until it is superseded or stopped.
   pub fn is_live(&self) -> bool {
     self.stopped_at.is_none()
@@ -173,6 +183,13 @@ impl Session {
   /// until the transcript has grown since the last nudge.
   pub fn can_be_kicked(&self) -> bool {
     self.is_live() && self.kicked_at.is_none()
+  }
+
+  /// Whether crossing the context stop threshold is still unrecorded for this
+  /// incarnation. Latched once per session and never cleared, so a relaunched
+  /// lead can cross it again.
+  pub fn can_latch_over_limit(&self) -> bool {
+    self.is_live() && self.over_limit_at.is_none()
   }
 }
 

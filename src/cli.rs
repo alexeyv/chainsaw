@@ -113,12 +113,6 @@ pub enum Command {
   },
   /// Print JSON containing all resolved findings.
   Resolutions,
-  /// Read or write a run-state flag in the supervisor database.
-  Config {
-    key: String,
-    #[arg(allow_hyphen_values = true)]
-    value: Option<String>,
-  },
   /// Print current run state.
   State {
     /// Print only this task's id and state name, one line, nothing else.

@@ -2,7 +2,9 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{Connection, Transaction};
 
-use super::{all, create, get, latest_named, record_kick, record_reading, stop_named};
+use super::{
+  all, create, get, latest_named, record_kick, record_over_limit, record_reading, stop_named,
+};
 use crate::domain::test_helpers::{
   format_session, format_sessions, format_time, timestamp, within,
 };
@@ -24,13 +26,13 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
   let row = db.query_row(
     "
       select name, role, external_session_id, launched_head, started_at, stopped_at,
-             context, context_max, last_growth, kicked_at
+             context, context_max, last_growth, kicked_at, over_limit_at
       from sessions where id=?
       ",
     [id],
     |row| {
       Ok(format!(
-        "{} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?}",
+        "{} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?}",
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
@@ -41,6 +43,7 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
         row.get::<_, i64>(7)?,
         row.get::<_, i64>(8)?,
         row.get::<_, Option<i64>>(9)?,
+        row.get::<_, Option<i64>>(10)?,
       ))
     },
   )?;
@@ -75,16 +78,18 @@ context: 0
 context_max: 0
 last_growth: {started}
 kicked_at: none
+over_limit_at: none
 is_live: true
 can_take_task: true
-can_be_kicked: true"#,
+can_be_kicked: true
+can_latch_over_limit: true"#,
         started = format_time(session.started_at())
       )
     );
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None",
+        "implementer-1 implementer uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -306,9 +311,11 @@ context: 4000
 context_max: 4000
 last_growth: {polled}
 kicked_at: none
+over_limit_at: none
 is_live: true
 can_take_task: true
-can_be_kicked: true"#,
+can_be_kicked: true
+can_latch_over_limit: true"#,
         started = format_time(started),
         polled = format_time(polled)
       )
@@ -407,6 +414,74 @@ mod record_kick {
     let transaction = db.transaction()?;
 
     let error = record_kick(&transaction, 42).unwrap_err();
+
+    assert_eq!(error.to_string(), "session 42 is missing");
+    Ok(())
+  }
+}
+
+mod record_over_limit {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+
+    let before = Utc::now();
+    let latched = record_over_limit(&transaction, lead.id())?;
+    let after = Utc::now();
+
+    let over_limit_at = latched.over_limit_at().unwrap();
+    assert!(within(over_limit_at, before, after));
+    assert!(!latched.can_latch_over_limit());
+    assert_eq!(latched.kicked_at(), None);
+    assert!(latched.is_live());
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_the_latch_when_the_transcript_grows() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let lead = create(&transaction, "lead", Role::Lead, "uuid-lead", None)?;
+    let latched = record_over_limit(&transaction, lead.id())?;
+    let grown = lead.started_at() + chrono::Duration::seconds(900);
+
+    let read = record_reading(&transaction, lead.id(), 260_000, true, grown)?;
+
+    assert_eq!(read.over_limit_at(), latched.over_limit_at());
+    assert!(!read.can_latch_over_limit());
+    Ok(())
+  }
+
+  #[test]
+  fn should_leave_a_relaunched_lead_unlatched() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let first = create(&transaction, "lead", Role::Lead, "uuid-lead-1", None)?;
+    record_over_limit(&transaction, first.id())?;
+    stop_named(&transaction, "lead")?;
+
+    let second = create(&transaction, "lead", Role::Lead, "uuid-lead-2", None)?;
+
+    assert_eq!(second.over_limit_at(), None);
+    assert!(second.can_latch_over_limit());
+    assert!(
+      !get(&transaction, first.id())?
+        .unwrap()
+        .can_latch_over_limit()
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_session_does_not_exist() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+
+    let error = record_over_limit(&transaction, 42).unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())

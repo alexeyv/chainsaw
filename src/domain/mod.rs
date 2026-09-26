@@ -1,6 +1,7 @@
 mod calibration;
 mod finding;
 mod observation;
+mod run;
 mod session;
 mod task;
 mod task_event;
@@ -13,6 +14,7 @@ use anyhow::{Result, bail};
 pub use calibration::Calibration;
 pub use finding::{Finding, FindingVerdict};
 pub use observation::Observation;
+pub use run::Run;
 pub use session::{Role, Session};
 pub use task::{Task, TaskState};
 pub use task_event::TaskEvent;

@@ -77,13 +77,6 @@ class TaskContractTests(SupervisorContractCase):
         self.assertIn("2 drafted", state.stdout)
         self.assertIn("retry of 1", state.stdout)
 
-    def test_config_round_trips_across_processes(self):
-        self.assert_success(self.cli("config", "lead", "lead-7"))
-
-        result = self.assert_success(self.cli("config", "lead"))
-
-        self.assertEqual(result.stdout, "lead-7\n")
-
 
 class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_prompt_wait_prints_the_agent_reply(self):
@@ -1211,7 +1204,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.assert_success(self.cli("state"))
         watched = self.assert_success(self.cli("observe", "watching"))
         self.write_supervisor_db(
-            f"update config set value={self.FIVE_MINUTES_AGO} where key='last-state-read'",
+            f"update run set state_read_at={self.FIVE_MINUTES_AGO}",
         )
         silent = self.assert_success(self.cli("observe", "still here"))
         self.assert_success(self.cli("abort", str(task), "--reason", "fixture"))
@@ -1238,7 +1231,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
         self.write_supervisor_db(
-            f"update config set value={self.FIVE_MINUTES_AGO} where key='daemon-seen'",
+            f"update run set daemon_seen_at={self.FIVE_MINUTES_AGO}",
         )
         stopped = self.assert_success(self.cli("state"))
         restarted = self.start_daemon()
@@ -1278,6 +1271,42 @@ class StandingWarningTests(SupervisorContractCase):
         self.assertEqual(events, [("context 260000",)])
         # The runtime was never touched: no prompt was pushed at the lead.
         self.assertFalse(self.runtime_state_path.exists())
+
+    def test_a_relaunched_lead_can_cross_the_stop_threshold_again(self):
+        self.write_lead_log(260_000)
+        daemon = self.start_daemon()
+        self.wait_for_state("context  260000")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        self.write_lead_log(270_000, session_id="session-lead-2")
+        relaunched = self.start_daemon(session_id="session-lead-2")
+        self.wait_for_state("context  270000")
+        self.assert_success(self.cli("stop"))
+        relaunched.wait(timeout=10)
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            events = database.execute(
+                "select detail from events where kind='stop-lead' order by rowid",
+            ).fetchall()
+
+        self.assertEqual(events, [("context 260000",), ("context 270000",)])
+
+    def test_a_restarted_daemon_keeps_the_lead_latch_for_the_same_session(self):
+        self.write_lead_log(260_000)
+        daemon = self.start_daemon()
+        self.wait_for_state("context  260000")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        self.write_lead_log(270_000)
+        restarted = self.start_daemon()
+        self.wait_for_state("context  270000")
+        self.assert_success(self.cli("stop"))
+        restarted.wait(timeout=10)
+        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+            events = database.execute(
+                "select detail from events where kind='stop-lead' order by rowid",
+            ).fetchall()
+
+        self.assertEqual(events, [("context 260000",)])
 
     def test_the_poll_json_stays_clean_while_a_warning_is_printed(self):
         task = self.new_task()

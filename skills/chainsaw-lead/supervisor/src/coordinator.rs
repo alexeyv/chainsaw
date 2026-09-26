@@ -25,7 +25,7 @@ use crate::infra::logs::{
 use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
-use crate::persistence::{calibration, finding, observation, session, task};
+use crate::persistence::{calibration, finding, observation, run, session, task};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const LEAD_WARN_TOKENS: i64 = 200_000;
@@ -34,8 +34,9 @@ const COMMIT_UNATTENDED_SECONDS: i64 = 300;
 /// Task monitors read state every few seconds; this much silence while a task
 /// is out means nothing is watching.
 const STATE_UNREAD_SECONDS: i64 = 120;
-/// The daemon stamps `daemon-seen` on every poll; silence this long means no
-/// daemon is running, whether it never started, was stopped, or died.
+/// The daemon stamps the run record's `daemon_seen_at` on every poll; silence
+/// this long means no daemon is running, whether it never started, was
+/// stopped, or died.
 const DAEMON_SILENT_SECONDS: i64 = 30;
 const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
@@ -71,7 +72,6 @@ fn is_lead_facing(command: &Command) -> bool {
       | Command::WatchTranscripts { .. }
       | Command::LogsDir
       | Command::Context { .. }
-      | Command::Config { .. }
       | Command::Stop
   )
 }
@@ -81,7 +81,8 @@ fn is_lead_facing(command: &Command) -> bool {
 /// from the store, never inferred from what the lead said.
 fn standing_warnings(store: &Store) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
-  let timestamp = now();
+  let at = Utc::now();
+  let timestamp = at.timestamp_millis();
   if let Some(lead) = session_snapshots(store)?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
@@ -97,6 +98,7 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
   }
   let transaction = store.db.unchecked_transaction()?;
   let tasks = task::all(&transaction)?;
+  let run = run::get(&transaction)?;
   transaction.commit()?;
   for task in &tasks {
     if task.state() != TaskState::CommittedUnverified {
@@ -122,15 +124,9 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
     .map(Task::id)
     .collect();
   if let Some(task_id) = out.first() {
-    let last_read = store
-      .cfg("last-state-read")?
-      .and_then(|value| value.parse::<i64>().ok());
-    let unread = match last_read {
-      Some(read) if (timestamp - read) / 1000 <= STATE_UNREAD_SECONDS => None,
-      Some(read) => Some(format!(
-        "no state read for {}",
-        duration_text((timestamp - read) / 1000)
-      )),
+    let unread = match run.seconds_since_state_read(at) {
+      Some(age) if age <= STATE_UNREAD_SECONDS => None,
+      Some(age) => Some(format!("no state read for {}", duration_text(age))),
       None => Some("state has never been read".to_owned()),
     };
     if let Some(unread) = unread {
@@ -139,15 +135,9 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
       ));
     }
   }
-  let seen = store
-    .cfg("daemon-seen")?
-    .and_then(|value| value.parse::<i64>().ok());
-  let absent = match seen {
-    Some(seen) if (timestamp - seen) / 1000 <= DAEMON_SILENT_SECONDS => None,
-    Some(seen) => Some(format!(
-      "no daemon has polled for {}",
-      duration_text((timestamp - seen) / 1000)
-    )),
+  let absent = match run.seconds_since_daemon_seen(at) {
+    Some(age) if age <= DAEMON_SILENT_SECONDS => None,
+    Some(age) => Some(format!("no daemon has polled for {}", duration_text(age))),
     None => Some("no daemon has run for this run".to_owned()),
   };
   if let Some(absent) = absent {
@@ -258,14 +248,6 @@ fn run(
       reason,
     } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
     Command::Resolutions => cmd_resolutions(store),
-    Command::Config { key, value } => {
-      if let Some(value) = value {
-        store.set_cfg(&key, &value)
-      } else {
-        println!("{}", store.cfg_or(&key, "")?);
-        Ok(())
-      }
-    }
     Command::State { task } => cmd_state(store, task),
     Command::LogsDir => {
       println!("{}", store.logs_dir.display());
@@ -498,7 +480,6 @@ fn cmd_start_commentator(
       kind: SessionKind::Commentator,
     },
   )?;
-  store.set_cfg("commentator", &name)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
     store,
@@ -1274,7 +1255,9 @@ fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result
 }
 
 fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
-  store.set_cfg("last-state-read", &now().to_string())?;
+  let transaction = store.write_transaction()?;
+  run::record_state_read(&transaction)?;
+  transaction.commit()?;
   if let Some(task_id) = only_task {
     let task =
       task_snapshot(store, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))?;
@@ -1513,7 +1496,9 @@ fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
 }
 
 fn cmd_stop(store: &Store) -> Result<()> {
-  store.set_cfg("stopped", "1")?;
+  let transaction = store.write_transaction()?;
+  run::request_stop(&transaction)?;
+  transaction.commit()?;
   store.event("stop", "run ended by the lead")?;
   println!("supervisor: stopped; the daemon will exit on its next poll");
   Ok(())
@@ -1543,16 +1528,24 @@ fn daemon(
   lead_session_id: &str,
   poll_interval: Duration,
 ) -> Result<()> {
-  store.set_cfg("lead", lead)?;
   register_lead(store, lead, lead_session_id)?;
-  store.set_cfg("stopped", "0")?;
+  let transaction = store.write_transaction()?;
+  run::clear_stop_request(&transaction)?;
+  transaction.commit()?;
   store.event("daemon-start", &format!("pid {}", std::process::id()))?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut missing_logs = HashSet::new();
   let mut compacting = false;
-  while store.cfg("stopped")?.as_deref() != Some("1") {
+  loop {
+    // One write transaction per poll: read the stop request, then stamp the poll.
+    let transaction = store.write_transaction()?;
+    if run::get(&transaction)?.is_stopping() {
+      transaction.commit()?;
+      break;
+    }
+    run::record_daemon_seen(&transaction)?;
+    transaction.commit()?;
     let timestamp = Utc::now();
-    store.set_cfg("daemon-seen", &now().to_string())?;
     for session in session_snapshots(store)?
       .into_iter()
       .filter(Session::is_live)
@@ -1605,7 +1598,7 @@ fn daemon(
             &mut compacting,
           )?;
         }
-        Role::Lead => observe_lead(store, context)?,
+        Role::Lead => observe_lead(store, &session, context)?,
       }
     }
     thread::sleep(poll_interval);
@@ -1779,13 +1772,15 @@ fn commentator_log_mentions(text: &str, needle: &str) -> bool {
   })
 }
 
-/// Records the lead crossing its stop threshold once. Nothing is pushed at
-/// the lead: an unsolicited prompt mid-thought is a context switch it did not
-/// choose. The warning printed after every lead-facing command carries the
-/// same fact at the moment the lead is already reading output.
-fn observe_lead(store: &Store, context: i64) -> Result<()> {
-  if context > LEAD_STOP_TOKENS && store.cfg("lead-over-limit")?.as_deref() != Some("1") {
-    store.set_cfg("lead-over-limit", "1")?;
+/// Records the lead crossing its stop threshold once per lead session. Nothing
+/// is pushed at the lead: an unsolicited prompt mid-thought is a context switch
+/// it did not choose. The warning printed after every lead-facing command
+/// carries the same fact at the moment the lead is already reading output.
+fn observe_lead(store: &Store, session: &Session, context: i64) -> Result<()> {
+  if context > LEAD_STOP_TOKENS && session.can_latch_over_limit() {
+    let transaction = store.write_transaction()?;
+    session::record_over_limit(&transaction, session.id())?;
+    transaction.commit()?;
     store.event("stop-lead", &format!("context {context}"))?;
   }
   Ok(())

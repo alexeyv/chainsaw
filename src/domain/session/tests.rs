@@ -45,9 +45,11 @@ context: 4000
 context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
+over_limit_at: none
 is_live: true
 can_take_task: true
-can_be_kicked: true"#
+can_be_kicked: true
+can_latch_over_limit: true"#
     );
   }
 
@@ -68,9 +70,11 @@ context: 0
 context_max: 0
 last_growth: 2023-11-14T22:13:20Z
 kicked_at: none
+over_limit_at: none
 is_live: true
 can_take_task: true
-can_be_kicked: true"#
+can_be_kicked: true
+can_latch_over_limit: true"#
     );
   }
 
@@ -111,23 +115,61 @@ context: 4000
 context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: 2023-11-14T22:28:20Z
+over_limit_at: none
 is_live: false
 can_take_task: false
-can_be_kicked: false"#
+can_be_kicked: false
+can_latch_over_limit: false"#
     );
   }
 
   #[test]
-  fn should_accept_stopping_and_kicking_at_the_start_instant() {
+  fn should_accept_a_lead_that_crossed_its_limit() {
+    let session = build_session(SessionSpec {
+      name: "lead",
+      role: Role::Lead,
+      launched_head: None,
+      context: 260_000,
+      context_max: 260_000,
+      over_limit_at: Some(timestamp(1_700_000_900)),
+      ..working_implementer()
+    })
+    .unwrap();
+
+    assert_eq!(
+      format_session(&session),
+      r#"id: 7
+name: "lead"
+role: lead
+external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
+launched_head: none
+started_at: 2023-11-14T22:13:20Z
+stopped_at: none
+context: 260000
+context_max: 260000
+last_growth: 2023-11-14T22:23:20Z
+kicked_at: none
+over_limit_at: 2023-11-14T22:28:20Z
+is_live: true
+can_take_task: false
+can_be_kicked: true
+can_latch_over_limit: false"#
+    );
+  }
+
+  #[test]
+  fn should_accept_stopping_kicking_and_crossing_the_limit_at_the_start_instant() {
     let session = build_session(SessionSpec {
       stopped_at: Some(timestamp(1_700_000_000)),
       kicked_at: Some(timestamp(1_700_000_000)),
+      over_limit_at: Some(timestamp(1_700_000_000)),
       ..launched_implementer()
     })
     .unwrap();
 
     assert_eq!(session.stopped_at(), Some(timestamp(1_700_000_000)));
     assert_eq!(session.kicked_at(), Some(timestamp(1_700_000_000)));
+    assert_eq!(session.over_limit_at(), Some(timestamp(1_700_000_000)));
   }
 
   #[test]
@@ -230,6 +272,16 @@ can_be_kicked: false"#
     .unwrap_err();
     assert_eq!(error.to_string(), "kicked_at cannot precede started_at");
   }
+
+  #[test]
+  fn should_fail_when_the_session_crossed_its_limit_before_it_started() {
+    let error = build_session(SessionSpec {
+      over_limit_at: Some(timestamp(1_699_999_999)),
+      ..working_implementer()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "over_limit_at cannot precede started_at");
+  }
 }
 
 mod can_take_task {
@@ -312,5 +364,32 @@ mod can_be_kicked {
     })
     .unwrap();
     assert!(!session.can_be_kicked());
+  }
+}
+
+mod can_latch_over_limit {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let unlatched = build_session(working_implementer()).unwrap();
+    assert!(unlatched.can_latch_over_limit());
+
+    let latched = build_session(SessionSpec {
+      over_limit_at: Some(timestamp(1_700_000_900)),
+      ..working_implementer()
+    })
+    .unwrap();
+    assert!(!latched.can_latch_over_limit());
+  }
+
+  #[test]
+  fn should_refuse_when_the_session_is_stopped() {
+    let session = build_session(SessionSpec {
+      stopped_at: Some(timestamp(1_700_001_000)),
+      ..working_implementer()
+    })
+    .unwrap();
+    assert!(!session.can_latch_over_limit());
   }
 }

@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  Calibration, Finding, FindingVerdict, Observation, Role, Session, Task, TaskEvent, TaskState,
+  Calibration, Finding, FindingVerdict, Observation, Role, Run, Session, Task, TaskEvent, TaskState,
 };
 
 pub fn created_at() -> DateTime<Utc> {
@@ -359,6 +359,7 @@ pub struct SessionSpec {
   pub context_max: i64,
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
+  pub over_limit_at: Option<DateTime<Utc>>,
 }
 
 /// A live implementer that has just been launched and read nothing yet.
@@ -375,6 +376,7 @@ pub fn launched_implementer() -> SessionSpec {
     context_max: 0,
     last_growth: created_at(),
     kicked_at: None,
+    over_limit_at: None,
   }
 }
 
@@ -401,12 +403,13 @@ pub fn build_session(spec: SessionSpec) -> Result<Session> {
     spec.context_max,
     spec.last_growth,
     spec.kicked_at,
+    spec.over_limit_at,
   )
 }
 
 pub fn format_session(session: &Session) -> String {
   format!(
-    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}",
+    "id: {}\nname: {:?}\nrole: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
     session.id(),
     session.name(),
     session.role(),
@@ -418,9 +421,11 @@ pub fn format_session(session: &Session) -> String {
     session.context_max(),
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
+    format_option(session.over_limit_at().map(format_time)),
     session.is_live(),
     session.can_take_task(),
     session.can_be_kicked(),
+    session.can_latch_over_limit(),
   )
 }
 
@@ -430,4 +435,47 @@ pub fn format_sessions(sessions: &[Session]) -> String {
     .map(format_session)
     .collect::<Vec<_>>()
     .join("\n\n")
+}
+
+/// Every `Run::new` argument, so a case can override exactly one of them.
+pub struct RunSpec {
+  pub daemon_seen_at: Option<DateTime<Utc>>,
+  pub stop_requested_at: Option<DateTime<Utc>>,
+  pub state_read_at: Option<DateTime<Utc>>,
+}
+
+/// A run as the schema seeds it: nothing has happened yet.
+pub fn fresh_run() -> RunSpec {
+  RunSpec {
+    daemon_seen_at: None,
+    stop_requested_at: None,
+    state_read_at: None,
+  }
+}
+
+/// A run whose state was read, then polled by a daemon five minutes later.
+pub fn polled_run() -> RunSpec {
+  RunSpec {
+    daemon_seen_at: Some(timestamp(1_700_000_600)),
+    state_read_at: Some(timestamp(1_700_000_300)),
+    ..fresh_run()
+  }
+}
+
+pub fn build_run(spec: RunSpec) -> Result<Run> {
+  Run::new(
+    spec.daemon_seen_at,
+    spec.stop_requested_at,
+    spec.state_read_at,
+  )
+}
+
+pub fn format_run(run: &Run) -> String {
+  format!(
+    "daemon_seen_at: {}\nstop_requested_at: {}\nstate_read_at: {}\nis_stopping: {}",
+    format_option(run.daemon_seen_at().map(format_time)),
+    format_option(run.stop_requested_at().map(format_time)),
+    format_option(run.state_read_at().map(format_time)),
+    run.is_stopping(),
+  )
 }

@@ -4,18 +4,21 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
-create table config(key text primary key, value text);
+create table run(
+  id integer primary key check(id=1),
+  daemon_seen_at int, stop_requested_at int, state_read_at int);
+insert into run(id) values(1);
 create table sessions(
   id integer primary key, name text not null, role text not null,
   external_session_id text not null unique, launched_head text,
   started_at int not null, stopped_at int,
   context int not null default 0, context_max int not null default 0,
-  last_growth int not null, kicked_at int);
+  last_growth int not null, kicked_at int, over_limit_at int);
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),
@@ -94,28 +97,6 @@ impl Store {
       path,
       db,
     })
-  }
-
-  pub fn cfg(&self, key: &str) -> Result<Option<String>> {
-    self
-      .db
-      .query_row("select value from config where key=?", [key], |row| {
-        row.get(0)
-      })
-      .optional()
-      .map_err(Into::into)
-  }
-
-  pub fn cfg_or(&self, key: &str, default: &str) -> Result<String> {
-    Ok(self.cfg(key)?.unwrap_or_else(|| default.to_owned()))
-  }
-
-  pub fn set_cfg(&self, key: &str, value: &str) -> Result<()> {
-    self.db.execute(
-      "insert or replace into config values(?,?)",
-      params![key, value],
-    )?;
-    Ok(())
   }
 
   pub fn event(&self, kind: &str, detail: &str) -> Result<()> {

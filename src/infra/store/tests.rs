@@ -135,6 +135,12 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
     [],
     |row| row.get::<_, i64>(0),
   )?;
+  let run_rows = db.query_row(
+    "select count(*) from run where daemon_seen_at is null
+       and stop_requested_at is null and state_read_at is null",
+    [],
+    |row| row.get::<_, i64>(0),
+  )?;
   assert_eq!(version, 1);
   assert_eq!(task_id_required, 1);
   assert_eq!(task_foreign_keys, 2);
@@ -143,6 +149,7 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
   assert_eq!(legacy_finding_columns, 0);
   assert_eq!(commentary_columns, 2);
   assert_eq!(commentary_delivery_tables, 0);
+  assert_eq!(run_rows, 1);
   Ok(())
 }
 
