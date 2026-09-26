@@ -37,26 +37,28 @@ impl Settings {
         error.to_string().trim_end()
       )
     };
-    let mut table = match fs::read_to_string(run_dir.join(FILE_NAME)) {
+    let table = match fs::read_to_string(run_dir.join(FILE_NAME)) {
       Ok(text) => text
         .parse::<Table>()
         .map_err(|error| invalid(error.into()))?,
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Table::new(),
       Err(error) => bail!("cannot read {FILE_NAME}: {error}"),
     };
-    let mut settings = table
-      .clone()
-      .try_into()
-      .map_err(|error| anyhow!(error))
-      .and_then(Self::build)
-      .map_err(invalid)?;
-    let mut seen = Vec::new();
-    for set in sets {
-      settings = set_over(&mut table, set, &mut seen)
-        .and_then(|()| Self::build(table.clone().try_into()?))
-        .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))?;
-    }
+    let base = Self::from_table(&table).map_err(invalid)?;
+    let (_, settings) =
+      sets
+        .iter()
+        .enumerate()
+        .try_fold((table, base), |(table, _), (index, set)| {
+          set_over(table, set, &sets[..index])
+            .and_then(|table| Self::from_table(&table).map(|settings| (table, settings)))
+            .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))
+        })?;
     Ok(settings)
+  }
+
+  fn from_table(table: &Table) -> Result<Self> {
+    Self::build(table.clone().try_into()?)
   }
 
   fn build(file: File) -> Result<Self> {
@@ -106,35 +108,36 @@ struct Role {
   args: Option<String>,
 }
 
-/// Lays one `KEY=VALUE` over `table`. The value is a TOML literal when it
-/// parses as one (`20`, `"x"`), otherwise a string
-fn set_over(table: &mut Table, set: &str, seen: &mut Vec<String>) -> Result<()> {
+/// Lays one `KEY=VALUE` over `table`, unless an `earlier` set named the same
+/// key. The value is a TOML literal when it parses as one (`20`, `"x"`),
+/// otherwise a string
+fn set_over(table: Table, set: &str, earlier: &[String]) -> Result<Table> {
   let Some((key, raw)) = set.split_once('=') else {
     bail!("expected KEY=VALUE");
   };
-  if seen.contains(&key.to_owned()) {
+  if earlier
+    .iter()
+    .any(|set| set.split_once('=').is_some_and(|(seen, _)| seen == key))
+  {
     bail!("{key} was already set by an earlier --set");
   }
   let literal = match format!("v = {raw}").parse::<Table>() {
     Ok(_) => raw.to_owned(),
     Err(_) => Value::String(raw.to_owned()).to_string(),
   };
-  let source = format!("{key} = {literal}").parse::<Table>()?;
-  merge(table, source);
-  seen.push(key.to_owned());
-  Ok(())
+  Ok(merge(table, format!("{key} = {literal}").parse()?))
 }
 
 /// Lays `source` over `target`, descending into tables both sides have
-fn merge(target: &mut Table, source: Table) {
-  for (key, value) in source {
-    match (target.get_mut(&key), value) {
-      (Some(Value::Table(current)), Value::Table(value)) => merge(current, value),
-      (_, value) => {
-        target.insert(key, value);
-      }
-    }
-  }
+fn merge(target: Table, source: Table) -> Table {
+  source.into_iter().fold(target, |mut target, (key, value)| {
+    let value = match (target.remove(&key), value) {
+      (Some(Value::Table(current)), Value::Table(value)) => Value::Table(merge(current, value)),
+      (_, value) => value,
+    };
+    target.insert(key, value);
+    target
+  })
 }
 
 /// Today's flags; the commentator keeps slash commands

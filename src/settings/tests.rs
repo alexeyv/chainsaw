@@ -312,9 +312,7 @@ mod set_over {
   use super::*;
 
   fn apply(text: &str, set: &str) -> Result<Table> {
-    let mut target = table(text);
-    set_over(&mut target, set, &mut Vec::new())?;
-    Ok(target)
+    set_over(table(text), set, &[])
   }
 
   #[test]
@@ -378,12 +376,13 @@ mod set_over {
   }
 
   #[test]
-  fn should_fail_when_the_key_was_already_set() {
-    let mut target = table("");
-    let mut seen = Vec::new();
-    set_over(&mut target, "implementer.args=a", &mut seen).unwrap();
-
-    let error = set_over(&mut target, "implementer.args=b", &mut seen).unwrap_err();
+  fn should_fail_when_an_earlier_set_named_the_key() {
+    let error = set_over(
+      table(""),
+      "implementer.args=b",
+      &sets(&["implementer.args=a"]),
+    )
+    .unwrap_err();
 
     assert_eq!(
       message(&error),
@@ -397,23 +396,22 @@ mod merge {
 
   #[test]
   fn should_work() {
-    let mut target = table("a = 1\n[t]\nx = 1\ny = 1\n");
-
-    merge(&mut target, table("b = 2\n[t]\ny = 2\n"));
+    let merged = merge(
+      table("a = 1\n[t]\nx = 1\ny = 1\n"),
+      table("b = 2\n[t]\ny = 2\n"),
+    );
 
     assert_eq!(
-      target.to_string(),
+      merged.to_string(),
       table("a = 1\nb = 2\n[t]\nx = 1\ny = 2\n").to_string()
     );
   }
 
   #[test]
   fn should_replace_a_scalar_with_a_table() {
-    let mut target = table("t = 1\n");
+    let merged = merge(table("t = 1\n"), table("[t]\nx = 1\n"));
 
-    merge(&mut target, table("[t]\nx = 1\n"));
-
-    assert_eq!(target["t"]["x"], Value::Integer(1));
+    assert_eq!(merged["t"]["x"], Value::Integer(1));
   }
 }
 
