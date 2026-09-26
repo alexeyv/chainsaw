@@ -21,8 +21,32 @@ impl ScratchDir {
     &self.0
   }
 
+  /// Where the global file would be under a home directory in the scratch
+  fn global_file(&self) -> PathBuf {
+    self
+      .path()
+      .join("home")
+      .join(".config")
+      .join("chainsaw")
+      .join(FILE_NAME)
+  }
+
+  fn write_global(&self, text: &str) {
+    fs::create_dir_all(self.global_file().parent().unwrap()).unwrap();
+    fs::write(self.global_file(), text).unwrap();
+  }
+
   fn write_settings(&self, text: &str) {
     fs::write(self.path().join(FILE_NAME), text).unwrap();
+  }
+
+  fn write_local(&self, text: &str) {
+    fs::write(self.path().join(LOCAL_FILE_NAME), text).unwrap();
+  }
+
+  /// Loads with the scratch as the run directory and its global file
+  fn load(&self, values: &[&str]) -> Result<Settings> {
+    Settings::load_from(&self.global_file(), self.path(), &sets(values))
   }
 }
 
@@ -50,12 +74,11 @@ fn table(text: &str) -> Table {
 fn load_text(text: &str) -> Result<Settings> {
   let dir = ScratchDir::new();
   dir.write_settings(text);
-  Settings::load(dir.path(), &[])
+  dir.load(&[])
 }
 
 fn load_sets(values: &[&str]) -> Result<Settings> {
-  let dir = ScratchDir::new();
-  Settings::load(dir.path(), &sets(values))
+  ScratchDir::new().load(values)
 }
 
 mod load {
@@ -76,7 +99,7 @@ args = "--model sonnet --effort medium"
 "#,
     );
 
-    let settings = Settings::load(dir.path(), &sets(&["commentator.args=--model haiku"])).unwrap();
+    let settings = dir.load(&["commentator.args=--model haiku"]).unwrap();
 
     assert_eq!(settings.prompt_timeout(), Duration::from_secs(3));
     assert_eq!(
@@ -101,7 +124,7 @@ args = "--model sonnet --effort medium"
   fn should_use_todays_exact_lists_when_the_file_is_absent_and_nothing_is_set() {
     let dir = ScratchDir::new();
 
-    let settings = Settings::load(dir.path(), &[]).unwrap();
+    let settings = dir.load(&[]).unwrap();
 
     assert_eq!(settings.prompt_timeout(), Duration::from_secs(15));
     assert_eq!(
@@ -145,10 +168,7 @@ args = "--model sonnet --effort medium"
   fn should_keep_defaults_when_the_file_is_empty() {
     let dir = ScratchDir::new();
 
-    assert_eq!(
-      load_text("").unwrap(),
-      Settings::load(dir.path(), &[]).unwrap()
-    );
+    assert_eq!(load_text("").unwrap(), dir.load(&[]).unwrap());
   }
 
   #[test]
@@ -157,7 +177,7 @@ args = "--model sonnet --effort medium"
 
     assert_eq!(
       load_text("[implementer]\n").unwrap(),
-      Settings::load(dir.path(), &[]).unwrap()
+      dir.load(&[]).unwrap()
     );
   }
 
@@ -195,12 +215,85 @@ args = "--model sonnet --effort medium"
     let dir = ScratchDir::new();
     dir.write_settings("[implementer]\nargs = \"--chrome\"\n");
 
-    let settings =
-      Settings::load(dir.path(), &sets(&["implementer.args=--effort medium"])).unwrap();
+    let settings = dir.load(&["implementer.args=--effort medium"]).unwrap();
 
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
       ["--effort", "medium"]
+    );
+  }
+
+  #[test]
+  fn should_read_the_global_file_when_the_run_directory_has_none() {
+    let dir = ScratchDir::new();
+    dir.write_global("prompt-timeout-seconds = 4\n[implementer]\nagent = \"codex\"\n");
+
+    let settings = dir.load(&[]).unwrap();
+
+    assert_eq!(settings.prompt_timeout(), Duration::from_secs(4));
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+  }
+
+  #[test]
+  fn should_lay_local_over_project_over_global_key_by_key() {
+    let dir = ScratchDir::new();
+    dir.write_global(
+      "prompt-timeout-seconds = 4\n[implementer]\nargs = \"--global\"\n[commentator]\nargs = \"--global\"\n",
+    );
+    dir.write_settings("[implementer]\nargs = \"--project\"\n[commentator]\nagent = \"codex\"\n");
+    dir.write_local("[implementer]\nargs = \"--local\"\n");
+
+    let settings = dir.load(&[]).unwrap();
+
+    assert_eq!(settings.prompt_timeout(), Duration::from_secs(4));
+    assert_eq!(settings.launch_args(SessionKind::Implementer), ["--local"]);
+    assert_eq!(
+      settings.launch_agent(SessionKind::Commentator),
+      AgentKind::Codex
+    );
+    assert_eq!(settings.launch_args(SessionKind::Commentator), ["--global"]);
+  }
+
+  #[test]
+  fn should_let_a_set_beat_the_local_file() {
+    let dir = ScratchDir::new();
+    dir.write_local("[implementer]\nargs = \"--local\"\n");
+
+    let settings = dir.load(&["implementer.args=--set"]).unwrap();
+
+    assert_eq!(settings.launch_args(SessionKind::Implementer), ["--set"]);
+  }
+
+  #[test]
+  fn should_fail_naming_the_global_file_by_its_full_path_when_it_is_invalid() {
+    let dir = ScratchDir::new();
+    dir.write_global("[implementer]\nmodel = \"x\"\n");
+
+    let error = dir.load(&[]).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      format!(
+        "invalid settings in {}: unknown field `model`, expected `agent` or `args`\nin `implementer`",
+        dir.global_file().display()
+      )
+    );
+  }
+
+  #[test]
+  fn should_fail_naming_the_local_file_when_it_is_invalid_even_though_the_project_file_is_fine() {
+    let dir = ScratchDir::new();
+    dir.write_settings("[implementer]\nargs = \"--project\"\n");
+    dir.write_local("[implementer]\nargs = 1\n");
+
+    let error = dir.load(&[]).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid settings in chainsaw.local.toml: invalid type: integer `1`, expected a string\nin `implementer.args`"
     );
   }
 
@@ -326,7 +419,7 @@ args = "--model sonnet --effort medium"
     let dir = ScratchDir::new();
     fs::create_dir(dir.path().join(FILE_NAME)).unwrap();
 
-    let error = Settings::load(dir.path(), &[]).unwrap_err();
+    let error = dir.load(&[]).unwrap_err();
 
     let prefix = "cannot read chainsaw.toml: ";
     assert!(message(&error).starts_with(prefix));
@@ -368,7 +461,7 @@ args = "--model sonnet --effort medium"
     let dir = ScratchDir::new();
     fs::write(dir.path().join("chainsaw.json"), "{}").unwrap();
 
-    let error = Settings::load(dir.path(), &[]).unwrap_err();
+    let error = dir.load(&[]).unwrap_err();
 
     assert_eq!(
       message(&error),

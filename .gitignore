@@ -6,6 +6,7 @@ _planning/
 .claude/
 .agents/
 skills-lock.json
+chainsaw.local.toml
 
 # Ship supervisor sources in skills/; never the cargo build or binaries.
 skills/**/target/

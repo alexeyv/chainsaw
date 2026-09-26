@@ -1,6 +1,13 @@
-# Sample chainsaw.toml: copy into the run directory as chainsaw.toml.
-# Every key is optional and the values here are the defaults.
+# Sample chainsaw.toml. Every key is optional and the values here are the
+# defaults. Settings come from up to three files, each laid over the previous
+# one key by key, so write only the keys you want to change:
+#   ~/.config/chainsaw/chainsaw.toml   your defaults for every project
+#                                      ($XDG_CONFIG_HOME/chainsaw/chainsaw.toml when set)
+#   chainsaw.toml                      in the run directory, checked in
+#   chainsaw.local.toml                in the run directory, gitignored
 # `--set KEY=VALUE` before the subcommand overrides a key for one process.
+# A key overrides as a whole: a file that sets a role's args replaces the
+# entire flag list of the layer below, not just the flags it mentions.
 
 # Seconds a sent prompt gets to reach the transcript before it is resent.
 prompt-timeout-seconds = 15

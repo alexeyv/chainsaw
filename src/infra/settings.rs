@@ -1,12 +1,15 @@
-//! User-editable settings, living in an optional chainsaw.toml file.
-//! Loaded at the beginning of each coordinator process.
+//! User-editable settings, layered from optional TOML files: the global
+//! `~/.config/chainsaw/chainsaw.toml`, then `chainsaw.toml` and
+//! `chainsaw.local.toml` in the run directory, each laid over the previous
+//! key by key. Loaded at the beginning of each coordinator process.
 //! Can be overridden with CLI args a la `--set prompt-timeout-seconds=20`
 
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use strum::IntoEnumIterator;
 use toml::{Table, Value};
@@ -16,7 +19,18 @@ use super::session_runtime::SessionKind;
 use crate::domain::AgentKind;
 
 pub const FILE_NAME: &str = "chainsaw.toml";
+pub const LOCAL_FILE_NAME: &str = "chainsaw.local.toml";
 const LEGACY_FILE_NAME: &str = "chainsaw.json";
+
+/// The global settings file: `$XDG_CONFIG_HOME/chainsaw/chainsaw.toml`, or
+/// `~/.config/chainsaw/chainsaw.toml` when `XDG_CONFIG_HOME` is unset or empty
+fn global_file() -> Result<PathBuf> {
+  let config_home = match env::var_os("XDG_CONFIG_HOME") {
+    Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+    _ => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".config"),
+  };
+  Ok(config_home.join("chainsaw").join(FILE_NAME))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -33,28 +47,33 @@ struct LaunchSettings {
 }
 
 impl Settings {
-  /// Reads `chainsaw.toml` from `run_dir` and applies each `--set` over it.
-  /// A missing file means defaults; a leftover `chainsaw.json` is an error
+  /// Reads the global file, then `chainsaw.toml` and `chainsaw.local.toml`
+  /// from `run_dir`, lays each over the previous key by key, and applies each
+  /// `--set` over the result. A missing file lays nothing over; a leftover
+  /// `chainsaw.json` is an error
   pub fn load(run_dir: &Path, sets: &[String]) -> Result<Self> {
+    Self::load_from(&global_file()?, run_dir, sets)
+  }
+
+  /// `load` with the global file at `global_file`
+  fn load_from(global_file: &Path, run_dir: &Path, sets: &[String]) -> Result<Self> {
     if run_dir.join(LEGACY_FILE_NAME).exists() {
       bail!(
         "{LEGACY_FILE_NAME} is no longer used; transfer its settings to {FILE_NAME} and delete"
       );
     }
-    let invalid = |error: anyhow::Error| {
-      anyhow!(
-        "invalid settings in {FILE_NAME}: {}",
-        error.to_string().trim_end()
-      )
-    };
-    let table = match fs::read_to_string(run_dir.join(FILE_NAME)) {
-      Ok(text) => text
-        .parse::<Table>()
-        .map_err(|error| invalid(error.into()))?,
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Table::new(),
-      Err(error) => bail!("cannot read {FILE_NAME}: {error}"),
-    };
-    let base = Self::from_table(&table).map_err(invalid)?;
+    let layers = [
+      (global_file.to_path_buf(), global_file.display().to_string()),
+      (run_dir.join(FILE_NAME), FILE_NAME.to_owned()),
+      (run_dir.join(LOCAL_FILE_NAME), LOCAL_FILE_NAME.to_owned()),
+    ];
+    let table = layers
+      .iter()
+      .try_fold(Table::new(), |table, (path, name)| {
+        read_layer(path, name).map(|layer| merge(table, layer))
+      })?;
+    let base = Self::from_table(&table)
+      .map_err(|error| anyhow!("invalid settings: {}", error.to_string().trim_end()))?;
     let (_, settings) =
       sets
         .iter()
@@ -150,6 +169,26 @@ struct File {
 struct RoleSettings {
   agent: Option<String>,
   args: Option<String>,
+}
+
+/// Parses and validates one settings file, called `name` in errors. A
+/// missing file is an empty table
+fn read_layer(path: &Path, name: &str) -> Result<Table> {
+  let invalid = |error: anyhow::Error| {
+    anyhow!(
+      "invalid settings in {name}: {}",
+      error.to_string().trim_end()
+    )
+  };
+  let table = match fs::read_to_string(path) {
+    Ok(text) => text
+      .parse::<Table>()
+      .map_err(|error| invalid(error.into()))?,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Table::new()),
+    Err(error) => bail!("cannot read {name}: {error}"),
+  };
+  Settings::from_table(&table).map_err(invalid)?;
+  Ok(table)
 }
 
 /// Lays one `KEY=VALUE` over `table`, unless an `earlier` set named the same

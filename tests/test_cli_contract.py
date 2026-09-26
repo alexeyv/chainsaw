@@ -1441,6 +1441,54 @@ class SettingsContractTests(SupervisorContractCase):
 
         self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
 
+    def test_the_global_file_tunes_every_run_directory(self):
+        self.write_global_settings('[implementer]\nargs = "--model sonnet"\n')
+
+        self.launch()
+
+        self.assertEqual(self.launch_args("worker"), ["--model", "sonnet"])
+
+    def test_xdg_config_home_relocates_the_global_file(self):
+        config_home = self.sandbox / "xdg"
+        self.write_global_settings('[implementer]\nargs = "--model haiku"\n', config_home)
+        self.write_global_settings('[implementer]\nargs = "--model sonnet"\n')
+        self.env["XDG_CONFIG_HOME"] = str(config_home)
+
+        self.launch()
+
+        self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
+
+    def test_local_beats_project_beats_global_key_by_key(self):
+        self.write_global_settings(
+            '[implementer]\nargs = "--global"\n[commentator]\nargs = "--global"\n'
+        )
+        self.write_settings('[implementer]\nargs = "--project"\n')
+        self.write_local_settings('[implementer]\nargs = "--local"\n')
+
+        self.launch()
+        commentator = self.start_commentator()
+
+        self.assertEqual(self.launch_args("worker"), ["--local"])
+        self.assertEqual(self.launch_args(commentator), ["--global"])
+
+    def test_an_invalid_global_file_fails_naming_its_full_path(self):
+        self.write_global_settings('[implementer]\nmodel = "x"\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(
+            result,
+            f"invalid settings in {self.home / '.config' / 'chainsaw' / 'chainsaw.toml'}: "
+            "unknown field `model`",
+        )
+
+    def test_an_invalid_local_file_fails_naming_it(self):
+        self.write_local_settings('[implementer]\nargs = 1\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(result, "invalid settings in chainsaw.local.toml: invalid type")
+
     def test_an_invalid_set_fails_the_command_that_succeeds_without_it(self):
         self.write_settings('[implementer]\nargs = "--model sonnet"\n')
 

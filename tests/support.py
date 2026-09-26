@@ -54,6 +54,8 @@ class SupervisorContractCase(unittest.TestCase):
         (bin_dir / "herdr").symlink_to(FAKE_HERDR)
 
         self.env = os.environ.copy()
+        # The developer's own XDG_CONFIG_HOME must not leak the global file in.
+        self.env.pop("XDG_CONFIG_HOME", None)
         self.env.update({
             "HOME": str(self.home),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -182,6 +184,17 @@ class SupervisorContractCase(unittest.TestCase):
     def write_settings(self, text):
         """Put a chainsaw.toml in the run directory; the next process reads it."""
         (self.run_dir / "chainsaw.toml").write_text(text)
+
+    def write_local_settings(self, text):
+        """Put a chainsaw.local.toml in the run directory, over chainsaw.toml."""
+        (self.run_dir / "chainsaw.local.toml").write_text(text)
+
+    def write_global_settings(self, text, config_home=None):
+        """Put the global chainsaw.toml under `config_home`, the sandbox home's
+        .config by default; every run directory reads it first."""
+        directory = Path(config_home or self.home / ".config") / "chainsaw"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "chainsaw.toml").write_text(text)
 
     def session_agent(self, name):
         """The agent the live session row named `name` was launched with."""

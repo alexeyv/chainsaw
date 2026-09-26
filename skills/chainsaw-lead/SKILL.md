@@ -30,13 +30,16 @@ the commentator's findings — not implementation detail.
    from yours.
 
 5. The supervisor launches implementers and the commentator with `--model opus
-   --effort high` plus its other default Claude flags. An optional `chainsaw.toml` in
-   the run directory tunes them per role: `<role>.args` is the whole flag list,
-   split like a shell would and passed to Claude as written; quote a value with
-   spaces (`references/chainsaw.toml.example` shows the defaults). `--set KEY=VALUE` before the subcommand overrides the file for
-   one process. Every
-   process reads the file once, at start: the daemon keeps what it started with,
-   and the next command sees an edit. The lead runs on whatever model the human
+   --effort high` plus its other default Claude flags. Optional TOML files tune
+   them per role, each laid over the previous one key by key: the global
+   `~/.config/chainsaw/chainsaw.toml`, then `chainsaw.toml` in the run directory
+   (checked in), then `chainsaw.local.toml` beside it (gitignored, personal
+   overrides). `<role>.args` is the whole flag list, split like a shell would and
+   passed to the agent as written; quote a value with spaces
+   (`references/chainsaw.toml.example` shows the defaults). `--set KEY=VALUE`
+   before the subcommand overrides the files for one process. Every process
+   reads the files once, at start: the daemon keeps what it started with, and
+   the next command sees an edit. The lead runs on whatever model the human
    started this session with.
 
 ## Basics
