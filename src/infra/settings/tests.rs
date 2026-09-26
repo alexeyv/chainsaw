@@ -46,7 +46,12 @@ impl ScratchDir {
 
   /// Loads with the scratch as the run directory and its global file
   fn load(&self, values: &[&str]) -> Result<Settings> {
-    Settings::load_from(&self.global_file(), self.path(), &sets(values))
+    Settings::load_from(Some(&self.global_file()), self.path(), &sets(values))
+  }
+
+  /// Loads with the scratch as the run directory and no global file
+  fn load_without_global(&self, values: &[&str]) -> Result<Settings> {
+    Settings::load_from(None, self.path(), &sets(values))
   }
 }
 
@@ -234,6 +239,21 @@ args = "--model sonnet --effort medium"
     assert_eq!(
       settings.launch_agent(SessionKind::Implementer),
       AgentKind::Codex
+    );
+  }
+
+  #[test]
+  fn should_skip_the_global_layer_when_there_is_no_global_file() {
+    let dir = ScratchDir::new();
+    dir.write_global("prompt-timeout-seconds = 4\n");
+    dir.write_settings("[implementer]\nargs = \"--project\"\n");
+
+    let settings = dir.load_without_global(&[]).unwrap();
+
+    assert_eq!(settings.prompt_timeout(), Duration::from_secs(15));
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--project"]
     );
   }
 

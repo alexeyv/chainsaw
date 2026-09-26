@@ -2,7 +2,8 @@
 # defaults. Settings come from up to three files, each laid over the previous
 # one key by key, so write only the keys you want to change:
 #   ~/.config/chainsaw/chainsaw.toml   your defaults for every project
-#                                      ($XDG_CONFIG_HOME/chainsaw/chainsaw.toml when set)
+#                                      ($XDG_CONFIG_HOME/chainsaw/chainsaw.toml when set;
+#                                      CHAINSAW_CONFIG names another file, empty means none)
 #   chainsaw.toml                      in the run directory, checked in
 #   chainsaw.local.toml                in the run directory, gitignored
 # `--set KEY=VALUE` before the subcommand overrides a key for one process.

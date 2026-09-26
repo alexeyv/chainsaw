@@ -54,8 +54,9 @@ class SupervisorContractCase(unittest.TestCase):
         (bin_dir / "herdr").symlink_to(FAKE_HERDR)
 
         self.env = os.environ.copy()
-        # The developer's own XDG_CONFIG_HOME must not leak the global file in.
+        # The developer's own global settings must not leak into a run.
         self.env.pop("XDG_CONFIG_HOME", None)
+        self.env.pop("CHAINSAW_CONFIG", None)
         self.env.update({
             "HOME": str(self.home),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",

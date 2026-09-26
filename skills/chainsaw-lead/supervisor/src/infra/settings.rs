@@ -1,7 +1,8 @@
 //! User-editable settings, layered from optional TOML files: the global
-//! `~/.config/chainsaw/chainsaw.toml`, then `chainsaw.toml` and
-//! `chainsaw.local.toml` in the run directory, each laid over the previous
-//! key by key. Loaded at the beginning of each coordinator process.
+//! `~/.config/chainsaw/chainsaw.toml` (or whatever `CHAINSAW_CONFIG` names),
+//! then `chainsaw.toml` and `chainsaw.local.toml` in the run directory, each
+//! laid over the previous key by key. Loaded at the beginning of each
+//! coordinator process.
 //! Can be overridden with CLI args a la `--set prompt-timeout-seconds=20`
 
 use std::env;
@@ -20,16 +21,21 @@ use crate::domain::AgentKind;
 
 pub const FILE_NAME: &str = "chainsaw.toml";
 pub const LOCAL_FILE_NAME: &str = "chainsaw.local.toml";
+pub const GLOBAL_FILE_ENV: &str = "CHAINSAW_CONFIG";
 const LEGACY_FILE_NAME: &str = "chainsaw.json";
 
-/// The global settings file: `$XDG_CONFIG_HOME/chainsaw/chainsaw.toml`, or
-/// `~/.config/chainsaw/chainsaw.toml` when `XDG_CONFIG_HOME` is unset or empty
-fn global_file() -> Result<PathBuf> {
+/// The global settings file: `$CHAINSAW_CONFIG`, none when that is set but
+/// empty, or `$XDG_CONFIG_HOME/chainsaw/chainsaw.toml` when it is unset,
+/// falling back to `~/.config/chainsaw/chainsaw.toml`
+fn global_file() -> Result<Option<PathBuf>> {
+  if let Some(path) = env::var_os(GLOBAL_FILE_ENV) {
+    return Ok((!path.is_empty()).then(|| PathBuf::from(path)));
+  }
   let config_home = match env::var_os("XDG_CONFIG_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
     _ => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".config"),
   };
-  Ok(config_home.join("chainsaw").join(FILE_NAME))
+  Ok(Some(config_home.join("chainsaw").join(FILE_NAME)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,25 +58,25 @@ impl Settings {
   /// `--set` over the result. A missing file lays nothing over; a leftover
   /// `chainsaw.json` is an error
   pub fn load(run_dir: &Path, sets: &[String]) -> Result<Self> {
-    Self::load_from(&global_file()?, run_dir, sets)
+    Self::load_from(global_file()?.as_deref(), run_dir, sets)
   }
 
-  /// `load` with the global file at `global_file`
-  fn load_from(global_file: &Path, run_dir: &Path, sets: &[String]) -> Result<Self> {
+  /// `load` with the global file at `global_file`, or without one
+  fn load_from(global_file: Option<&Path>, run_dir: &Path, sets: &[String]) -> Result<Self> {
     if run_dir.join(LEGACY_FILE_NAME).exists() {
       bail!(
         "{LEGACY_FILE_NAME} is no longer used; transfer its settings to {FILE_NAME} and delete"
       );
     }
-    let layers = [
-      (global_file.to_path_buf(), global_file.display().to_string()),
-      (run_dir.join(FILE_NAME), FILE_NAME.to_owned()),
-      (run_dir.join(LOCAL_FILE_NAME), LOCAL_FILE_NAME.to_owned()),
-    ];
-    let table = layers
-      .iter()
+    let table = global_file
+      .map(|path| (path.to_path_buf(), path.display().to_string()))
+      .into_iter()
+      .chain([
+        (run_dir.join(FILE_NAME), FILE_NAME.to_owned()),
+        (run_dir.join(LOCAL_FILE_NAME), LOCAL_FILE_NAME.to_owned()),
+      ])
       .try_fold(Table::new(), |table, (path, name)| {
-        read_layer(path, name).map(|layer| merge(table, layer))
+        read_layer(&path, &name).map(|layer| merge(table, layer))
       })?;
     let base = Self::from_table(&table)
       .map_err(|error| anyhow!("invalid settings: {}", error.to_string().trim_end()))?;

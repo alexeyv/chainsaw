@@ -32,9 +32,9 @@ the commentator's findings — not implementation detail.
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. Optional TOML files tune
    them per role, each laid over the previous one key by key: the global
-   `~/.config/chainsaw/chainsaw.toml`, then `chainsaw.toml` in the run directory
-   (checked in), then `chainsaw.local.toml` beside it (gitignored, personal
-   overrides). `<role>.args` is the whole flag list, split like a shell would and
+   `~/.config/chainsaw/chainsaw.toml` (`CHAINSAW_CONFIG` names another file,
+   empty means none), then `chainsaw.toml` in the run directory (checked in),
+   then `chainsaw.local.toml` beside it (gitignored, personal overrides). `<role>.args` is the whole flag list, split like a shell would and
    passed to the agent as written; quote a value with spaces
    (`references/chainsaw.toml.example` shows the defaults). `--set KEY=VALUE`
    before the subcommand overrides the files for one process. Every process

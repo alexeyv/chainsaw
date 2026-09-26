@@ -1458,6 +1458,24 @@ class SettingsContractTests(SupervisorContractCase):
 
         self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
 
+    def test_chainsaw_config_names_the_global_file(self):
+        named = self.sandbox / "elsewhere.toml"
+        named.write_text('[implementer]\nargs = "--model haiku"\n')
+        self.write_global_settings('[implementer]\nargs = "--model sonnet"\n')
+        self.env["CHAINSAW_CONFIG"] = str(named)
+
+        self.launch()
+
+        self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
+
+    def test_an_empty_chainsaw_config_ignores_the_global_file(self):
+        self.write_global_settings('[implementer]\nargs = "--model sonnet"\n')
+        self.env["CHAINSAW_CONFIG"] = ""
+
+        self.launch()
+
+        self.assertEqual(self.launch_args("worker"), IMPLEMENTER_DEFAULTS)
+
     def test_local_beats_project_beats_global_key_by_key(self):
         self.write_global_settings(
             '[implementer]\nargs = "--global"\n[commentator]\nargs = "--global"\n'
