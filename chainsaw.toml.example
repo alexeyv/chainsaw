@@ -3,7 +3,7 @@
 # `--set KEY=VALUE` before the subcommand overrides a key for one process.
 
 # Seconds a sent prompt gets to reach the transcript before it is resent.
-prompt-landing-seconds = 15
+prompt-timeout-seconds = 15
 
 # Each role's args are split like a shell would and passed to Claude as written:
 # quote a value that contains spaces, e.g. --append-system-prompt 'be terse'.

@@ -1,6 +1,6 @@
 //! User-editable settings, living in an optional chainsaw.toml file.
 //! Loaded at the beginning of each coordinator process.
-//! Can be overridden with CLI args a la `--set prompt-landing-seconds=20`
+//! Can be overridden with CLI args a la `--set prompt-timeout-seconds=20`
 
 use std::fs;
 use std::path::Path;
@@ -18,7 +18,7 @@ const LEGACY_FILE_NAME: &str = "chainsaw.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-  prompt_landing: Duration,
+  prompt_timeout: Duration,
   implementer_args: Vec<String>,
   commentator_args: Vec<String>,
 }
@@ -71,15 +71,15 @@ impl Settings {
       shell_words::split(&args).map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))
     };
     Ok(Self {
-      prompt_landing: Duration::from_secs(file.prompt_landing_seconds.unwrap_or(15)),
+      prompt_timeout: Duration::from_secs(file.prompt_timeout_seconds.unwrap_or(15)),
       implementer_args: launch(SessionKind::Implementer, file.implementer)?,
       commentator_args: launch(SessionKind::Commentator, file.commentator)?,
     })
   }
 
   /// How long a sent prompt gets to reach the transcript before it is resent
-  pub fn prompt_landing(&self) -> Duration {
-    self.prompt_landing
+  pub fn prompt_timeout(&self) -> Duration {
+    self.prompt_timeout
   }
 
   /// The agent flags a session of this kind launches with
@@ -96,7 +96,7 @@ impl Settings {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct File {
-  prompt_landing_seconds: Option<u64>,
+  prompt_timeout_seconds: Option<u64>,
   implementer: Option<Role>,
   commentator: Option<Role>,
 }

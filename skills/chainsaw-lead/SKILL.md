@@ -278,10 +278,9 @@ measured separately (`$SUP state` shows both).
    gate failures you judged pre-existing (test name and one-line error).
    ```
 
-   Prompts are serial and delivery is verified against the session log by the
-   supervisor; the command returns as soon as the prompt has landed, not
-   when the turn ends, so you are free while the implementer works. Never send two at
-   once.
+   Prompts are serial and the supervisor watches the session log for each one; the
+   command returns as soon as the prompt shows up there, not when the turn ends, so
+   you are free while the implementer works. Never send two at once.
 3. While it works — the only free time in the run: poll with the retained observation
    cursor, verify every unresolved finding against git, and resolve it through the
    protocol above. Gather

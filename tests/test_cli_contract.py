@@ -101,14 +101,14 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         )
 
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
-        self.write_settings("prompt-landing-seconds = 0\n")
+        self.write_settings("prompt-timeout-seconds = 0\n")
         self.launch()
         self.update_zero_cost_dummy(drop_prompts=3)
 
         result = self.cli("prompt", "worker", "lost in transit")
         state = self.assert_success(self.cli("state"))
 
-        self.assert_failure(result, "never landed after 3 attempts")
+        self.assert_failure(result, "never showed up in its transcript after 3 attempts")
         self.assertEqual(
             [operation["operation"] for operation in self.runtime_operations()
              if operation["operation"] == "prompt"],
@@ -985,16 +985,16 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 class BusySessionContractTests(SupervisorContractCase):
     """A busy agent queues a prompt and works through it once it goes idle."""
 
-    def test_a_prompt_is_withheld_while_busy_and_lands_when_the_session_goes_idle(self):
-        self.write_settings("prompt-landing-seconds = 1\n")
+    def test_a_prompt_is_withheld_while_busy_and_shows_up_when_the_session_goes_idle(self):
+        self.write_settings("prompt-timeout-seconds = 1\n")
         self.launch()
         self.set_agent_status("worker", "busy")
         log = self.session_log("worker")
-        landed_while_busy = []
+        seen_while_busy = []
 
         def release():
             entries = [json.loads(line) for line in log.read_text().splitlines()]
-            landed_while_busy.append(any(
+            seen_while_busy.append(any(
                 entry.get("type") == "user" for entry in entries
             ))
             self.set_agent_status("worker", "idle")
@@ -1022,7 +1022,7 @@ class BusySessionContractTests(SupervisorContractCase):
         ]
 
         self.assertEqual(
-            landed_while_busy, [False],
+            seen_while_busy, [False],
             "a busy session must withhold the prompt, not answer it synchronously",
         )
         self.assertEqual(
@@ -1031,7 +1031,7 @@ class BusySessionContractTests(SupervisorContractCase):
         )
         self.assertEqual(
             len(users), 1,
-            "the queued prompt should be delivered exactly once",
+            "the queued prompt should show up exactly once",
         )
         self.assertEqual(
             [operation["operation"] for operation in self.runtime_operations()
@@ -1458,7 +1458,7 @@ class SettingsContractTests(SupervisorContractCase):
         daemon = self.start_daemon()
         self.append_text("worker", "fixture work started")
         self.wait_for_state(f"{task_id} in_flight")
-        self.write_settings("promt-landing-seconds = 1\n")
+        self.write_settings("promt-timeout-seconds = 1\n")
 
         sha = self.commit_file()
         self.record_commit("worker", sha)
@@ -1488,7 +1488,7 @@ class SettingsContractTests(SupervisorContractCase):
         self.assertEqual(daemon.returncode, 0, self.daemon_report())
 
     def test_a_leftover_chainsaw_json_tells_the_human_where_settings_live(self):
-        (self.run_dir / "chainsaw.json").write_text('{"prompt-landing-seconds": 1}\n')
+        (self.run_dir / "chainsaw.json").write_text('{"prompt-timeout-seconds": 1}\n')
 
         result = self.cli("state")
 

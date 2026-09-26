@@ -66,7 +66,7 @@ mod load {
     let dir = ScratchDir::new();
     dir.write_settings(
       r#"
-prompt-landing-seconds = 3
+prompt-timeout-seconds = 3
 
 [implementer]
 args = "--model sonnet --effort medium"
@@ -77,7 +77,7 @@ args = "--model sonnet --effort medium"
 
     let settings = Settings::load(dir.path(), &sets(&["commentator.args=--model haiku"])).unwrap();
 
-    assert_eq!(settings.prompt_landing(), Duration::from_secs(3));
+    assert_eq!(settings.prompt_timeout(), Duration::from_secs(3));
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
       ["--model", "sonnet", "--effort", "medium"]
@@ -94,7 +94,7 @@ args = "--model sonnet --effort medium"
 
     let settings = Settings::load(dir.path(), &[]).unwrap();
 
-    assert_eq!(settings.prompt_landing(), Duration::from_secs(15));
+    assert_eq!(settings.prompt_timeout(), Duration::from_secs(15));
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
       [
@@ -189,11 +189,11 @@ args = "--model sonnet --effort medium"
 
   #[test]
   fn should_fail_naming_the_file_and_the_cause_when_a_key_is_unknown() {
-    let error = load_text("promt-landing-seconds = 1\n").unwrap_err();
+    let error = load_text("promt-timeout-seconds = 1\n").unwrap_err();
 
     assert_eq!(
       message(&error),
-      "invalid settings in chainsaw.toml: unknown field `promt-landing-seconds`, expected one of `prompt-landing-seconds`, `implementer`, `commentator`"
+      "invalid settings in chainsaw.toml: unknown field `promt-timeout-seconds`, expected one of `prompt-timeout-seconds`, `implementer`, `commentator`"
     );
   }
 
@@ -237,11 +237,11 @@ args = "--model sonnet --effort medium"
 
   #[test]
   fn should_fail_when_an_integer_is_negative() {
-    let error = load_text("prompt-landing-seconds = -1\n").unwrap_err();
+    let error = load_text("prompt-timeout-seconds = -1\n").unwrap_err();
 
     assert_eq!(
       message(&error),
-      "invalid settings in chainsaw.toml: invalid value: integer `-1`, expected u64\nin `prompt-landing-seconds`"
+      "invalid settings in chainsaw.toml: invalid value: integer `-1`, expected u64\nin `prompt-timeout-seconds`"
     );
   }
 
@@ -286,11 +286,11 @@ args = "--model sonnet --effort medium"
 
   #[test]
   fn should_fail_naming_the_key_when_it_is_set_twice() {
-    let error = load_sets(&["prompt-landing-seconds=1", "prompt-landing-seconds=2"]).unwrap_err();
+    let error = load_sets(&["prompt-timeout-seconds=1", "prompt-timeout-seconds=2"]).unwrap_err();
 
     assert_eq!(
       message(&error),
-      "invalid --set prompt-landing-seconds=2: prompt-landing-seconds was already set by an earlier --set"
+      "invalid --set prompt-timeout-seconds=2: prompt-timeout-seconds was already set by an earlier --set"
     );
   }
 
@@ -317,9 +317,9 @@ mod set_over {
 
   #[test]
   fn should_work() {
-    let result = apply("prompt-landing-seconds = 15\n", "prompt-landing-seconds=20").unwrap();
+    let result = apply("prompt-timeout-seconds = 15\n", "prompt-timeout-seconds=20").unwrap();
 
-    assert_eq!(result["prompt-landing-seconds"], Value::Integer(20));
+    assert_eq!(result["prompt-timeout-seconds"], Value::Integer(20));
   }
 
   #[test]
@@ -349,12 +349,12 @@ mod set_over {
   #[test]
   fn should_keep_the_rest_of_the_file() {
     let result = apply(
-      "prompt-landing-seconds = 3\n[implementer]\nargs = \"--chrome\"\n",
+      "prompt-timeout-seconds = 3\n[implementer]\nargs = \"--chrome\"\n",
       "implementer.args=--effort medium",
     )
     .unwrap();
 
-    assert_eq!(result["prompt-landing-seconds"], Value::Integer(3));
+    assert_eq!(result["prompt-timeout-seconds"], Value::Integer(3));
     assert_eq!(
       result["implementer"]["args"].as_str(),
       Some("--effort medium")
@@ -363,7 +363,7 @@ mod set_over {
 
   #[test]
   fn should_fail_when_there_is_no_equals_sign() {
-    let error = apply("", "prompt-landing-seconds").unwrap_err();
+    let error = apply("", "prompt-timeout-seconds").unwrap_err();
 
     assert_eq!(message(&error), "expected KEY=VALUE");
   }

@@ -419,8 +419,8 @@ fn cmd_prompt(
     params![name, text, now()],
   )?;
   let prompt_id = store.db.last_insert_rowid();
-  let prompt_landing_millis = i64::try_from(settings.prompt_landing().as_millis())
-    .context("prompt-landing-seconds is too large")?;
+  let prompt_timeout_millis = i64::try_from(settings.prompt_timeout().as_millis())
+    .context("prompt-timeout-seconds is too large")?;
   let session = latest_session_named(store, name)?;
   let transcript = || -> Result<Option<PathBuf>> {
     match &session {
@@ -441,7 +441,7 @@ fn cmd_prompt(
       [prompt_id],
     )?;
     let _ = runtime.prompt(name, text);
-    let deadline = now() + prompt_landing_millis;
+    let deadline = now() + prompt_timeout_millis;
     while now() < deadline {
       let _ = runtime.query(name);
       let path = transcript()?;
@@ -453,7 +453,7 @@ fn cmd_prompt(
           agent.prompt_state(&path, offset, &opening)
       {
         store.db.execute(
-          "update prompts set landed_at=? where id=?",
+          "update prompts set seen_at=? where id=?",
           params![now(), prompt_id],
         )?;
         if state == PromptState::Queued {
@@ -473,11 +473,13 @@ fn cmd_prompt(
       }
       thread::sleep(Duration::from_secs(1));
     }
-    eprintln!("prompt did not land (attempt {attempt}), resending");
+    eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
   }
   store.event("prompt-failed", name)?;
   FileExt::unlock(&lock)?;
-  bail!("supervisor: prompt to {name} never landed after {PROMPT_ATTEMPTS} attempts")
+  bail!(
+    "supervisor: prompt to {name} never showed up in its transcript after {PROMPT_ATTEMPTS} attempts"
+  )
 }
 
 fn cmd_start_commentator(
@@ -684,12 +686,12 @@ fn cmd_dispatch(
     preamble,
     text = task.text().trim_end()
   );
-  // The task is only dispatched once the prompt has landed in the session log,
-  // so a send that never lands leaves it drafted and dispatchable again.
+  // The task is only dispatched once the prompt is in the session log, so a
+  // send that never shows up there leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
     store.event(
       "dispatch-failed",
-      &format!("task {task_id} -> {implementer}: prompt never landed"),
+      &format!("task {task_id} -> {implementer}: prompt never showed up in the transcript"),
     )?;
     return Err(error);
   }
