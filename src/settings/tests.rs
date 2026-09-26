@@ -155,6 +155,18 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
+  fn should_keep_a_quoted_value_with_spaces_as_one_arg() {
+    let settings =
+      load_text("[implementer]\nargs = \"--append-system-prompt 'be terse' --model sonnet\"\n")
+        .unwrap();
+
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--append-system-prompt", "be terse", "--model", "sonnet"]
+    );
+  }
+
+  #[test]
   fn should_launch_with_no_flags_when_args_is_empty() {
     let settings = load_text("[commentator]\nargs = \"\"\n").unwrap();
 
@@ -213,6 +225,17 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
+  fn should_fail_naming_the_role_when_a_quote_is_unbalanced() {
+    let error =
+      load_text("[commentator]\nargs = \"--append-system-prompt 'be terse\"\n").unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid settings in chainsaw.toml: missing closing quote\nin `commentator.args`"
+    );
+  }
+
+  #[test]
   fn should_fail_when_an_integer_is_negative() {
     let error = load_text("prompt-landing-seconds = -1\n").unwrap_err();
 
@@ -248,6 +271,16 @@ args = "--model sonnet --effort medium"
     assert_eq!(
       message(&error),
       "invalid --set implementer.model=x: unknown field `model`, expected `args`\nin `implementer`"
+    );
+  }
+
+  #[test]
+  fn should_fail_naming_the_set_when_its_quote_is_unbalanced() {
+    let error = load_sets(&["implementer.args=--model \"sonnet"]).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid --set implementer.args=--model \"sonnet: missing closing quote\nin `implementer.args`"
     );
   }
 

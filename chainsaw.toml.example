@@ -5,7 +5,8 @@
 # Seconds a sent prompt gets to reach the transcript before it is resent.
 prompt-landing-seconds = 15
 
-# Each role's args are passed to Claude as written.
+# Each role's args are split like a shell would and passed to Claude as written:
+# quote a value that contains spaces, e.g. --append-system-prompt 'be terse'.
 
 [implementer]
 args = "--model opus --effort high --disable-slash-commands --strict-mcp-config --no-chrome --disallowedTools WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput"

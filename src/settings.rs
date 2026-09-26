@@ -44,32 +44,34 @@ impl Settings {
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => Table::new(),
       Err(error) => bail!("cannot read {FILE_NAME}: {error}"),
     };
-    let mut file: File = table
+    let mut settings = table
       .clone()
       .try_into()
-      .map_err(|error| invalid(anyhow!(error)))?;
+      .map_err(|error| anyhow!(error))
+      .and_then(Self::build)
+      .map_err(invalid)?;
     let mut seen = Vec::new();
     for set in sets {
-      file = set_over(&mut table, set, &mut seen)
-        .and_then(|()| Ok(table.clone().try_into()?))
+      settings = set_over(&mut table, set, &mut seen)
+        .and_then(|()| Self::build(table.clone().try_into()?))
         .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))?;
     }
-    Ok(Self::build(file))
+    Ok(settings)
   }
 
-  fn build(file: File) -> Self {
+  fn build(file: File) -> Result<Self> {
     let launch = |kind, role: Option<Role>| {
       let args = role
         .unwrap_or_default()
         .args
         .unwrap_or_else(|| default_args(kind));
-      args.split_whitespace().map(str::to_owned).collect()
+      shell_words::split(&args).map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))
     };
-    Self {
+    Ok(Self {
       prompt_landing: Duration::from_secs(file.prompt_landing_seconds.unwrap_or(15)),
-      implementer_args: launch(SessionKind::Implementer, file.implementer),
-      commentator_args: launch(SessionKind::Commentator, file.commentator),
-    }
+      implementer_args: launch(SessionKind::Implementer, file.implementer)?,
+      commentator_args: launch(SessionKind::Commentator, file.commentator)?,
+    })
   }
 
   /// How long a sent prompt gets to reach the transcript before it is resent
@@ -96,8 +98,8 @@ struct File {
   commentator: Option<Role>,
 }
 
-/// `args` is the whole flag list, split on whitespace and passed to Claude
-/// verbatim
+/// `args` is the whole flag list, split like a shell would (quotes group a
+/// value with spaces) and passed to Claude verbatim
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Role {

@@ -24,7 +24,7 @@ pub enum SessionKind {
 }
 
 impl SessionKind {
-  fn label(self) -> &'static str {
+  pub fn label(self) -> &'static str {
     match self {
       Self::Implementer => "implementer",
       Self::Commentator => "commentator",

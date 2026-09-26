@@ -32,8 +32,8 @@ the commentator's findings — not implementation detail.
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. An optional `chainsaw.toml` in
    the run directory tunes them per role: `<role>.args` is the whole flag list,
-   passed to Claude as written (`chainsaw.toml.example` in this repository shows
-   the defaults). `--set KEY=VALUE` before the subcommand overrides the file for
+   split like a shell would and passed to Claude as written; quote a value with
+   spaces (`chainsaw.toml.example` in this repository shows the defaults). `--set KEY=VALUE` before the subcommand overrides the file for
    one process. Every
    process reads the file once, at start: the daemon keeps what it started with,
    and the next command sees an edit. The lead runs on whatever model the human

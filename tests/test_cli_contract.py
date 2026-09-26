@@ -1328,6 +1328,27 @@ class SettingsContractTests(SupervisorContractCase):
         self.assertEqual(self.launch_args("worker"), ["--model", "sonnet", "--effort", "medium"])
         self.assertEqual(self.launch_args(commentator), COMMENTATOR_DEFAULTS)
 
+    def test_a_quoted_value_with_spaces_reaches_claude_as_one_flag(self):
+        self.write_settings(
+            '[implementer]\n'
+            'args = "--append-system-prompt \'be terse\' --model sonnet"\n'
+        )
+
+        self.launch()
+
+        self.assertEqual(
+            self.launch_args("worker"),
+            ["--append-system-prompt", "be terse", "--model", "sonnet"],
+        )
+
+    def test_an_unbalanced_quote_fails_naming_the_role(self):
+        self.write_settings('[implementer]\nargs = "--append-system-prompt \'be terse"\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(result, "invalid settings in chainsaw.toml: missing closing quote")
+        self.assert_failure(result, "in `implementer.args`")
+
     def test_set_beats_the_file(self):
         self.write_settings('[implementer]\nargs = "--model sonnet"\n')
 
