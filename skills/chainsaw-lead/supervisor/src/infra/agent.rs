@@ -1,18 +1,21 @@
 //! The agent a session runs: what flags it launches with, and where and how
 //! its transcript is read. A session runtime launches the CLI an `AgentKind`
 //! names and drives the terminal; the agent reads what the process in it
-//! wrote. Every session runs Claude Code today.
+//! wrote. A session runs Claude Code or OpenAI Codex.
 
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
+use serde_json::Value;
 
 use super::session_runtime::SessionKind;
 use crate::domain::{AgentKind, Session};
 
 mod claude;
+mod codex;
 
 pub use claude::Claude;
+pub use codex::Codex;
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,7 @@ pub fn for_session(session: &Session) -> &'static dyn Agent {
 pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
   match kind {
     AgentKind::Claude => &Claude,
+    AgentKind::Codex => &Codex,
   }
 }
 
@@ -100,4 +104,29 @@ fn read_lossy(path: &Path, start: u64, end: Option<u64>) -> std::io::Result<Stri
     }
   }
   Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Every entry from `offset` on that parses as JSON.
+fn entries(path: &Path, offset: u64) -> Vec<Value> {
+  let Ok(text) = read_lossy(path, offset, None) else {
+    return Vec::new();
+  };
+  text
+    .lines()
+    .filter_map(|line| serde_json::from_str(line).ok())
+    .collect()
+}
+
+/// The text of a message's content: its blocks' text joined, or the string
+/// itself.
+fn text_of(content: &Value) -> String {
+  match content {
+    Value::Array(blocks) => blocks
+      .iter()
+      .filter_map(|block| block.get("text").and_then(Value::as_str))
+      .collect::<Vec<_>>()
+      .join(" "),
+    Value::String(text) => text.clone(),
+    other => other.to_string(),
+  }
 }

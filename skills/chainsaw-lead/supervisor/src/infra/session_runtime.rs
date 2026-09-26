@@ -1,21 +1,14 @@
 use std::env;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use fs2::FileExt;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
-use super::agent::Claude;
 use crate::domain::{AgentKind, Role};
-
-pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
-pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
@@ -69,12 +62,9 @@ pub trait SessionRuntime {
   fn wait(&self, session_id: &str, timeout: Duration) -> Result<()>;
 }
 
-pub fn from_environment() -> Result<Box<dyn SessionRuntime>> {
-  match env::var(RUNTIME_ENV).ok().as_deref() {
-    None | Some("herdr") => Ok(Box::new(HerdrSessionRuntime::from_environment())),
-    Some("zero-cost-dummy" | "dummy") => Ok(Box::new(ZeroCostDummy::from_environment()?)),
-    Some(value) => bail!("unknown {RUNTIME_ENV} value {value:?}"),
-  }
+/// The runtime is Herdr; the tests put a `herdr` of their own on PATH.
+pub fn from_environment() -> Box<dyn SessionRuntime> {
+  Box::new(HerdrSessionRuntime::from_environment())
 }
 
 /// Drives sessions through the `herdr` CLI. The pane the supervisor itself runs in
@@ -122,6 +112,7 @@ impl HerdrSessionRuntime {
   fn agent_kind(agent: AgentKind) -> &'static str {
     match agent {
       AgentKind::Claude => "claude",
+      AgentKind::Codex => "codex",
     }
   }
 
@@ -244,308 +235,6 @@ impl SessionRuntime for HerdrSessionRuntime {
     let timeout_ms = timeout.as_millis().to_string();
     let _ = self.run(&["agent", "wait", session_id, "--timeout", &timeout_ms])?;
     Ok(())
-  }
-}
-
-pub struct ZeroCostDummy {
-  state_path: PathBuf,
-}
-
-impl ZeroCostDummy {
-  pub fn new(state_path: PathBuf) -> Self {
-    Self { state_path }
-  }
-
-  fn from_environment() -> Result<Self> {
-    let state_path = env::var_os(ZERO_COST_DUMMY_STATE_ENV)
-      .map(PathBuf::from)
-      .with_context(|| format!("{ZERO_COST_DUMMY_STATE_ENV} is not set"))?;
-    Ok(Self::new(state_path))
-  }
-
-  fn with_state<T>(&self, action: impl FnOnce(&mut Value) -> Result<T>) -> Result<T> {
-    let lock_path = self.state_path.with_extension("lock");
-    if let Some(parent) = lock_path.parent() {
-      fs::create_dir_all(parent)?;
-    }
-    let lock = OpenOptions::new()
-      .create(true)
-      .write(true)
-      .truncate(false)
-      .open(lock_path)?;
-    lock.lock_exclusive()?;
-    let mut state = match fs::read(&self.state_path) {
-      Ok(bytes) => serde_json::from_slice(&bytes).context("dummy runtime state is invalid JSON")?,
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::empty_state(),
-      Err(error) => return Err(error.into()),
-    };
-    let result = action(&mut state);
-    if result.is_ok() {
-      self.write_state(&state)?;
-    }
-    FileExt::unlock(&lock)?;
-    result
-  }
-
-  fn empty_state() -> Value {
-    json!({
-      "agents": {},
-      "panes": {},
-      "sequence": 0,
-      "drop_prompts": 0,
-      "operations": [],
-    })
-  }
-
-  fn write_state(&self, state: &Value) -> Result<()> {
-    if let Some(parent) = self.state_path.parent() {
-      fs::create_dir_all(parent)?;
-    }
-    let temporary = self.state_path.with_extension("tmp");
-    let mut file = fs::File::create(&temporary)?;
-    serde_json::to_writer(&mut file, state)?;
-    file.flush()?;
-    fs::rename(temporary, &self.state_path)?;
-    Ok(())
-  }
-
-  fn object_mut<'a>(state: &'a mut Value, key: &str) -> Result<&'a mut Map<String, Value>> {
-    state
-      .get_mut(key)
-      .and_then(Value::as_object_mut)
-      .with_context(|| format!("dummy runtime state field {key:?} is not an object"))
-  }
-
-  fn operations_mut(state: &mut Value) -> Result<&mut Vec<Value>> {
-    state
-      .get_mut("operations")
-      .and_then(Value::as_array_mut)
-      .context("dummy runtime state field \"operations\" is not an array")
-  }
-
-  /// The transcript the dummy stands in for: it fakes a Claude Code session,
-  /// so it writes where Claude Code would.
-  fn transcript(session: &Value) -> Result<PathBuf> {
-    let run_dir = session
-      .get("run_dir")
-      .and_then(Value::as_str)
-      .context("dummy session lacks run_dir")?;
-    let external_id = session
-      .get("session_id")
-      .and_then(Value::as_str)
-      .context("dummy session lacks session_id")?;
-    let run_dir = Path::new(run_dir)
-      .canonicalize()
-      .with_context(|| format!("cannot resolve dummy session run directory {run_dir}"))?;
-    Claude::transcript_under(&run_dir, external_id)
-  }
-
-  /// Write the transcript entries a real agent produces when it picks up a prompt.
-  fn deliver(state: &Value, session: &Value, text: &str) -> Result<()> {
-    let transcript = Self::transcript(session)?;
-    Self::append_entry(&transcript, &Claude::prompt_entry(text))?;
-    if let Some(reply) = state.get("reply_on_prompt").and_then(Value::as_str) {
-      Self::append_entry(&transcript, &Claude::reply_entry(reply))?;
-    }
-    Ok(())
-  }
-
-  /// Write the transcript entry a real agent produces when it queues a prompt.
-  fn enqueue(session: &Value, text: &str) -> Result<()> {
-    Self::append_entry(
-      &Self::transcript(session)?,
-      &Claude::queued_prompt_entry(text),
-    )
-  }
-
-  fn is_busy(session: &Value) -> bool {
-    session.get("status").and_then(Value::as_str) == Some("busy")
-  }
-
-  /// A real agent works through what it queued while busy as soon as it goes idle.
-  fn drain_queue(state: &mut Value, session_id: &str) -> Result<()> {
-    let Some(session) = Self::object_mut(state, "agents")?.get(session_id).cloned() else {
-      return Ok(());
-    };
-    if Self::is_busy(&session) {
-      return Ok(());
-    }
-    let queued: Vec<String> = session
-      .get("queued")
-      .and_then(Value::as_array)
-      .map(|texts| {
-        texts
-          .iter()
-          .filter_map(Value::as_str)
-          .map(str::to_owned)
-          .collect()
-      })
-      .unwrap_or_default();
-    if queued.is_empty() {
-      return Ok(());
-    }
-    for text in &queued {
-      Self::deliver(state, &session, text)?;
-    }
-    if let Some(session) = Self::object_mut(state, "agents")?.get_mut(session_id) {
-      session["queued"] = json!([]);
-    }
-    Ok(())
-  }
-
-  fn append_entry(path: &Path, entry: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent)?;
-    }
-    let mut transcript = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut transcript, entry)?;
-    writeln!(transcript)?;
-    Ok(())
-  }
-}
-
-impl SessionRuntime for ZeroCostDummy {
-  fn start(&self, session: StartSession<'_>) -> Result<StartedSession> {
-    self.with_state(|state| {
-      let sequence = state
-        .get("sequence")
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
-        + 1;
-      state["sequence"] = json!(sequence);
-      let pane_id = format!("pane-{sequence}");
-      let tab_id = format!("tab-{sequence}");
-      let external_id = format!("session-{}-{sequence}", session.id);
-      let run_dir = session.run_dir.to_string_lossy().into_owned();
-      Self::object_mut(state, "panes")?.insert(pane_id.clone(), json!({"cwd": run_dir}));
-      Self::object_mut(state, "agents")?.insert(
-        session.id.to_owned(),
-        json!({
-          "session_id": external_id,
-          "status": "idle",
-          "run_dir": run_dir,
-        }),
-      );
-      Self::operations_mut(state)?.push(json!({
-        "operation": "start",
-        "session_id": session.id,
-        "kind": session.kind.label(),
-        "args": session.args,
-      }));
-      Ok(StartedSession {
-        external_id,
-        pane_id,
-        tab_id,
-      })
-    })
-  }
-
-  fn query(&self, session_id: &str) -> Result<Option<SessionQuery>> {
-    self.with_state(|state| {
-      Self::drain_queue(state, session_id)?;
-      let session = Self::object_mut(state, "agents")?.get(session_id).cloned();
-      Self::operations_mut(state)?.push(json!({
-        "operation": "query",
-        "session_id": session_id,
-      }));
-      session
-        .map(|session| {
-          Ok(SessionQuery {
-            external_id: session
-              .get("session_id")
-              .and_then(Value::as_str)
-              .context("dummy session lacks session_id")?
-              .to_owned(),
-            status: session
-              .get("status")
-              .and_then(Value::as_str)
-              .unwrap_or("idle")
-              .to_owned(),
-          })
-        })
-        .transpose()
-    })
-  }
-
-  fn prompt(&self, session_id: &str, text: &str) -> Result<()> {
-    self.with_state(|state| {
-      Self::operations_mut(state)?.push(json!({
-        "operation": "prompt",
-        "session_id": session_id,
-        "text": text,
-      }));
-      let drop_prompts = state
-        .get("drop_prompts")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-      if drop_prompts > 0 {
-        state["drop_prompts"] = json!(drop_prompts - 1);
-        return Ok(());
-      }
-      let session = Self::object_mut(state, "agents")?
-        .get(session_id)
-        .cloned()
-        .with_context(|| format!("dummy session {session_id} does not exist"))?;
-      if Self::is_busy(&session) {
-        Self::enqueue(&session, text)?;
-        let queued = Self::object_mut(state, "agents")?
-          .get_mut(session_id)
-          .and_then(|session| session.get_mut("queued"))
-          .and_then(Value::as_array_mut);
-        match queued {
-          Some(queued) => queued.push(json!(text)),
-          None => {
-            if let Some(session) = Self::object_mut(state, "agents")?.get_mut(session_id) {
-              session["queued"] = json!([text]);
-            }
-          }
-        }
-        return Ok(());
-      }
-      Self::drain_queue(state, session_id)?;
-      Self::deliver(state, &session, text)
-    })
-  }
-
-  fn interrupt(&self, session_id: &str) -> Result<()> {
-    self.with_state(|state| {
-      let session = Self::object_mut(state, "agents")?
-        .get_mut(session_id)
-        .with_context(|| format!("dummy session {session_id} does not exist"))?;
-      session["status"] = json!("idle");
-      session["queued"] = json!([]);
-      Self::operations_mut(state)?.push(json!({
-        "operation": "interrupt",
-        "session_id": session_id,
-      }));
-      Ok(())
-    })
-  }
-
-  fn wait(&self, session_id: &str, timeout: Duration) -> Result<()> {
-    self.with_state(|state| {
-      Self::operations_mut(state)?.push(json!({
-        "operation": "wait",
-        "session_id": session_id,
-        "timeout_ms": timeout.as_millis(),
-      }));
-      Ok(())
-    })?;
-    let deadline = Instant::now() + timeout;
-    loop {
-      let idle = self.with_state(|state| {
-        Self::drain_queue(state, session_id)?;
-        Ok(
-          Self::object_mut(state, "agents")?
-            .get(session_id)
-            .is_none_or(|session| !Self::is_busy(session)),
-        )
-      })?;
-      if idle || Instant::now() >= deadline {
-        return Ok(());
-      }
-      thread::sleep(Duration::from_millis(10));
-    }
   }
 }
 

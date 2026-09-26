@@ -6,10 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{Agent, PromptState, read_lossy};
+use super::{Agent, PromptState, entries, read_lossy, text_of};
 use crate::infra::session_runtime::SessionKind;
 
 pub struct Claude;
@@ -128,32 +127,6 @@ impl Agent for Claude {
   }
 }
 
-/// What Claude Code writes, for a runtime that stands in for it.
-impl Claude {
-  /// The entry Claude Code writes when it takes up a prompt.
-  pub fn prompt_entry(text: &str) -> Value {
-    json!({"type": "user", "message": {"content": text}})
-  }
-
-  /// The entry Claude Code writes when it queues a prompt sent while busy.
-  pub fn queued_prompt_entry(text: &str) -> Value {
-    json!({
-      "type": "queue-operation",
-      "operation": "enqueue",
-      "content": text,
-      "timestamp": Utc::now().to_rfc3339(),
-    })
-  }
-
-  /// The entry Claude Code writes when it replies with text.
-  pub fn reply_entry(text: &str) -> Value {
-    json!({
-      "type": "assistant",
-      "message": {"content": [{"type": "text", "text": text}]},
-    })
-  }
-}
-
 /// Where Claude Code writes.
 impl Claude {
   /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
@@ -171,7 +144,7 @@ impl Claude {
 
   /// The transcript of a session started in `run_dir`, under that
   /// directory's transcripts, whether or not it exists yet.
-  pub fn transcript_under(canonical_run_dir: &Path, external_session_id: &str) -> Result<PathBuf> {
+  fn transcript_under(canonical_run_dir: &Path, external_session_id: &str) -> Result<PathBuf> {
     Ok(Self::transcripts_dir(canonical_run_dir)?.join(format!("{external_session_id}.jsonl")))
   }
 }
@@ -210,28 +183,6 @@ fn usage_of_line(line: &str) -> Option<u64> {
 
 fn token_field(usage: &Value, key: &str) -> u64 {
   usage.get(key).and_then(Value::as_u64).unwrap_or_default()
-}
-
-fn entries(path: &Path, offset: u64) -> Vec<Value> {
-  let Ok(text) = read_lossy(path, offset, None) else {
-    return Vec::new();
-  };
-  text
-    .lines()
-    .filter_map(|line| serde_json::from_str(line).ok())
-    .collect()
-}
-
-fn text_of(content: &Value) -> String {
-  match content {
-    Value::Array(blocks) => blocks
-      .iter()
-      .filter_map(|block| block.get("text").and_then(Value::as_str))
-      .collect::<Vec<_>>()
-      .join(" "),
-    Value::String(text) => text.clone(),
-    other => other.to_string(),
-  }
 }
 
 #[cfg(test)]

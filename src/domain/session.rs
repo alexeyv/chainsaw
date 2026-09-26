@@ -45,18 +45,20 @@ impl fmt::Display for Role {
   }
 }
 
-/// Which coding agent runs a session. Only Claude Code today. The name is
-/// what the session row stores. Iterating the enum lists every agent the
+/// Which coding agent runs a session: Claude Code or OpenAI Codex. The name
+/// is what the session row stores. Iterating the enum lists every agent the
 /// supervisor accepts.
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
 pub enum AgentKind {
   Claude,
+  Codex,
 }
 
 impl AgentKind {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Claude => "claude",
+      Self::Codex => "codex",
     }
   }
 }
@@ -67,6 +69,7 @@ impl TryFrom<&str> for AgentKind {
   fn try_from(value: &str) -> Result<Self> {
     match value {
       "claude" => Ok(Self::Claude),
+      "codex" => Ok(Self::Codex),
       value => bail!("unknown agent {value:?}"),
     }
   }

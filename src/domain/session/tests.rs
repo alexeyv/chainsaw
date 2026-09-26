@@ -32,6 +32,8 @@ mod agent_kind_try_from {
   fn should_work() {
     assert_eq!(AgentKind::try_from("claude").unwrap(), AgentKind::Claude);
     assert_eq!(AgentKind::Claude.to_string(), "claude");
+    assert_eq!(AgentKind::try_from("codex").unwrap(), AgentKind::Codex);
+    assert_eq!(AgentKind::Codex.to_string(), "codex");
   }
 
   #[test]

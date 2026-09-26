@@ -23,8 +23,8 @@ trivial getters, functions, or constructors.
 ### What to construct
 
 - Use actual objects.
-- For the session runtime, extend the zero-cost dummy, or add similarly simple
-  dummy files, when a scenario needs more behavior.
+- For the session runtime, the contract tests put `tests/fake_herdr.py` on
+  PATH as `herdr`; extend it when a scenario needs more behavior.
 
 ### Fixtures
 

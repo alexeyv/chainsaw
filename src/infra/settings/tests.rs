@@ -205,12 +205,44 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
+  fn should_launch_codex_with_its_own_defaults_when_a_role_names_it() {
+    let settings = load_text("[implementer]\nagent = \"codex\"\n").unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--dangerously-bypass-approvals-and-sandbox", "."]
+    );
+    assert_eq!(
+      settings.launch_agent(SessionKind::Commentator),
+      AgentKind::Claude
+    );
+  }
+
+  #[test]
+  fn should_let_a_set_name_the_agent() {
+    let settings = load_sets(&["commentator.agent=codex"]).unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Commentator),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Commentator),
+      ["--dangerously-bypass-approvals-and-sandbox", "."]
+    );
+  }
+
+  #[test]
   fn should_fail_naming_the_role_the_value_and_the_accepted_agents_when_the_agent_is_unknown() {
     let error = load_text("[implementer]\nagent = \"cursor\"\n").unwrap_err();
 
     assert_eq!(
       message(&error),
-      "invalid settings in chainsaw.toml: unknown agent \"cursor\", expected `claude`\nin `implementer.agent`"
+      "invalid settings in chainsaw.toml: unknown agent \"cursor\", expected one of `claude`, `codex`\nin `implementer.agent`"
     );
   }
 
@@ -220,7 +252,7 @@ args = "--model sonnet --effort medium"
 
     assert_eq!(
       message(&error),
-      "invalid --set commentator.agent=cursor: unknown agent \"cursor\", expected `claude`\nin `commentator.agent`"
+      "invalid --set commentator.agent=cursor: unknown agent \"cursor\", expected one of `claude`, `codex`\nin `commentator.agent`"
     );
   }
 

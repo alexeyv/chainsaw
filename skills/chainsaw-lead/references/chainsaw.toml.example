@@ -5,7 +5,9 @@
 # Seconds a sent prompt gets to reach the transcript before it is resent.
 prompt-timeout-seconds = 15
 
-# Each role's agent is the coding agent it runs; claude is the only one today.
+# Each role's agent is the coding agent it runs: claude (the default) or codex.
+# Codex's default args are "--dangerously-bypass-approvals-and-sandbox ."; the
+# trailing dot is its first prompt, which is what gives it a session id.
 # Each role's args are split like a shell would and passed to the agent as written:
 # quote a value that contains spaces, e.g. --append-system-prompt 'be terse'.
 

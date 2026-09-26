@@ -81,7 +81,7 @@ class TaskContractTests(SupervisorContractCase):
 class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_prompt_wait_prints_the_agent_reply(self):
         self.launch()
-        self.update_zero_cost_dummy(reply_on_prompt="fixture reply")
+        self.update_herdr_state(reply_on_prompt="fixture reply")
 
         result = self.assert_success(
             self.cli("prompt", "worker", "hello agent", "--wait")
@@ -103,7 +103,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
         self.write_settings("prompt-timeout-seconds = 0\n")
         self.launch()
-        self.update_zero_cost_dummy(drop_prompts=3)
+        self.update_herdr_state(drop_prompts=3)
 
         result = self.cli("prompt", "worker", "lost in transit")
         state = self.assert_success(self.cli("state"))
@@ -122,7 +122,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
         ))
         commentator = next(
-            name for name in self.zero_cost_dummy_state()["agents"]
+            name for name in self.herdr_state()["agents"]
             if name.startswith("commentator-")
         )
 
@@ -255,9 +255,9 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
-        runtime_state = self.zero_cost_dummy_state()
+        runtime_state = self.herdr_state()
         del runtime_state["agents"]["worker"]
-        self.update_zero_cost_dummy(**runtime_state)
+        self.update_herdr_state(**runtime_state)
 
         result = self.assert_success(
             self.cli("abort", str(task), "--reason", "the session disappeared")
@@ -839,7 +839,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         harness = self.sandbox / "harness"
         harness.mkdir()
         session_id = "lead-outside-run"
-        self.update_zero_cost_dummy(
+        self.update_herdr_state(
             agents={"lead": {
                 "session_id": session_id,
                 "status": "idle",
@@ -1466,7 +1466,9 @@ class SettingsContractTests(SupervisorContractCase):
         result = self.cli("state")
 
         self.assert_failure(
-            result, 'invalid settings in chainsaw.toml: unknown agent "cursor", expected `claude`'
+            result,
+            'invalid settings in chainsaw.toml: unknown agent "cursor", '
+            'expected one of `claude`, `codex`',
         )
         self.assert_failure(result, "in `commentator.agent`")
 
@@ -1474,7 +1476,9 @@ class SettingsContractTests(SupervisorContractCase):
         result = self.cli("--set", "implementer.agent=cursor", "launch", "worker")
 
         self.assert_failure(
-            result, 'invalid --set implementer.agent=cursor: unknown agent "cursor", expected `claude`'
+            result,
+            'invalid --set implementer.agent=cursor: unknown agent "cursor", '
+            'expected one of `claude`, `codex`',
         )
         self.assert_success(self.cli("launch", "worker"))
 
@@ -1546,3 +1550,47 @@ class SettingsContractTests(SupervisorContractCase):
             result,
             "chainsaw.json is no longer used; transfer its settings to chainsaw.toml and delete",
         )
+
+
+class CodexImplementerContractTests(SupervisorContractCase):
+    """A role that names codex runs the Codex CLI, and the supervisor reads its rollout."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_settings('[implementer]\nagent = "codex"\n')
+
+    def test_launch_starts_codex_unsandboxed_and_the_row_records_it(self):
+        self.launch()
+
+        self.assertEqual(self.session_agent("worker"), "codex")
+        self.assertEqual(
+            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox", "."],
+        )
+
+    def test_dispatch_finds_its_prompt_in_the_rollout(self):
+        task = self.new_task(text="Implement it the Codex way.")
+        self.launch()
+
+        result = self.assert_success(self.dispatch(task))
+
+        rollout = self.session_transcript("worker")
+        self.assertEqual(rollout.parents[3], self.home / ".codex" / "sessions", rollout)
+        self.assertRegex(rollout.name, r"^rollout-.*-session-worker-1\.jsonl$")
+        first = json.loads(rollout.read_text().splitlines()[0])
+        self.assertEqual(first["payload"]["role"], "user")
+        self.assertIn("Implement it the Codex way.", first["payload"]["content"][0]["text"])
+        self.assertIn(f"task {task} dispatched to worker", result.stdout)
+
+    def test_context_is_the_last_response_input_not_the_thread_total(self):
+        self.launch()
+        self.append_codex_usage(
+            "worker", input_tokens=19519, cached_input_tokens=7808, thread_input_tokens=19519,
+        )
+        self.append_codex_usage(
+            "worker", input_tokens=65537, cached_input_tokens=60000,
+            thread_input_tokens=2052395,
+        )
+
+        result = self.assert_success(self.cli("context", "worker"))
+
+        self.assertEqual(result.stdout, "worker\t65537\n")

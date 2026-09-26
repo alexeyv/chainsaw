@@ -16,6 +16,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = PROJECT_ROOT / "Cargo.toml"
 BINARY = PROJECT_ROOT / "target" / "debug" / "chainsaw"
+FAKE_HERDR = PROJECT_ROOT / "tests" / "fake_herdr.py"
 
 _configured_command = os.environ.get("CHAINSAW_SUPERVISOR_COMMAND")
 if _configured_command:
@@ -28,7 +29,11 @@ else:
     )
     SUPERVISOR_COMMAND = [str(BINARY)]
 class SupervisorContractCase(unittest.TestCase):
-    """An isolated installation, Git repository, and session runtime per test."""
+    """An isolated installation, Git repository, and Herdr per test.
+
+    The Herdr is `tests/fake_herdr.py`, put on PATH as `herdr`; the supervisor
+    drives it exactly as it drives the real one.
+    """
 
     maxDiff = None
 
@@ -41,15 +46,20 @@ class SupervisorContractCase(unittest.TestCase):
         self.sandbox = Path(self.temporary.name)
         self.run_dir = self.sandbox / self.run_dir_name
         self.home = self.sandbox / "home"
-        self.runtime_state_path = self.sandbox / "zero-cost-dummy.json"
+        self.runtime_state_path = self.sandbox / "herdr-state.json"
         self.run_dir.mkdir()
         self.home.mkdir()
+        bin_dir = self.sandbox / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "herdr").symlink_to(FAKE_HERDR)
 
         self.env = os.environ.copy()
         self.env.update({
             "HOME": str(self.home),
-            "CHAINSAW_SESSION_RUNTIME": "zero-cost-dummy",
-            "CHAINSAW_ZERO_COST_DUMMY_STATE": str(self.runtime_state_path),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HERDR_WORKSPACE_ID": "workspace-1",
+            "HERDR_TAB_ID": "tab-0",
+            "FAKE_HERDR_STATE": str(self.runtime_state_path),
             "GIT_AUTHOR_NAME": "Chainsaw Tests",
             "GIT_AUTHOR_EMAIL": "chainsaw-tests@example.invalid",
             "GIT_COMMITTER_NAME": "Chainsaw Tests",
@@ -182,7 +192,7 @@ class SupervisorContractCase(unittest.TestCase):
         return agent
 
     def launch_args(self, name):
-        """The Claude flags the runtime was handed when it last started `name`."""
+        """The agent flags the runtime was handed when it last started `name`."""
         return next(
             operation["args"] for operation in reversed(self.runtime_operations())
             if operation["operation"] == "start" and operation["session_id"] == name
@@ -193,18 +203,18 @@ class SupervisorContractCase(unittest.TestCase):
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
         ))
         return next(
-            name for name in self.zero_cost_dummy_state()["agents"]
+            name for name in self.herdr_state()["agents"]
             if name.startswith("commentator-")
         )
 
     def dispatch(self, task_id, name="worker"):
         return self.cli("dispatch", str(task_id), "--to", name)
 
-    def zero_cost_dummy_state(self):
+    def herdr_state(self):
         return json.loads(self.runtime_state_path.read_text())
 
-    def update_zero_cost_dummy(self, **updates):
-        state = self.zero_cost_dummy_state() if self.runtime_state_path.exists() else {
+    def update_herdr_state(self, **updates):
+        state = self.herdr_state() if self.runtime_state_path.exists() else {
             "agents": {}, "panes": {}, "sequence": 0, "drop_prompts": 0,
             "operations": [],
         }
@@ -212,7 +222,7 @@ class SupervisorContractCase(unittest.TestCase):
         self.runtime_state_path.write_text(json.dumps(state, sort_keys=True))
 
     def runtime_operations(self):
-        return self.zero_cost_dummy_state()["operations"]
+        return self.herdr_state()["operations"]
 
     def prompts_to(self, name):
         return [
@@ -231,16 +241,15 @@ class SupervisorContractCase(unittest.TestCase):
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            state = self.zero_cost_dummy_state()
+            state = self.herdr_state()
             state["agents"][name]["status"] = status
             temporary = self.runtime_state_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(state, sort_keys=True))
             temporary.replace(self.runtime_state_path)
 
     def session_transcript(self, name):
-        state = self.zero_cost_dummy_state()
-        session_id = state["agents"][name]["session_id"]
-        return self.transcripts_dir / f"{session_id}.jsonl"
+        """Where the session's agent writes; the fake Herdr settled it at launch."""
+        return Path(self.herdr_state()["agents"][name]["transcript"])
 
     def append_entry(self, name, entry):
         path = self.session_transcript(name)
@@ -265,6 +274,27 @@ class SupervisorContractCase(unittest.TestCase):
                     "input_tokens": input_tokens,
                     "cache_read_input_tokens": cache_read,
                     "cache_creation_input_tokens": cache_creation,
+                },
+            },
+        })
+
+    def append_codex_usage(self, name, input_tokens, cached_input_tokens=0,
+                           thread_input_tokens=None):
+        """What Codex records after a response handed `input_tokens` of context,
+        `cached_input_tokens` of which came from cache; the thread total is the
+        running sum that is not the context."""
+        thread_input_tokens = input_tokens if thread_input_tokens is None else thread_input_tokens
+        self.append_entry(name, {
+            "type": "token_usage_record",
+            "payload": {
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "output_tokens": 60,
+                },
+                "thread_token_usage": {
+                    "input_tokens": thread_input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
                 },
             },
         })

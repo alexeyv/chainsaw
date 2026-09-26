@@ -1,4 +1,6 @@
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -161,6 +163,34 @@ mod start {
       ]
     );
     assert_eq!(calls[1][8..], args);
+  }
+
+  #[test]
+  fn should_start_codex_under_its_own_kind() {
+    let herdr = FakeHerdr::new();
+    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let args = ["--dangerously-bypass-approvals-and-sandbox", "."].map(str::to_owned);
+
+    let started = runtime
+      .start(StartSession {
+        id: "worker",
+        run_dir: Path::new("/tmp/run"),
+        kind: SessionKind::Implementer,
+        agent: AgentKind::Codex,
+        args: &args,
+      })
+      .unwrap();
+
+    assert_eq!(started.external_id, "sess-1");
+    let calls = herdr.calls();
+    assert_eq!(
+      calls[1][..8],
+      [
+        "agent", "start", "worker", "--kind", "codex", "--pane", "pane-7", "--"
+      ]
+    );
+    assert_eq!(calls[1][8..], args);
+    assert_eq!(calls.len(), 2, "{calls:?}");
   }
 
   #[test]
@@ -345,51 +375,6 @@ mod interrupt {
       .unwrap();
 
     assert_eq!(herdr.calls()[0], ["agent", "send-keys", "worker", "esc"]);
-  }
-
-  #[test]
-  fn should_clear_a_dummy_session_queue_and_make_it_idle() {
-    let sequence = NEXT_SHIM.fetch_add(1, Ordering::Relaxed);
-    let state_path = env::temp_dir().join(format!(
-      "chainsaw-dummy-interrupt-{}-{sequence}.json",
-      std::process::id()
-    ));
-    fs::write(
-      &state_path,
-      json!({
-        "agents": {
-          "worker": {
-            "session_id": "session-worker-1",
-            "status": "busy",
-            "run_dir": "/tmp/run",
-            "queued": ["stale work"]
-          }
-        },
-        "panes": {},
-        "sequence": 1,
-        "drop_prompts": 0,
-        "operations": []
-      })
-      .to_string(),
-    )
-    .unwrap();
-    let runtime = ZeroCostDummy::new(state_path.clone());
-
-    runtime.interrupt("worker").unwrap();
-
-    let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    assert_eq!(state["agents"]["worker"]["status"], "idle");
-    assert_eq!(state["agents"]["worker"]["queued"], json!([]));
-    assert_eq!(
-      state["operations"],
-      json!([{"operation": "interrupt", "session_id": "worker"}])
-    );
-    fs::remove_file(state_path).unwrap();
-    fs::remove_file(env::temp_dir().join(format!(
-      "chainsaw-dummy-interrupt-{}-{sequence}.lock",
-      std::process::id()
-    )))
-    .unwrap();
   }
 }
 

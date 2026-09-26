@@ -8,8 +8,8 @@ use chainsaw::infra::store::Store;
 
 fn main() {
   let cli = Cli::parse();
-  let result = session_runtime::from_environment().and_then(|runtime| {
-    let settings = Settings::load(&cli.run_dir, &cli.set)?;
+  let runtime = session_runtime::from_environment();
+  let result = Settings::load(&cli.run_dir, &cli.set).and_then(|settings| {
     let store = Store::open(&cli.run_dir)?;
     coordinator::execute(&store, runtime.as_ref(), &settings, cli.command)
   });
