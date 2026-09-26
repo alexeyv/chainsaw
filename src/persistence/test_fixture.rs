@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rusqlite::{Connection, backup::Backup};
 
-use crate::store::initialize_schema;
+use crate::infra::store::initialize_schema;
 
 static TEMPLATE: OnceLock<Mutex<Connection>> = OnceLock::new();
 

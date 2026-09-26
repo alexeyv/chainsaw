@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use toml::{Table, Value};
 
-use crate::session_runtime::SessionKind;
+use super::session_runtime::SessionKind;
 
 pub const FILE_NAME: &str = "chainsaw.toml";
 const LEGACY_FILE_NAME: &str = "chainsaw.json";

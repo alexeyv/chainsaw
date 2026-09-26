@@ -18,14 +18,14 @@ use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
-use crate::logs::{
+use crate::infra::logs::{
   PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
   format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
 };
+use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
+use crate::infra::settings::Settings;
+use crate::infra::store::{Store, now};
 use crate::persistence::{calibration, finding, observation, session, task};
-use crate::session_runtime::{SessionKind, SessionRuntime, StartSession};
-use crate::settings::Settings;
-use crate::store::{Store, now};
 
 const LEAD_STOP_TOKENS: i64 = 250_000;
 const LEAD_WARN_TOKENS: i64 = 200_000;

@@ -2,9 +2,9 @@ use clap::Parser;
 
 use chainsaw::cli::Cli;
 use chainsaw::coordinator;
-use chainsaw::session_runtime;
-use chainsaw::settings::Settings;
-use chainsaw::store::Store;
+use chainsaw::infra::session_runtime;
+use chainsaw::infra::settings::Settings;
+use chainsaw::infra::store::Store;
 
 fn main() {
   let cli = Cli::parse();
