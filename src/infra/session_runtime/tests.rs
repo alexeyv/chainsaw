@@ -131,6 +131,7 @@ mod start {
         id: "worker",
         run_dir: Path::new("/tmp/run"),
         kind: SessionKind::Implementer,
+        agent: &Claude,
         args: &args,
       })
       .unwrap();
@@ -172,6 +173,7 @@ mod start {
         id: "commentator",
         run_dir: Path::new("/tmp/run"),
         kind: SessionKind::Commentator,
+        agent: &Claude,
         args: &[],
       })
       .unwrap();
@@ -203,6 +205,7 @@ mod start {
         id: "late-id",
         run_dir: Path::new("/tmp/run"),
         kind: SessionKind::Implementer,
+        agent: &Claude,
         args: &[],
       })
       .unwrap();
@@ -230,6 +233,7 @@ mod start {
         id: "no-id",
         run_dir: Path::new("/tmp/run"),
         kind: SessionKind::Implementer,
+        agent: &Claude,
         args: &[],
       })
       .unwrap_err();
@@ -253,6 +257,7 @@ mod start {
         id: "worker",
         run_dir: Path::new("/tmp/run"),
         kind: SessionKind::Implementer,
+        agent: &Claude,
         args: &[],
       })
       .unwrap_err();

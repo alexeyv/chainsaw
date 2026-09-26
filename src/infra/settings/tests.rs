@@ -414,27 +414,3 @@ mod merge {
     assert_eq!(merged["t"]["x"], Value::Integer(1));
   }
 }
-
-mod default_args {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(
-      default_args(SessionKind::Implementer),
-      format!(
-        "--model opus --effort high --disable-slash-commands --strict-mcp-config --no-chrome --disallowedTools {DISALLOWED}"
-      )
-    );
-  }
-
-  #[test]
-  fn should_keep_slash_commands_for_the_commentator() {
-    assert_eq!(
-      default_args(SessionKind::Commentator),
-      format!(
-        "--model opus --effort high --strict-mcp-config --no-chrome --disallowedTools {DISALLOWED}"
-      )
-    );
-  }
-}

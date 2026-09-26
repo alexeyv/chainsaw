@@ -335,16 +335,16 @@ class SupervisorContractCase(unittest.TestCase):
         self.addCleanup(cleanup)
         return process
 
-    def wait_for_state(self, needle, timeout=12):
+    def wait_for_state(self, text, timeout=12):
         deadline = time.monotonic() + timeout
         last = None
         while time.monotonic() < deadline:
             last = self.assert_success(self.cli("state"))
-            if needle in last.stdout:
+            if text in last.stdout:
                 return last
             time.sleep(0.1)
         self.fail(
-            f"state never contained {needle!r}:\n{last and last.stdout}"
+            f"state never contained {text!r}:\n{last and last.stdout}"
             f"{self.daemon_report()}"
         )
 

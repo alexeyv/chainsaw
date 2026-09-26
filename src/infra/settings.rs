@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use toml::{Table, Value};
 
+use super::agent;
 use super::session_runtime::SessionKind;
 
 pub const FILE_NAME: &str = "chainsaw.toml";
@@ -66,7 +67,7 @@ impl Settings {
       let args = role
         .unwrap_or_default()
         .args
-        .unwrap_or_else(|| default_args(kind));
+        .unwrap_or_else(|| agent::for_role(kind).default_args(kind));
       shell_words::split(&args).map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))
     };
     Ok(Self {
@@ -81,7 +82,7 @@ impl Settings {
     self.prompt_landing
   }
 
-  /// The Claude flags a session of this kind launches with
+  /// The agent flags a session of this kind launches with
   pub fn launch_args(&self, kind: SessionKind) -> &[String] {
     match kind {
       SessionKind::Implementer => &self.implementer_args,
@@ -101,7 +102,7 @@ struct File {
 }
 
 /// `args` is the whole flag list, split like a shell would (quotes group a
-/// value with spaces) and passed to Claude verbatim
+/// value with spaces) and passed to the agent verbatim
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Role {
@@ -138,17 +139,6 @@ fn merge(target: Table, source: Table) -> Table {
     target.insert(key, value);
     target
   })
-}
-
-/// Today's flags; the commentator keeps slash commands
-fn default_args(kind: SessionKind) -> String {
-  let slash = match kind {
-    SessionKind::Implementer => " --disable-slash-commands",
-    SessionKind::Commentator => "",
-  };
-  format!(
-    "--model opus --effort high{slash} --strict-mcp-config --no-chrome --disallowedTools WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput"
-  )
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output};
@@ -12,16 +12,14 @@ use chrono::{Local, TimeZone, Utc};
 use fs2::FileExt;
 use regex::Regex;
 use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::json;
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
-use crate::infra::logs::{
-  PromptLanding, commits_in_log, context_before, context_peak, context_size, file_size,
-  format_growth, latest_assistant_text, prompt_landed, transcript_growth, transcript_sizes,
-};
+use crate::infra::agent::{self, PromptState};
+use crate::infra::logs::{file_size, format_growth, transcript_growth, transcript_sizes};
 use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
@@ -265,32 +263,23 @@ struct LaunchOptions {
   kind: SessionKind,
 }
 
-/// The session's transcript: beside the database when Claude Code agrees about
-/// the project directory, otherwise wherever it was found under the projects
-/// directory. None until the transcript exists.
-fn session_log(store: &Store, session: &Session) -> Option<PathBuf> {
-  let expected = store
-    .logs_dir
-    .join(format!("{}.jsonl", session.external_session_id()));
-  if expected.is_file() {
-    Some(expected)
-  } else {
-    find_session_log(store, session.external_session_id())
-  }
+fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
+  Ok(match task.session_id() {
+    Some(session_id) => session_snapshot(store, session_id)?,
+    None => None,
+  })
 }
 
-fn find_session_log(store: &Store, external_session_id: &str) -> Option<PathBuf> {
-  let projects_dir = store.logs_dir.parent()?;
-  let filename = format!("{external_session_id}.jsonl");
-  fs::read_dir(projects_dir)
-    .ok()?
-    .filter_map(Result::ok)
-    .map(|entry| entry.path().join(&filename))
-    .find(|path| path.is_file())
-}
-
-fn session_log_named(store: &Store, name: &str) -> Result<Option<PathBuf>> {
-  Ok(latest_session_named(store, name)?.and_then(|session| session_log(store, &session)))
+/// Commit ids the task's session has recorded since the task was dispatched.
+fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
+  Ok(
+    task_session(store, task)?
+      .and_then(|session| {
+        agent::transcript(&store.run_dir, &session)
+          .map(|log| agent::for_session(&session).commits_in_log(&log, task.log_offset() as u64))
+      })
+      .unwrap_or_default(),
+  )
 }
 
 fn session_snapshot(store: &Store, id: i64) -> Result<Option<Session>> {
@@ -367,6 +356,7 @@ fn cmd_launch(
     id: name,
     run_dir: &store.run_dir,
     kind: options.kind,
+    agent: agent::for_role(options.kind),
     args: settings.launch_args(options.kind),
   })?;
   let external_session_id = started.external_id;
@@ -407,7 +397,8 @@ fn cmd_prompt(
     .truncate(false)
     .open(lock_path)?;
   lock.lock_exclusive()?;
-  let needle: String = text.chars().take(80).collect();
+  // Only the prompt's opening is matched in the transcript.
+  let opening: String = text.chars().take(80).collect();
   store.db.execute(
     "insert into prompts(session,text,sent_at,attempts) values(?,?,?,0)",
     params![name, text, now()],
@@ -415,12 +406,19 @@ fn cmd_prompt(
   let prompt_id = store.db.last_insert_rowid();
   let prompt_landing_millis = i64::try_from(settings.prompt_landing().as_millis())
     .context("prompt-landing-seconds is too large")?;
+  let session = latest_session_named(store, name)?;
+  let transcript = || {
+    session
+      .as_ref()
+      .and_then(|session| agent::transcript(&store.run_dir, session))
+  };
+  let agent = session.as_ref().map(agent::for_session);
 
   for attempt in 1..=PROMPT_ATTEMPTS {
     // Polling the runtime gives it a turn to deliver what a busy session has
-    // queued; the landing check below then reads what actually arrived.
+    // queued; the state check below then reads what actually arrived.
     let _ = runtime.query(name);
-    let path_before = session_log_named(store, name)?;
+    let path_before = transcript();
     let mut offset = file_size(path_before.as_deref());
     store.db.execute(
       "update prompts set attempts=attempts+1 where id=?",
@@ -430,18 +428,19 @@ fn cmd_prompt(
     let deadline = now() + prompt_landing_millis;
     while now() < deadline {
       let _ = runtime.query(name);
-      let path = session_log_named(store, name)?;
+      let path = transcript();
       if path != path_before {
         offset = 0;
       }
-      if let Some(path) = path
-        && let Some(landing) = prompt_landed(&path, offset, &needle)
+      if let Some((agent, path)) = agent.zip(path)
+        && let state @ (PromptState::Started | PromptState::Queued) =
+          agent.prompt_state(&path, offset, &opening)
       {
         store.db.execute(
           "update prompts set landed_at=? where id=?",
           params![now(), prompt_id],
         )?;
-        if landing == PromptLanding::Queued {
+        if state == PromptState::Queued {
           store.event("prompt-queued", name)?;
         }
         FileExt::unlock(&lock)?;
@@ -449,7 +448,9 @@ fn cmd_prompt(
           let _ = runtime.wait(name, Duration::from_secs(timeout));
           println!(
             "{}",
-            latest_assistant_text(&path).unwrap_or_else(|| "(no assistant text)".to_owned())
+            agent
+              .latest_assistant_text(&path)
+              .unwrap_or_else(|| "(no assistant text)".to_owned())
           );
         }
         return Ok(());
@@ -676,7 +677,7 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let log_offset = file_size(session_log(store, &session).as_deref());
+  let log_offset = file_size(agent::transcript(&store.run_dir, &session).as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
@@ -898,35 +899,13 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   let Some(task) = task_snapshot(store, task_id)? else {
     bail!("supervisor: no task {task_id}");
   };
-  let mut log = match task.session_id() {
-    Some(session_id) => match session_snapshot(store, session_id)? {
-      Some(session) => session_log(store, &session),
-      None => None,
-    },
-    None => None,
-  };
-  let shas = log
-    .as_deref()
-    .map(|path| commits_in_log(path, task.log_offset() as u64))
-    .unwrap_or_default();
   let mut sha = match task.commit_sha() {
     Some(sha) => Some(sha.to_owned()),
-    None => new_commit_for(store, &shas, task.base_head())?,
+    None => new_commit_for(store, &task_commits(store, &task)?, task.base_head())?,
   };
   if sha.is_none() && head_advanced_cleanly(store, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
-    log = match task.session_id() {
-      Some(session_id) => match session_snapshot(store, session_id)? {
-        Some(session) => session_log(store, &session),
-        None => None,
-      },
-      None => None,
-    };
-    let shas = log
-      .as_deref()
-      .map(|path| commits_in_log(path, task.log_offset() as u64))
-      .unwrap_or_default();
-    sha = new_commit_for(store, &shas, task.base_head())?;
+    sha = new_commit_for(store, &task_commits(store, &task)?, task.base_head())?;
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
@@ -1095,13 +1074,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| (end - start) as f64 / 1000.0);
-  let log = match task.session_id() {
-    Some(session_id) => match session_snapshot(store, session_id)? {
-      Some(session) => session_log(store, &session),
-      None => None,
-    },
-    None => None,
-  };
+  let session = task_session(store, &task)?;
   let next_offset = match task.session_id() {
     Some(session_id) => task_snapshots_for_session(store, session_id)?
       .into_iter()
@@ -1109,11 +1082,16 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
       .map(|candidate| candidate.log_offset() as u64),
     None => None,
   };
-  let mut end = context_peak(log.as_deref(), task.log_offset() as u64, next_offset) as i64;
-  if end == 0
-    && let Some(session_id) = task.session_id()
-  {
-    end = session_snapshot(store, session_id)?.map_or(0, |session| session.context_max());
+  let mut end = session
+    .as_ref()
+    .and_then(|session| {
+      agent::transcript(&store.run_dir, session).map(|log| {
+        agent::for_session(session).context_peak(&log, task.log_offset() as u64, next_offset)
+      })
+    })
+    .unwrap_or_default() as i64;
+  if end == 0 {
+    end = session.map_or(0, |session| session.context_max());
   }
   let base = task.context_size_start().unwrap_or_default();
   let context = (end - base).max(0);
@@ -1304,7 +1282,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_log(store, &session).is_some() {
+    if agent::transcript(&store.run_dir, &session).is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -1461,8 +1439,12 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(log) = session_log(store, &session) {
-      println!("{}\t{}", session.name(), context_size(Some(&log)));
+    if let Some(log) = agent::transcript(&store.run_dir, &session) {
+      println!(
+        "{}\t{}",
+        session.name(),
+        agent::for_session(&session).context_size(&log)
+      );
     } else {
       println!("{}\tUNAVAILABLE (session log not found)", session.name());
     }
@@ -1551,7 +1533,7 @@ fn daemon(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(log) = session_log(store, &session) else {
+      let Some(log) = agent::transcript(&store.run_dir, &session) else {
         if missing_logs.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"
@@ -1572,7 +1554,7 @@ fn daemon(
         store.event("session-log-found", &format!("{name}: {}", log.display()))?;
       }
       let size = file_size(Some(&log));
-      let context = context_size(Some(&log)) as i64;
+      let context = agent::for_session(&session).context_size(&log) as i64;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       let transaction = store.write_transaction()?;
@@ -1582,7 +1564,7 @@ fn daemon(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(store, runtime, settings, &session, Some(&log), quiet)?;
+          observe_implementer(store, runtime, settings, &session, &log, quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
@@ -1591,7 +1573,7 @@ fn daemon(
             settings,
             &session,
             Reading {
-              log: Some(&log),
+              log: &log,
               context,
               quiet,
             },
@@ -1657,9 +1639,10 @@ fn observe_implementer(
   runtime: &dyn SessionRuntime,
   settings: &Settings,
   session: &Session,
-  log: Option<&Path>,
+  log: &Path,
   quiet: f64,
 ) -> Result<()> {
+  let agent = agent::for_session(session);
   let task = task_snapshots_for_session(store, session.id())?
     .into_iter()
     .rev()
@@ -1669,19 +1652,17 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.log_offset() as u64;
-    if file_size(log) <= dispatch_offset {
+    if file_size(Some(log)) <= dispatch_offset {
       return Ok(());
     }
     let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-    let context = context_before(log, dispatch_offset);
+    let context = agent.context_before(log, dispatch_offset);
     let transaction = store.write_transaction()?;
     task::take_flight(&transaction, task.id(), &head, context as i64)?;
     transaction.commit()?;
     return Ok(());
   }
-  let shas = log
-    .map(|path| commits_in_log(path, task.log_offset() as u64))
-    .unwrap_or_default();
+  let shas = agent.commits_in_log(log, task.log_offset() as u64);
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
@@ -1695,7 +1676,7 @@ fn observe_implementer(
 
 /// What one daemon poll saw of a session's transcript.
 struct Reading<'a> {
-  log: Option<&'a Path>,
+  log: &'a Path,
   context: i64,
   quiet: f64,
 }
@@ -1719,13 +1700,11 @@ fn observe_commentator(
     .filter(Task::awaits_commentary)
     .collect::<Vec<_>>();
   transaction.commit()?;
-  let text = log
-    .map(|log| fs::read_to_string(log).unwrap_or_default())
-    .unwrap_or_default();
+  let agent = agent::for_session(session);
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
-    if commentator_log_mentions(&text, abbreviation) {
+    if agent.output_mentions(log, abbreviation) {
       let transaction = store.write_transaction()?;
       let recorded = task::record_commentary_delivery(&transaction, task.id())?;
       transaction.commit()?;
@@ -1753,7 +1732,13 @@ fn observe_commentator(
     }
   }
   if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
-    if daemon_prompt(store, runtime, settings, session.name(), "/compact") {
+    if daemon_prompt(
+      store,
+      runtime,
+      settings,
+      session.name(),
+      agent.compact_prompt(),
+    ) {
       *compacting = true;
       store.event("compact", &format!("{} at {context}", session.name()))?;
     }
@@ -1761,15 +1746,6 @@ fn observe_commentator(
     *compacting = false;
   }
   kick_if_stalled(store, runtime, settings, session, quiet)
-}
-
-fn commentator_log_mentions(text: &str, needle: &str) -> bool {
-  text.lines().any(|line| {
-    serde_json::from_str::<Value>(line).is_ok_and(|entry| {
-      entry.get("type").and_then(Value::as_str) == Some("assistant")
-        && entry.to_string().contains(needle)
-    })
-  })
 }
 
 /// Records the lead crossing its stop threshold once per lead session. Nothing

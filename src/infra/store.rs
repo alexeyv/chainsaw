@@ -1,10 +1,11 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+
+use super::agent::Claude;
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -59,33 +60,12 @@ pub struct Store {
   pub db: Connection,
 }
 
-/// Claude Code names a project directory after the session's cwd, replacing
-/// both separators and dots with dashes: `/Users/alex/src/ui.wt/run` becomes
-/// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
-/// dots put the database beside no transcript at all, and the commentator's
-/// start message named a directory holding nothing (run of 2026-08-28).
-fn project_directory_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
-}
-
-/// Where Claude Code keeps a session's transcripts. The supervisor's own database
-/// lives here too, so a run's state sits beside the logs it is derived from.
-pub fn logs_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
-  let home = env::var_os("HOME").context("HOME is not set")?;
-  Ok(
-    PathBuf::from(home)
-      .join(".claude")
-      .join("projects")
-      .join(project_directory_name(canonical_run_dir)),
-  )
-}
-
 impl Store {
   pub fn open(run_dir: &Path) -> Result<Self> {
     let run_dir = run_dir
       .canonicalize()
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
-    let logs_dir = logs_dir_for(&run_dir)?;
+    let logs_dir = Claude::transcripts_dir(&run_dir)?;
     fs::create_dir_all(&logs_dir)?;
     let path = logs_dir.join("chainsaw-supervisor.db");
     let db = Connection::open(&path)?;

@@ -1,9 +1,6 @@
-use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use std::collections::BTreeMap;
 
-use super::{PromptLanding, format_growth, prompt_landed, transcript_growth, usage_of_line};
+use super::{format_growth, transcript_growth};
 
 fn sizes(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
   pairs
@@ -63,69 +60,4 @@ mod format_growth {
   fn should_be_silent_when_nothing_grew() {
     assert_eq!(format_growth(&[]), None);
   }
-}
-
-fn landing_in(transcript: &str, needle: &str) -> Option<PromptLanding> {
-  static NEXT_TRANSCRIPT: AtomicU64 = AtomicU64::new(0);
-  let path = std::env::temp_dir().join(format!(
-    "chainsaw-prompt-landing-{}-{}.jsonl",
-    std::process::id(),
-    NEXT_TRANSCRIPT.fetch_add(1, Ordering::Relaxed)
-  ));
-  fs::write(&path, transcript).unwrap();
-  let landing = prompt_landed(&path, 0, needle);
-  let _ = fs::remove_file(path);
-  landing
-}
-
-mod prompt_landed {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = r#"{"type":"user","message":{"content":"deliver this prompt"}}"#;
-
-    assert_eq!(
-      landing_in(transcript, "deliver this"),
-      Some(PromptLanding::Landed)
-    );
-  }
-
-  #[test]
-  fn should_report_a_matching_enqueue() {
-    let transcript =
-      r#"{"type":"queue-operation","operation":"enqueue","content":"deliver this prompt"}"#;
-
-    assert_eq!(
-      landing_in(transcript, "deliver this"),
-      Some(PromptLanding::Queued)
-    );
-  }
-
-  #[test]
-  fn should_report_neither_when_no_entry_matches() {
-    let transcript = r#"{"type":"assistant","message":{"content":"deliver this prompt"}}"#;
-
-    assert_eq!(landing_in(transcript, "deliver this"), None);
-  }
-
-  #[test]
-  fn should_ignore_an_enqueue_for_a_different_prompt() {
-    let transcript =
-      r#"{"type":"queue-operation","operation":"enqueue","content":"something else"}"#;
-
-    assert_eq!(landing_in(transcript, "deliver this"), None);
-  }
-}
-
-#[test]
-fn sums_context_tokens() {
-  let line = r#"{"type":"assistant","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":5}}}"#;
-  assert_eq!(usage_of_line(line), Some(10));
-}
-
-#[test]
-fn ignores_sidechain_usage() {
-  let line = r#"{"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":99}}}"#;
-  assert_eq!(usage_of_line(line), None);
 }

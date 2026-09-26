@@ -8,11 +8,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
 use fs2::FileExt;
 use serde_json::{Map, Value, json};
 
-use super::store;
+use super::agent::{Agent, Claude};
 
 pub const RUNTIME_ENV: &str = "CHAINSAW_SESSION_RUNTIME";
 pub const ZERO_COST_DUMMY_STATE_ENV: &str = "CHAINSAW_ZERO_COST_DUMMY_STATE";
@@ -36,7 +35,9 @@ pub struct StartSession<'a> {
   pub id: &'a str,
   pub run_dir: &'a Path,
   pub kind: SessionKind,
-  /// The Claude flags the session launches with, verbatim.
+  /// Which coding CLI to launch in the pane.
+  pub agent: &'a dyn Agent,
+  /// The agent's flags, verbatim.
   pub args: &'a [String],
 }
 
@@ -163,7 +164,14 @@ impl SessionRuntime for HerdrSessionRuntime {
     };
 
     let mut arguments = vec![
-      "agent", "start", session.id, "--kind", "claude", "--pane", &pane_id, "--",
+      "agent",
+      "start",
+      session.id,
+      "--kind",
+      session.agent.name(),
+      "--pane",
+      &pane_id,
+      "--",
     ];
     arguments.extend(session.args.iter().map(String::as_str));
     let mut started = None;
@@ -301,18 +309,9 @@ impl ZeroCostDummy {
       .context("dummy runtime state field \"operations\" is not an array")
   }
 
-  fn logs_dir(run_dir: &Path) -> Result<PathBuf> {
-    let run_dir = run_dir.canonicalize().with_context(|| {
-      format!(
-        "cannot resolve dummy session run directory {}",
-        run_dir.display()
-      )
-    })?;
-    store::logs_dir_for(&run_dir)
-  }
-
-  /// Write the transcript entries a real agent produces when it picks up a prompt.
-  fn deliver(state: &Value, session: &Value, text: &str) -> Result<()> {
+  /// The transcript the dummy stands in for: it fakes a Claude Code session,
+  /// so it writes where Claude Code would.
+  fn transcript(session: &Value) -> Result<PathBuf> {
     let run_dir = session
       .get("run_dir")
       .and_then(Value::as_str)
@@ -321,45 +320,27 @@ impl ZeroCostDummy {
       .get("session_id")
       .and_then(Value::as_str)
       .context("dummy session lacks session_id")?;
-    let log = Self::logs_dir(Path::new(run_dir))?.join(format!("{external_id}.jsonl"));
-    Self::append_log(
-      &log,
-      &json!({
-        "type": "user",
-        "message": {"content": text},
-      }),
-    )?;
+    let run_dir = Path::new(run_dir)
+      .canonicalize()
+      .with_context(|| format!("cannot resolve dummy session run directory {run_dir}"))?;
+    Claude::transcript_under(&run_dir, external_id)
+  }
+
+  /// Write the transcript entries a real agent produces when it picks up a prompt.
+  fn deliver(state: &Value, session: &Value, text: &str) -> Result<()> {
+    let log = Self::transcript(session)?;
+    Self::append_log(&log, &Claude::prompt_entry(text))?;
     if let Some(reply) = state.get("reply_on_prompt").and_then(Value::as_str) {
-      Self::append_log(
-        &log,
-        &json!({
-          "type": "assistant",
-          "message": {"content": [{"type": "text", "text": reply}]},
-        }),
-      )?;
+      Self::append_log(&log, &Claude::reply_entry(reply))?;
     }
     Ok(())
   }
 
   /// Write the transcript entry a real agent produces when it queues a prompt.
   fn enqueue(session: &Value, text: &str) -> Result<()> {
-    let run_dir = session
-      .get("run_dir")
-      .and_then(Value::as_str)
-      .context("dummy session lacks run_dir")?;
-    let external_id = session
-      .get("session_id")
-      .and_then(Value::as_str)
-      .context("dummy session lacks session_id")?;
-    let log = Self::logs_dir(Path::new(run_dir))?.join(format!("{external_id}.jsonl"));
     Self::append_log(
-      &log,
-      &json!({
-        "type": "queue-operation",
-        "operation": "enqueue",
-        "content": text,
-        "timestamp": Utc::now().to_rfc3339(),
-      }),
+      &Self::transcript(session)?,
+      &Claude::queued_prompt_entry(text),
     )
   }
 

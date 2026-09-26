@@ -8,38 +8,9 @@ use std::time::Duration;
 use anyhow::Result;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-use super::{Store, initialize_schema, project_directory_name};
+use super::{Store, initialize_schema};
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(0);
-
-mod project_directory_name {
-  use std::path::Path;
-
-  use super::project_directory_name;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(
-      project_directory_name(Path::new("/Users/a/src/chainsaw")),
-      "-Users-a-src-chainsaw"
-    );
-  }
-
-  #[test]
-  fn should_dash_dots_when_the_run_directory_is_dotted() {
-    // Observed 2026-08-28: Claude Code wrote the run's transcripts under
-    // -Users-alex-src-ui-wt-<run>, not -Users-alex-src-ui.wt-<run>.
-    assert_eq!(
-      project_directory_name(Path::new("/Users/a/src/ui.wt/refactor")),
-      "-Users-a-src-ui-wt-refactor"
-    );
-  }
-
-  #[test]
-  fn should_dash_a_leading_dot_directory() {
-    assert_eq!(project_directory_name(Path::new("/x/.bare")), "-x--bare");
-  }
-}
 
 mod write_transaction {
   use super::*;
