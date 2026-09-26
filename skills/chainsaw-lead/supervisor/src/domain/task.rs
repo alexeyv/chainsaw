@@ -85,7 +85,7 @@ pub struct Task {
   commit_sha: Option<String>,
   created_at: DateTime<Utc>,
   retry_of_task_id: Option<i64>,
-  log_offset: i64,
+  transcript_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
   context_size_start: Option<i64>,
@@ -105,7 +105,7 @@ impl Task {
     commit_sha: Option<String>,
     created_at: DateTime<Utc>,
     retry_of_task_id: Option<i64>,
-    log_offset: i64,
+    transcript_offset: i64,
     base_head: Option<String>,
     predicted_file_list: Option<Vec<String>>,
     context_size_start: Option<i64>,
@@ -123,7 +123,7 @@ impl Task {
     if retry_of_task_id == Some(id) {
       bail!("a task cannot retry itself");
     }
-    require_nonnegative("log_offset", log_offset)?;
+    require_nonnegative("transcript_offset", transcript_offset)?;
     require_optional_nonblank("base_head", base_head.as_deref())?;
     require_optional_nonnegative("context_size_start", context_size_start)?;
     validate_events(&events)?;
@@ -151,7 +151,7 @@ impl Task {
       commit_sha,
       created_at,
       retry_of_task_id,
-      log_offset,
+      transcript_offset,
       base_head,
       predicted_file_list,
       context_size_start,
@@ -212,8 +212,8 @@ impl Task {
 
   /// Transcript byte offset immediately after dispatch. It remains the
   /// measurement baseline when the daemon observes work and takes flight.
-  pub fn log_offset(&self) -> i64 {
-    self.log_offset
+  pub fn transcript_offset(&self) -> i64 {
+    self.transcript_offset
   }
 
   pub fn base_head(&self) -> Option<&str> {

@@ -24,7 +24,7 @@ create table sessions(
 create table tasks(id integer primary key, text text, predicted_files int,
   predicted_lines int, session_id int references sessions(id),
   commit_sha text, created_at int, retry_of_task_id int references tasks(id),
-  log_offset int default 0, base_head text, predicted_file_list text,
+  transcript_offset int default 0, base_head text, predicted_file_list text,
   context_size_start int, commentary_requested_at int, commentary_delivered_at int);
 create table task_events(
   id integer primary key autoincrement,
@@ -56,7 +56,7 @@ pragma user_version=1;
 
 pub struct Store {
   pub run_dir: PathBuf,
-  pub logs_dir: PathBuf,
+  pub transcripts_dir: PathBuf,
   pub path: PathBuf,
   pub db: Connection,
 }
@@ -66,15 +66,15 @@ impl Store {
     let run_dir = run_dir
       .canonicalize()
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
-    let logs_dir = Claude::transcripts_dir(&run_dir)?;
-    fs::create_dir_all(&logs_dir)?;
-    let path = logs_dir.join("chainsaw-supervisor.db");
+    let transcripts_dir = Claude::transcripts_dir(&run_dir)?;
+    fs::create_dir_all(&transcripts_dir)?;
+    let path = transcripts_dir.join("chainsaw-supervisor.db");
     let db = Connection::open(&path)?;
     db.busy_timeout(Duration::from_secs(30))?;
     initialize_schema(&db)?;
     Ok(Self {
       run_dir,
-      logs_dir,
+      transcripts_dir,
       path,
       db,
     })

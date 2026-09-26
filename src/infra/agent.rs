@@ -60,7 +60,7 @@ pub trait Agent {
   /// Commit ids recorded from `offset` on, as `[branch sha]` in git's own
   /// commit output. Every agent shows the shell what git printed, so this
   /// reads the transcript as text.
-  fn commits_in_log(&self, transcript: &Path, offset: u64) -> Vec<String> {
+  fn commits_in_transcript(&self, transcript: &Path, offset: u64) -> Vec<String> {
     let Ok(text) = read_lossy(transcript, offset, None) else {
       return Vec::new();
     };

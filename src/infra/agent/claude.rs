@@ -162,7 +162,7 @@ impl Claude {
 impl Claude {
   /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
   /// The supervisor database lives here too: the lead runs inside Claude
-  /// Code, so a run's state sits beside the logs it is derived from.
+  /// Code, so a run's state sits beside the transcripts it is derived from.
   pub fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
     let home = env::var_os("HOME").context("HOME is not set")?;
     Ok(

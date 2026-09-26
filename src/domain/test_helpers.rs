@@ -233,7 +233,7 @@ pub struct TaskSpec {
   pub commit_sha: Option<&'static str>,
   pub created_at: DateTime<Utc>,
   pub retry_of_task_id: Option<i64>,
-  pub log_offset: i64,
+  pub transcript_offset: i64,
   pub base_head: Option<&'static str>,
   pub predicted_file_list: Option<Vec<&'static str>>,
   pub context_size_start: Option<i64>,
@@ -253,7 +253,7 @@ pub fn drafted_task() -> TaskSpec {
     commit_sha: None,
     created_at: created_at(),
     retry_of_task_id: None,
-    log_offset: 0,
+    transcript_offset: 0,
     base_head: None,
     predicted_file_list: None,
     context_size_start: None,
@@ -269,7 +269,7 @@ pub fn task_in(state: TaskState, reason: Option<&str>) -> TaskSpec {
   TaskSpec {
     session_id: Some(7),
     commit_sha: Some("abc123"),
-    log_offset: 100,
+    transcript_offset: 100,
     base_head: Some("base123"),
     context_size_start: Some(900),
     events: events_through(state, reason),
@@ -287,7 +287,7 @@ pub fn build(spec: TaskSpec) -> Result<Task> {
     spec.commit_sha.map(str::to_owned),
     spec.created_at,
     spec.retry_of_task_id,
-    spec.log_offset,
+    spec.transcript_offset,
     spec.base_head.map(str::to_owned),
     spec
       .predicted_file_list
@@ -318,7 +318,7 @@ pub fn format_task(task: &Task) -> String {
     .collect::<Vec<_>>()
     .join("\n");
   format!(
-    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\nlog_offset: {}\nbase_head: {}\npredicted_file_list: {}\ncontext_size_start: {}\ncommentary_requested_at: {}\ncommentary_delivered_at: {}\nevents:\n{}",
+    "id: {}\ntext: {:?}\npredicted_files: {}\npredicted_lines: {}\nstate: {}\nsession_id: {}\ncommit_sha: {}\ncreated_at: {}\nretry_of_task_id: {}\nreason: {}\ntranscript_offset: {}\nbase_head: {}\npredicted_file_list: {}\ncontext_size_start: {}\ncommentary_requested_at: {}\ncommentary_delivered_at: {}\nevents:\n{}",
     task.id(),
     task.text(),
     task.predicted_files(),
@@ -329,7 +329,7 @@ pub fn format_task(task: &Task) -> String {
     format_time(task.created_at()),
     format_option(task.retry_of_task_id()),
     format_option_text(task.reason()),
-    task.log_offset(),
+    task.transcript_offset(),
     format_option_text(task.base_head()),
     file_list,
     format_option(task.context_size_start()),

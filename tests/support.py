@@ -63,7 +63,7 @@ class SupervisorContractCase(unittest.TestCase):
         self.git("add", "seed.txt")
         self.git("commit", "-q", "-m", "chore: initial fixture")
         self._tool_use_sequence = 0
-        self._logs_dirs = {}
+        self._transcripts_dirs = {}
 
     def _private_supervisor_command(self):
         """Run a private copy of the binary, so a rebuild in target/ during the
@@ -75,28 +75,28 @@ class SupervisorContractCase(unittest.TestCase):
         return [str(private)]
 
     @property
-    def logs_dir(self):
-        return self.logs_dir_for(self.run_dir)
+    def transcripts_dir(self):
+        return self.transcripts_dir_for(self.run_dir)
 
-    def logs_dir_for(self, run_dir):
+    def transcripts_dir_for(self, run_dir):
         """Ask the supervisor where it keeps transcripts; never reimplement its rule."""
-        if run_dir not in self._logs_dirs:
+        if run_dir not in self._transcripts_dirs:
             result = subprocess.run(
-                [*self.supervisor_command, "--run-dir", str(run_dir), "logs-dir"],
+                [*self.supervisor_command, "--run-dir", str(run_dir), "transcripts-dir"],
                 text=True, capture_output=True, env=self.env, timeout=30,
             )
             self.assert_success(result)
-            self._logs_dirs[run_dir] = Path(result.stdout.strip())
-        return self._logs_dirs[run_dir]
+            self._transcripts_dirs[run_dir] = Path(result.stdout.strip())
+        return self._transcripts_dirs[run_dir]
 
     def write_supervisor_db(self, sql, *params):
         """Move a durable fact the CLI cannot, such as a timestamp into the past."""
-        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             database.execute(sql, params)
 
-    def write_lead_log(self, context, session_id="session-lead"):
+    def write_lead_transcript(self, context, session_id="session-lead"):
         """Give the lead a transcript whose last turn carried this much context."""
-        log = self.logs_dir / f"{session_id}.jsonl"
+        log = self.transcripts_dir / f"{session_id}.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "type": "assistant",
@@ -229,26 +229,26 @@ class SupervisorContractCase(unittest.TestCase):
             temporary.write_text(json.dumps(state, sort_keys=True))
             temporary.replace(self.runtime_state_path)
 
-    def session_log(self, name):
+    def session_transcript(self, name):
         state = self.zero_cost_dummy_state()
         session_id = state["agents"][name]["session_id"]
-        return self.logs_dir / f"{session_id}.jsonl"
+        return self.transcripts_dir / f"{session_id}.jsonl"
 
-    def append_log(self, name, entry):
-        path = self.session_log(name)
+    def append_entry(self, name, entry):
+        path = self.session_transcript(name)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as stream:
             stream.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     def append_text(self, name, text):
-        self.append_log(name, {
+        self.append_entry(name, {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": text}]},
         })
 
     def append_usage(self, name, input_tokens=0, cache_read=0, cache_creation=0,
                      sidechain=False):
-        self.append_log(name, {
+        self.append_entry(name, {
             "type": "assistant",
             "isSidechain": sidechain,
             "message": {
@@ -264,7 +264,7 @@ class SupervisorContractCase(unittest.TestCase):
     def append_bash(self, name, command, ok=True):
         self._tool_use_sequence += 1
         tool_id = f"tool-{self._tool_use_sequence}"
-        self.append_log(name, {
+        self.append_entry(name, {
             "type": "assistant",
             "message": {"content": [{
                 "type": "tool_use",
@@ -273,7 +273,7 @@ class SupervisorContractCase(unittest.TestCase):
                 "input": {"command": command},
             }]},
         })
-        self.append_log(name, {
+        self.append_entry(name, {
             "type": "user",
             "message": {"content": [{
                 "type": "tool_result",

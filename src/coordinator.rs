@@ -68,7 +68,7 @@ fn is_lead_facing(command: &Command) -> bool {
     command,
     Command::Daemon { .. }
       | Command::WatchTranscripts { .. }
-      | Command::LogsDir
+      | Command::TranscriptsDir
       | Command::Context { .. }
       | Command::Stop
   )
@@ -247,8 +247,8 @@ fn run(
     } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
     Command::Resolutions => cmd_resolutions(store),
     Command::State { task } => cmd_state(store, task),
-    Command::LogsDir => {
-      println!("{}", store.logs_dir.display());
+    Command::TranscriptsDir => {
+      println!("{}", store.transcripts_dir.display());
       Ok(())
     }
     Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(store, interval_ms),
@@ -275,10 +275,13 @@ fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
   let Some(session) = task_session(store, task)? else {
     return Ok(Vec::new());
   };
-  let Some(log) = session_transcript(store, &session)? else {
+  let Some(transcript) = session_transcript(store, &session)? else {
     return Ok(Vec::new());
   };
-  Ok(agent::for_session(&session).commits_in_log(&log, task.log_offset() as u64))
+  Ok(
+    agent::for_session(&session)
+      .commits_in_transcript(&transcript, task.transcript_offset() as u64),
+  )
 }
 
 /// Where the session's transcript is, or None until its agent has written
@@ -506,9 +509,9 @@ fn cmd_start_commentator(
     settings,
     &name,
     &format!(
-      "Read and follow this role prompt entirely: {}\nSession-log directory: {}\nRun directory: {}",
+      "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
       role_prompt.display(),
-      store.logs_dir.display(),
+      store.transcripts_dir.display(),
       store.run_dir.display()
     ),
     false,
@@ -686,7 +689,7 @@ fn cmd_dispatch(
     preamble,
     text = task.text().trim_end()
   );
-  // The task is only dispatched once the prompt is in the session log, so a
+  // The task is only dispatched once the prompt is in the transcript, so a
   // send that never shows up there leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
     store.event(
@@ -695,13 +698,13 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let log_offset = transcript_size(session_transcript(store, &session)?.as_deref());
+  let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
     task_id,
     session.id(),
-    log_offset as i64,
+    transcript_offset as i64,
     reason,
   )?;
   transaction.commit()?;
@@ -940,13 +943,13 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
       problems.push("commit is not HEAD".to_owned());
     }
   } else {
-    problems.push("no commit found in the implementer's log".to_owned());
+    problems.push("no commit found in the implementer's transcript".to_owned());
   }
   if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
     problems.push("tree is dirty".to_owned());
   }
   // The implementer runs the quality gate before it commits; that is its
-  // contract, and re-deriving it from the session log only costs wall time.
+  // contract, and re-deriving it from the transcript only costs wall time.
   if problems.is_empty() {
     let sha = sha
       .as_deref()
@@ -1096,13 +1099,17 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let next_offset = match task.session_id() {
     Some(session_id) => task_snapshots_for_session(store, session_id)?
       .into_iter()
-      .find(|candidate| candidate.id() > task_id && candidate.log_offset() > 0)
-      .map(|candidate| candidate.log_offset() as u64),
+      .find(|candidate| candidate.id() > task_id && candidate.transcript_offset() > 0)
+      .map(|candidate| candidate.transcript_offset() as u64),
     None => None,
   };
   let mut end = match &session {
-    Some(session) => session_transcript(store, session)?.map_or(0, |log| {
-      agent::for_session(session).context_peak(&log, task.log_offset() as u64, next_offset)
+    Some(session) => session_transcript(store, session)?.map_or(0, |transcript| {
+      agent::for_session(session).context_peak(
+        &transcript,
+        task.transcript_offset() as u64,
+        next_offset,
+      )
     }),
     None => 0,
   } as i64;
@@ -1313,7 +1320,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
         ""
       };
       println!(
-        "  {:<16} {:<12} context UNAVAILABLE (session log not found{danger}) quiet {quiet}s{flags}",
+        "  {:<16} {:<12} context UNAVAILABLE (transcript not found{danger}) quiet {quiet}s{flags}",
         session.name(),
         session.role()
       );
@@ -1456,14 +1463,14 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(log) = session_transcript(store, &session)? {
+    if let Some(transcript) = session_transcript(store, &session)? {
       println!(
         "{}\t{}",
         session.name(),
-        agent::for_session(&session).context_size(&log)
+        agent::for_session(&session).context_size(&transcript)
       );
     } else {
-      println!("{}\tUNAVAILABLE (session log not found)", session.name());
+      println!("{}\tUNAVAILABLE (transcript not found)", session.name());
     }
   }
   Ok(())
@@ -1533,7 +1540,7 @@ fn daemon(
   transaction.commit()?;
   store.event("daemon-start", &format!("pid {}", std::process::id()))?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
-  let mut missing_logs = HashSet::new();
+  let mut missing_transcripts = HashSet::new();
   let mut compacting = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
@@ -1550,28 +1557,31 @@ fn daemon(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(log) = session_transcript(store, &session)? else {
-        if missing_logs.insert(name.to_owned()) {
+      let Some(transcript) = session_transcript(store, &session)? else {
+        if missing_transcripts.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"
           } else {
             ""
           };
-          let detail = format!("{name} ({}): session log not found{danger}", session.role());
+          let detail = format!("{name} ({}): transcript not found{danger}", session.role());
           eprintln!("WARNING: {detail}");
-          store.event("session-log-missing", &detail)?;
+          store.event("transcript-missing", &detail)?;
         }
         continue;
       };
-      if missing_logs.remove(name) {
+      if missing_transcripts.remove(name) {
         eprintln!(
-          "supervisor: session log found for {name}: {}",
-          log.display()
+          "supervisor: transcript found for {name}: {}",
+          transcript.display()
         );
-        store.event("session-log-found", &format!("{name}: {}", log.display()))?;
+        store.event(
+          "transcript-found",
+          &format!("{name}: {}", transcript.display()),
+        )?;
       }
-      let size = transcript_size(Some(&log));
-      let context = agent::for_session(&session).context_size(&log) as i64;
+      let size = transcript_size(Some(&transcript));
+      let context = agent::for_session(&session).context_size(&transcript) as i64;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       let transaction = store.write_transaction()?;
@@ -1581,7 +1591,7 @@ fn daemon(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(store, runtime, settings, &session, &log, quiet)?;
+          observe_implementer(store, runtime, settings, &session, &transcript, quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
@@ -1590,7 +1600,7 @@ fn daemon(
             settings,
             &session,
             Reading {
-              log: &log,
+              transcript: &transcript,
               context,
               quiet,
             },
@@ -1656,7 +1666,7 @@ fn observe_implementer(
   runtime: &dyn SessionRuntime,
   settings: &Settings,
   session: &Session,
-  log: &Path,
+  transcript: &Path,
   quiet: f64,
 ) -> Result<()> {
   let agent = agent::for_session(session);
@@ -1668,18 +1678,18 @@ fn observe_implementer(
     return Ok(());
   };
   if task.state() == TaskState::Dispatched {
-    let dispatch_offset = task.log_offset() as u64;
-    if transcript_size(Some(log)) <= dispatch_offset {
+    let dispatch_offset = task.transcript_offset() as u64;
+    if transcript_size(Some(transcript)) <= dispatch_offset {
       return Ok(());
     }
     let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-    let context = agent.context_before(log, dispatch_offset);
+    let context = agent.context_before(transcript, dispatch_offset);
     let transaction = store.write_transaction()?;
     task::take_flight(&transaction, task.id(), &head, context as i64)?;
     transaction.commit()?;
     return Ok(());
   }
-  let shas = agent.commits_in_log(log, task.log_offset() as u64);
+  let shas = agent.commits_in_transcript(transcript, task.transcript_offset() as u64);
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
@@ -1693,7 +1703,7 @@ fn observe_implementer(
 
 /// What one daemon poll saw of a session's transcript.
 struct Reading<'a> {
-  log: &'a Path,
+  transcript: &'a Path,
   context: i64,
   quiet: f64,
 }
@@ -1707,7 +1717,7 @@ fn observe_commentator(
   compacting: &mut bool,
 ) -> Result<()> {
   let Reading {
-    log,
+    transcript,
     context,
     quiet,
   } = reading;
@@ -1721,7 +1731,7 @@ fn observe_commentator(
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
-    if agent.output_mentions(log, abbreviation) {
+    if agent.output_mentions(transcript, abbreviation) {
       let transaction = store.write_transaction()?;
       let recorded = task::record_commentary_delivery(&transaction, task.id())?;
       transaction.commit()?;

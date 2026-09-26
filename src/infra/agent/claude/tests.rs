@@ -206,14 +206,17 @@ mod output_mentions {
   }
 }
 
-mod commits_in_log {
+mod commits_in_transcript {
   use super::*;
 
   #[test]
   fn should_work() {
     let transcript = Transcript::containing(&assistant_line("[chainsaw 0123abc] fix: thing"));
 
-    assert_eq!(Claude.commits_in_log(transcript.path(), 0), vec!["0123abc"]);
+    assert_eq!(
+      Claude.commits_in_transcript(transcript.path(), 0),
+      vec!["0123abc"]
+    );
   }
 
   #[test]
@@ -225,7 +228,7 @@ mod commits_in_log {
     ));
 
     assert_eq!(
-      Claude.commits_in_log(transcript.path(), old.len() as u64 + 1),
+      Claude.commits_in_transcript(transcript.path(), old.len() as u64 + 1),
       vec!["4567def"]
     );
   }

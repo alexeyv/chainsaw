@@ -100,7 +100,7 @@ commit_sha: none
 created_at: {}
 retry_of_task_id: none
 reason: none
-log_offset: 0
+transcript_offset: 0
 base_head: none
 predicted_file_list: ["src/domain/task.rs", "src/store.rs"]
 context_size_start: none
@@ -318,15 +318,18 @@ mod get {
   }
 
   #[test]
-  fn should_read_a_missing_log_offset_as_zero() -> Result<()> {
+  fn should_read_a_missing_transcript_offset_as_zero() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
     let task = draft(&transaction, "no offset yet")?;
-    transaction.execute("update tasks set log_offset=null where id=?", [task.id()])?;
+    transaction.execute(
+      "update tasks set transcript_offset=null where id=?",
+      [task.id()],
+    )?;
     let loaded = get(&transaction, task.id())?.expect("stored task");
     transaction.commit()?;
 
-    assert_eq!(loaded.log_offset(), 0);
+    assert_eq!(loaded.transcript_offset(), 0);
     Ok(())
   }
 
@@ -494,7 +497,7 @@ mod dispatch {
 
     assert_eq!(task.state(), TaskState::Dispatched);
     assert_eq!(task.session_id(), Some(7));
-    assert_eq!(task.log_offset(), 42);
+    assert_eq!(task.transcript_offset(), 42);
     assert_eq!(task.reason(), Some("a new area"));
     assert_eq!(
       states_of(&task),
@@ -546,7 +549,7 @@ mod take_flight {
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::InFlight);
-    assert_eq!(task.log_offset(), 42);
+    assert_eq!(task.transcript_offset(), 42);
     assert_eq!(task.base_head(), Some("base123"));
     assert_eq!(task.context_size_start(), Some(900));
     assert_eq!(task.reason(), None);

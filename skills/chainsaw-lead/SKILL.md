@@ -13,8 +13,8 @@ the commentator's findings — not implementation detail.
 
 1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`); if not, stop and say so.
 2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
-   ever started, so its session-log directory (`~/.claude/projects/<munged-path>/`)
-   holds exactly this run. If logs already exist there, tell the human and stop.
+   ever started, so its transcripts directory (`~/.claude/projects/<munged-path>/`)
+   holds exactly this run. If transcripts already exist there, tell the human and stop.
 3. Resolve the role path and the supervisor client from this file's own location, not
    the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
    and `SUPERVISOR=$(realpath <dir of this SKILL.md>/bin/chainsaw)`. The wrapper builds
@@ -52,7 +52,7 @@ through supervisor CLI ($SUP).
 ## Review protocol
 
 The supervisor database and CLI are the only review communication channel. Never
-reconstruct review state from session logs or ad hoc files. Observations and findings
+reconstruct review state from transcripts or ad hoc files. Observations and findings
 have different semantics:
 
 - An **observation** is chronological, informational context and requires no verdict.
@@ -111,12 +111,12 @@ and draft another.
 
 **dispatched** — implementer session received the task prompt, but has not yet produced
 new transcript output after it. You trigger this: `$SUP dispatch <task-id> --to
-implementer-<n> [--reason "..."]`. The supervisor records the session's log
-offset here so it can distinguish prompt delivery from the implementer starting work.
+implementer-<n> [--reason "..."]`. The supervisor records the transcript offset
+here so it can tell the prompt showing up from the implementer starting work.
 
 **in_flight** — implementer started working on the task. The daemon detects the first
-session-log growth past the dispatch offset and records this automatically, along with the
-measurement baseline: that dispatch log offset, the current git revision, and the context
+transcript growth past the dispatch offset and records this automatically, along with the
+measurement baseline: that dispatch offset, the current git revision, and the context
 size at the offset.
 
 **committed_unverified** — implementer has committed its work to Git. The supervisor detects and
@@ -130,7 +130,7 @@ Normally you should advance to it once you have seen and disposed of commentator
 Trigger the transition thus: `$SUP accept <task-id>`
 This checks the commit is in git, carries no attribution trailer, is HEAD, and left the
 tree clean. It does not re-derive whether the quality gate ran — the implementer's
-contract is to run it before it commits, and proving that again from the session log
+contract is to run it before it commits, and proving that again from the transcript
 only costs wall time.
 If you eventually decide to accept the task bypassing validations:
 `$SUP accept <task-id> --force --reason "..."`
@@ -167,7 +167,7 @@ previous commit has landed, reconciling the draft against the actual tree.
 4. Run every task-specific check yourself at the base commit and record its baseline;
    never type one from memory. Do not re-run the quality gate yourself — take the
    base numbers and the known pre-existing gate failures from the previous
-   implementer's report and log, and name those failures in the brief so the
+   implementer's report and transcript, and name those failures in the brief so the
    implementer does not rediscover them.
 5. Don't state facts about the code you haven't verified. Say what the implementer
    needs to find out, not what you assume the answer is.
@@ -278,7 +278,7 @@ measured separately (`$SUP state` shows both).
    gate failures you judged pre-existing (test name and one-line error).
    ```
 
-   Prompts are serial and the supervisor watches the session log for each one; the
+   Prompts are serial and the supervisor watches the transcript for each one; the
    command returns as soon as the prompt shows up there, not when the turn ends, so
    you are free while the implementer works. Never send two at once.
 3. While it works — the only free time in the run: poll with the retained observation
@@ -288,7 +288,7 @@ measured separately (`$SUP state` shows both).
    human, draft and pre-populate the next task.
 4. After starting the next implementer, append the calibration record for the previous
    task: `$SUP calibrate <task-id>` fills actual files/lines from git and wall
-   time and context from the session log against your prediction. Its context
+   time and context from the transcript against your prediction. Its context
    figure is that task's own cost — the session's peak during the task minus the
    baseline it carried at dispatch (shown alongside), so the record describes the task
    rather than the session's total. If predictions are far out, size smaller from here
@@ -304,7 +304,7 @@ measured separately (`$SUP state` shows both).
 6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
    chronological context and every still-unresolved finding. It narrates on its own
    clock; the supervisor alone wakes it with the commit sha and task id, which is a
-   trigger to review from git and the implementer log, not a finding or your opinion.
+   trigger to review from git and the implementer transcript, not a finding or your opinion.
    Never prompt it for a review. A precise finding normally becomes the next fix
    task; you alone decide, and the supervisor remains the authoritative review state.
    A fix task is a task like any other and gets a fresh implementer with its own

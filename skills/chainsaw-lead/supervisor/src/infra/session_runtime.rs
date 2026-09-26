@@ -328,17 +328,17 @@ impl ZeroCostDummy {
 
   /// Write the transcript entries a real agent produces when it picks up a prompt.
   fn deliver(state: &Value, session: &Value, text: &str) -> Result<()> {
-    let log = Self::transcript(session)?;
-    Self::append_log(&log, &Claude::prompt_entry(text))?;
+    let transcript = Self::transcript(session)?;
+    Self::append_entry(&transcript, &Claude::prompt_entry(text))?;
     if let Some(reply) = state.get("reply_on_prompt").and_then(Value::as_str) {
-      Self::append_log(&log, &Claude::reply_entry(reply))?;
+      Self::append_entry(&transcript, &Claude::reply_entry(reply))?;
     }
     Ok(())
   }
 
   /// Write the transcript entry a real agent produces when it queues a prompt.
   fn enqueue(session: &Value, text: &str) -> Result<()> {
-    Self::append_log(
+    Self::append_entry(
       &Self::transcript(session)?,
       &Claude::queued_prompt_entry(text),
     )
@@ -379,13 +379,13 @@ impl ZeroCostDummy {
     Ok(())
   }
 
-  fn append_log(path: &Path, entry: &Value) -> Result<()> {
+  fn append_entry(path: &Path, entry: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
     }
-    let mut log = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut log, entry)?;
-    writeln!(log)?;
+    let mut transcript = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut transcript, entry)?;
+    writeln!(transcript)?;
     Ok(())
   }
 }

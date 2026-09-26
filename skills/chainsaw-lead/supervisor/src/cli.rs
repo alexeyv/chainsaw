@@ -120,7 +120,7 @@ pub enum Command {
     task: Option<i64>,
   },
   /// Print the directory holding this run's session transcripts.
-  LogsDir,
+  TranscriptsDir,
   /// Print a line whenever session transcripts grow, paced to one check per interval.
   WatchTranscripts {
     #[arg(long, default_value_t = 120_000)]

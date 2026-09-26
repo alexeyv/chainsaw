@@ -14,7 +14,7 @@ Chainsaw is an attempt to cure the context switching. Here is how it works:
 
 **Implementers** write the code. Well, one of them does. The next is already reading the files it'll need. The first implementer commits, the lead hands the next one its own task, and warms up another.
 
-**Commentator** watches the commits and the session logs. Anything wrong or just weird goes to the lead, which can turn it into the next task.
+**Commentator** watches the commits and the transcripts. Anything wrong or just weird goes to the lead, which can turn it into the next task.
 
 **You** watch the code change and steer the lead — this next, not that, stop here. You stay on this run because new code arrives at a pace that keeps you engaged.
 

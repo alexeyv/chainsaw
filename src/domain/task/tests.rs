@@ -128,7 +128,7 @@ commit_sha: none
 created_at: 2023-11-14T22:13:20Z
 retry_of_task_id: none
 reason: none
-log_offset: 0
+transcript_offset: 0
 base_head: none
 predicted_file_list: none
 context_size_start: none
@@ -160,7 +160,7 @@ commit_sha: "abc123"
 created_at: 2023-11-14T22:13:20Z
 retry_of_task_id: 2
 reason: "gate passed"
-log_offset: 100
+transcript_offset: 100
 base_head: "base123"
 predicted_file_list: ["src/a.rs", "src/b.rs"]
 context_size_start: 900
@@ -314,13 +314,13 @@ events:
   }
 
   #[test]
-  fn should_fail_when_the_log_offset_is_negative() {
+  fn should_fail_when_the_transcript_offset_is_negative() {
     let error = build(TaskSpec {
-      log_offset: -1,
+      transcript_offset: -1,
       ..drafted_task()
     })
     .unwrap_err();
-    assert_eq!(error.to_string(), "log_offset cannot be negative");
+    assert_eq!(error.to_string(), "transcript_offset cannot be negative");
   }
 
   #[test]

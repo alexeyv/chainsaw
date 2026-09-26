@@ -138,7 +138,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
         result = self.assert_success(self.dispatch(task))
         state = self.assert_success(self.cli("state"))
-        log = self.session_log("worker").read_text()
+        log = self.session_transcript("worker").read_text()
 
         self.assertIn("task 1 dispatched to worker", result.stdout)
         self.assertIn("1 dispatched", state.stdout)
@@ -152,7 +152,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
         dispatched = self.assert_success(self.dispatch(task))
         dispatch_state = self.assert_success(self.cli("state"))
-        dispatch_offset = self.session_log("worker").stat().st_size
+        dispatch_offset = self.session_transcript("worker").stat().st_size
         observed_head = self.commit_file(
             "between.txt", "between dispatch and observation\n",
             "test: move head before observation",
@@ -163,9 +163,9 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         flight_state = self.wait_for_state(f"{task} in_flight")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             recorded_offset, base_head = database.execute(
-                "select log_offset, base_head from tasks where id=?", (task,),
+                "select transcript_offset, base_head from tasks where id=?", (task,),
             ).fetchone()
 
         self.assertIn(f"task {task} dispatched to worker", dispatched.stdout)
@@ -489,7 +489,7 @@ class VerificationContractTests(SupervisorContractCase):
 
         result = self.cli("accept", str(task))
 
-        self.assert_failure(result, "no commit found in the implementer's log")
+        self.assert_failure(result, "no commit found in the implementer's transcript")
 
     def test_accept_rejects_a_dirty_tree(self):
         task, _ = self.prepare_committed_task()
@@ -709,8 +709,8 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         )
         self.assertEqual(resolutions["resolutions"][0]["verdict"], "dropped")
         self.assertEqual(second_commentator_view, resolutions)
-        self.assertFalse((self.logs_dir / "chainsaw-comments.md").exists())
-        self.assertFalse((self.logs_dir / "chainsaw-dispositions.md").exists())
+        self.assertFalse((self.transcripts_dir / "chainsaw-comments.md").exists())
+        self.assertFalse((self.transcripts_dir / "chainsaw-dispositions.md").exists())
 
     def test_task_filtered_cursor_does_not_skip_later_relevant_observations(self):
         relevant_task = self.new_task(text="Relevant task.", files="relevant.txt")
@@ -774,10 +774,10 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         ), "finding 1 is already resolved")
 
     def test_legacy_commands_are_absent_and_historical_files_are_untouched(self):
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
         historical = {
-            self.logs_dir / "chainsaw-comments.md": "historical comments\n",
-            self.logs_dir / "chainsaw-dispositions.md": "historical dispositions\n",
+            self.transcripts_dir / "chainsaw-comments.md": "historical comments\n",
+            self.transcripts_dir / "chainsaw-dispositions.md": "historical dispositions\n",
         }
         for path, text in historical.items():
             path.write_text(text)
@@ -849,7 +849,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             sequence=0,
             drop_prompts=0,
         )
-        log = self.logs_dir_for(harness) / f"{session_id}.jsonl"
+        log = self.transcripts_dir_for(harness) / f"{session_id}.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "type": "assistant",
@@ -868,7 +868,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertEqual(context.stdout, "lead\t123\n")
 
-    def test_missing_lead_log_is_not_reported_as_zero_context(self):
+    def test_missing_lead_transcript_is_not_reported_as_zero_context(self):
         daemon = self.start_daemon()
         state = self.wait_for_state("context UNAVAILABLE")
         context = self.assert_success(self.cli("context", "lead"))
@@ -878,7 +878,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assertIn("lead stop threshold disabled", state.stdout)
         self.assertEqual(
             context.stdout,
-            "lead\tUNAVAILABLE (session log not found)\n",
+            "lead\tUNAVAILABLE (transcript not found)\n",
         )
 
     def test_daemon_observes_a_commit_marker_and_marks_task_committed(self):
@@ -928,7 +928,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         entries = [
             json.loads(line)
-            for line in self.session_log(commentator).read_text().splitlines()
+            for line in self.session_transcript(commentator).read_text().splitlines()
         ]
         queued = [
             entry for entry in entries
@@ -989,7 +989,7 @@ class BusySessionContractTests(SupervisorContractCase):
         self.write_settings("prompt-timeout-seconds = 1\n")
         self.launch()
         self.set_agent_status("worker", "busy")
-        log = self.session_log("worker")
+        log = self.session_transcript("worker")
         seen_while_busy = []
 
         def release():
@@ -1058,7 +1058,7 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
             if operation["operation"] == "prompt"
             and operation["session_id"].startswith("commentator-")
         )
-        prefix = "Session-log directory: "
+        prefix = "Transcripts directory: "
         announced = next(
             line.removeprefix(prefix)
             for line in prompt.splitlines() if line.startswith(prefix)
@@ -1074,8 +1074,8 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         self.assert_success(self.cli("launch", "worker"))
 
         self.assertTrue(
-            (self.logs_dir / "chainsaw-supervisor.db").is_file(),
-            f"no database under {self.logs_dir}",
+            (self.transcripts_dir / "chainsaw-supervisor.db").is_file(),
+            f"no database under {self.transcripts_dir}",
         )
 
 
@@ -1092,7 +1092,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.launch("impl-1")
         self.launch("impl-2")
         self.append_text("impl-1", "working")
-        existing = self.session_log("impl-1")
+        existing = self.session_transcript("impl-1")
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "watch-transcripts", "--interval-ms", "200"]
         process = subprocess.Popen(
@@ -1106,7 +1106,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.append_text("impl-1", "still working")
         self.append_text("impl-2", "starting")
         grown = existing.stat().st_size - before
-        new = self.session_log("impl-2")
+        new = self.session_transcript("impl-2")
 
         line = process.stdout.readline()
         expected = sorted([
@@ -1119,8 +1119,8 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         )
 
     def test_ignores_a_transcript_that_belongs_to_no_live_implementer(self):
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        stray = self.logs_dir / "stray.jsonl"
+        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        stray = self.transcripts_dir / "stray.jsonl"
         stray.write_text("{}\n")
         self.launch("worker")
         self.append_text("worker", "working")
@@ -1158,7 +1158,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.append_text("worker", "still working")
 
         line = process.stdout.readline()
-        worker_id = self.session_log("worker").stem
+        worker_id = self.session_transcript("worker").stem
         self.assertEqual(line, f"transcripts grew: {worker_id} +84\n")
 
     def test_stays_silent_while_nothing_grows(self):
@@ -1277,16 +1277,16 @@ class StandingWarningTests(SupervisorContractCase):
         self.assertNotIn("daemon", again.stderr)
 
     def test_lead_context_is_announced_near_and_past_the_stop_threshold(self):
-        self.write_lead_log(210_000)
+        self.write_lead_transcript(210_000)
         daemon = self.start_daemon()
         self.wait_for_state("context  210000")
         near = self.assert_success(self.cli("state"))
-        self.write_lead_log(260_000)
+        self.write_lead_transcript(260_000)
         self.wait_for_state("context  260000")
         past = self.assert_success(self.cli("state"))
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from events where kind='stop-lead'",
             ).fetchall()
@@ -1303,17 +1303,17 @@ class StandingWarningTests(SupervisorContractCase):
         self.assertFalse(self.runtime_state_path.exists())
 
     def test_a_relaunched_lead_can_cross_the_stop_threshold_again(self):
-        self.write_lead_log(260_000)
+        self.write_lead_transcript(260_000)
         daemon = self.start_daemon()
         self.wait_for_state("context  260000")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        self.write_lead_log(270_000, session_id="session-lead-2")
+        self.write_lead_transcript(270_000, session_id="session-lead-2")
         relaunched = self.start_daemon(session_id="session-lead-2")
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         relaunched.wait(timeout=10)
-        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1321,17 +1321,17 @@ class StandingWarningTests(SupervisorContractCase):
         self.assertEqual(events, [("context 260000",), ("context 270000",)])
 
     def test_a_restarted_daemon_keeps_the_lead_latch_for_the_same_session(self):
-        self.write_lead_log(260_000)
+        self.write_lead_transcript(260_000)
         daemon = self.start_daemon()
         self.wait_for_state("context  260000")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        self.write_lead_log(270_000)
+        self.write_lead_transcript(270_000)
         restarted = self.start_daemon()
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
-        with sqlite3.connect(self.logs_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1454,7 +1454,7 @@ class SettingsContractTests(SupervisorContractCase):
         self.launch()
         commentator = self.start_commentator()
         self.assert_success(self.dispatch(task_id))
-        database = self.logs_dir / "chainsaw-supervisor.db"
+        database = self.transcripts_dir / "chainsaw-supervisor.db"
         daemon = self.start_daemon()
         self.append_text("worker", "fixture work started")
         self.wait_for_state(f"{task_id} in_flight")

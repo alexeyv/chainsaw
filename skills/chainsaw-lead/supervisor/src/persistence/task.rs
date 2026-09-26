@@ -13,7 +13,7 @@ struct TaskRow {
   commit_sha: Option<String>,
   created_at: i64,
   retry_of_task_id: Option<i64>,
-  log_offset: i64,
+  transcript_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
   context_size_start: Option<i64>,
@@ -23,7 +23,7 @@ struct TaskRow {
 
 const SELECT: &str = "
   select id, text, predicted_files, predicted_lines, session_id,
-         commit_sha, created_at, retry_of_task_id, log_offset,
+         commit_sha, created_at, retry_of_task_id, transcript_offset,
          base_head, predicted_file_list, context_size_start,
          commentary_requested_at, commentary_delivered_at
   from tasks
@@ -128,7 +128,7 @@ pub fn dispatch(
   transaction: &Transaction<'_>,
   id: i64,
   session_id: i64,
-  log_offset: i64,
+  transcript_offset: i64,
   reason: Option<&str>,
 ) -> Result<Task> {
   advance(
@@ -138,19 +138,24 @@ pub fn dispatch(
     reason,
     |current| {
       same_fact(current, "session", current.session_id(), Some(session_id))?;
-      same_fact(current, "log offset", current.log_offset(), log_offset)
+      same_fact(
+        current,
+        "transcript offset",
+        current.transcript_offset(),
+        transcript_offset,
+      )
     },
     |transaction| {
       transaction.execute(
-        "update tasks set session_id=?, log_offset=? where id=?",
-        params![session_id, log_offset, id],
+        "update tasks set session_id=?, transcript_offset=? where id=?",
+        params![session_id, transcript_offset, id],
       )?;
       Ok(())
     },
   )
 }
 
-/// The dispatch `log_offset` stays as the measurement baseline.
+/// The dispatch `transcript_offset` stays as the measurement baseline.
 pub fn take_flight(
   transaction: &Transaction<'_>,
   id: i64,
@@ -320,7 +325,9 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     commit_sha: row.get("commit_sha")?,
     created_at: row.get("created_at")?,
     retry_of_task_id: row.get("retry_of_task_id")?,
-    log_offset: row.get::<_, Option<i64>>("log_offset")?.unwrap_or_default(),
+    transcript_offset: row
+      .get::<_, Option<i64>>("transcript_offset")?
+      .unwrap_or_default(),
     base_head: row.get("base_head")?,
     predicted_file_list,
     context_size_start: row.get("context_size_start")?,
@@ -340,7 +347,7 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.commit_sha,
     time(row.created_at, "created_at")?,
     row.retry_of_task_id,
-    row.log_offset,
+    row.transcript_offset,
     row.base_head,
     row.predicted_file_list,
     row.context_size_start,

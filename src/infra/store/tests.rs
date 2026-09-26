@@ -27,7 +27,7 @@ mod write_transaction {
     db.execute_batch("create table counter(value int); insert into counter values(0);")?;
     let store = Store {
       run_dir: PathBuf::new(),
-      logs_dir: PathBuf::new(),
+      transcripts_dir: PathBuf::new(),
       path: path.clone(),
       db,
     };
