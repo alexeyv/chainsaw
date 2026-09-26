@@ -52,6 +52,9 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+  /// Every agent the supervisor accepts.
+  pub const ALL: [Self; 1] = [Self::Claude];
+
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Claude => "claude",

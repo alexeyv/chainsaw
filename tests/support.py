@@ -173,6 +173,14 @@ class SupervisorContractCase(unittest.TestCase):
         """Put a chainsaw.toml in the run directory; the next process reads it."""
         (self.run_dir / "chainsaw.toml").write_text(text)
 
+    def session_agent(self, name):
+        """The agent the live session row named `name` was launched with."""
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+            (agent,) = database.execute(
+                "select agent from sessions where name=? and stopped_at is null", (name,)
+            ).fetchone()
+        return agent
+
     def launch_args(self, name):
         """The Claude flags the runtime was handed when it last started `name`."""
         return next(

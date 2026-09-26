@@ -1448,9 +1448,35 @@ class SettingsContractTests(SupervisorContractCase):
 
         self.assert_failure(
             result,
-            "invalid --set implementer.model=x: unknown field `model`, expected `args`",
+            "invalid --set implementer.model=x: unknown field `model`, expected `agent` or `args`",
         )
         self.assert_success(self.cli("state"))
+
+    def test_a_role_may_name_its_agent_and_the_row_records_it(self):
+        self.write_settings('[implementer]\nagent = "claude"\n')
+
+        self.launch()
+
+        self.assertEqual(self.launch_args("worker"), IMPLEMENTER_DEFAULTS)
+        self.assertEqual(self.session_agent("worker"), "claude")
+
+    def test_an_unknown_agent_in_the_file_fails_naming_the_role_and_the_accepted_agents(self):
+        self.write_settings('[commentator]\nagent = "cursor"\n')
+
+        result = self.cli("state")
+
+        self.assert_failure(
+            result, 'invalid settings in chainsaw.toml: unknown agent "cursor", expected `claude`'
+        )
+        self.assert_failure(result, "in `commentator.agent`")
+
+    def test_an_unknown_agent_in_a_set_fails_naming_the_set(self):
+        result = self.cli("--set", "implementer.agent=cursor", "launch", "worker")
+
+        self.assert_failure(
+            result, 'invalid --set implementer.agent=cursor: unknown agent "cursor", expected `claude`'
+        )
+        self.assert_success(self.cli("launch", "worker"))
 
     def test_an_invalid_file_fails_every_command_until_it_is_fixed(self):
         self.write_settings('[reviewer]\nargs = "x"\n')

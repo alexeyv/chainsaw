@@ -379,7 +379,7 @@ fn cmd_launch(
   name: &str,
   launch_options: LaunchOptions,
 ) -> Result<()> {
-  let agent = agent::for_role(launch_options.kind);
+  let agent = settings.launch_agent(launch_options.kind);
   let started = runtime.start(StartSession {
     id: name,
     run_dir: &store.run_dir,

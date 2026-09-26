@@ -12,6 +12,7 @@ use toml::{Table, Value};
 
 use super::agent;
 use super::session_runtime::SessionKind;
+use crate::domain::AgentKind;
 
 pub const FILE_NAME: &str = "chainsaw.toml";
 const LEGACY_FILE_NAME: &str = "chainsaw.json";
@@ -19,8 +20,15 @@ const LEGACY_FILE_NAME: &str = "chainsaw.json";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
   prompt_timeout: Duration,
-  implementer_args: Vec<String>,
-  commentator_args: Vec<String>,
+  implementer: Launch,
+  commentator: Launch,
+}
+
+/// What a session of one kind starts with: its agent and that agent's flags
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launch {
+  agent: AgentKind,
+  args: Vec<String>,
 }
 
 impl Settings {
@@ -63,17 +71,29 @@ impl Settings {
   }
 
   fn build(file: File) -> Result<Self> {
-    let launch = |kind, role: Option<Role>| {
+    let launch = |kind: SessionKind, role: Option<Role>| -> Result<Launch> {
+      let role = role.unwrap_or_default();
+      let agent = match role.agent {
+        None => AgentKind::Claude,
+        Some(name) => AgentKind::try_from(name.as_str()).map_err(|error| {
+          anyhow!(
+            "{error}, expected {}\nin `{}.agent`",
+            accepted_agents(),
+            kind.label()
+          )
+        })?,
+      };
       let args = role
-        .unwrap_or_default()
         .args
-        .unwrap_or_else(|| agent::implementing(agent::for_role(kind)).default_args(kind));
-      shell_words::split(&args).map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))
+        .unwrap_or_else(|| agent::implementing(agent).default_args(kind));
+      let args = shell_words::split(&args)
+        .map_err(|error| anyhow!("{error}\nin `{}.args`", kind.label()))?;
+      Ok(Launch { agent, args })
     };
     Ok(Self {
       prompt_timeout: Duration::from_secs(file.prompt_timeout_seconds.unwrap_or(15)),
-      implementer_args: launch(SessionKind::Implementer, file.implementer)?,
-      commentator_args: launch(SessionKind::Commentator, file.commentator)?,
+      implementer: launch(SessionKind::Implementer, file.implementer)?,
+      commentator: launch(SessionKind::Commentator, file.commentator)?,
     })
   }
 
@@ -82,12 +102,33 @@ impl Settings {
     self.prompt_timeout
   }
 
+  /// The agent a session of this kind launches with
+  pub fn launch_agent(&self, kind: SessionKind) -> AgentKind {
+    self.launch(kind).agent
+  }
+
   /// The agent flags a session of this kind launches with
   pub fn launch_args(&self, kind: SessionKind) -> &[String] {
+    &self.launch(kind).args
+  }
+
+  fn launch(&self, kind: SessionKind) -> &Launch {
     match kind {
-      SessionKind::Implementer => &self.implementer_args,
-      SessionKind::Commentator => &self.commentator_args,
+      SessionKind::Implementer => &self.implementer,
+      SessionKind::Commentator => &self.commentator,
     }
+  }
+}
+
+/// The accepted agent names, worded the way serde words an expected field
+fn accepted_agents() -> String {
+  let names: Vec<String> = AgentKind::ALL
+    .iter()
+    .map(|agent| format!("`{agent}`"))
+    .collect();
+  match names.as_slice() {
+    [only] => only.clone(),
+    names => format!("one of {}", names.join(", ")),
   }
 }
 
@@ -101,11 +142,13 @@ struct File {
   commentator: Option<Role>,
 }
 
+/// `agent` names the coding agent the role runs, Claude when left out.
 /// `args` is the whole flag list, split like a shell would (quotes group a
 /// value with spaces) and passed to the agent verbatim
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Role {
+  agent: Option<String>,
   args: Option<String>,
 }
 

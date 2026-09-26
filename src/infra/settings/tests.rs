@@ -69,6 +69,7 @@ mod load {
 prompt-timeout-seconds = 3
 
 [implementer]
+agent = "claude"
 args = "--model sonnet --effort medium"
 
 [commentator]
@@ -78,6 +79,14 @@ args = "--model sonnet --effort medium"
     let settings = Settings::load(dir.path(), &sets(&["commentator.args=--model haiku"])).unwrap();
 
     assert_eq!(settings.prompt_timeout(), Duration::from_secs(3));
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Claude
+    );
+    assert_eq!(
+      settings.launch_agent(SessionKind::Commentator),
+      AgentKind::Claude
+    );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
       ["--model", "sonnet", "--effort", "medium"]
@@ -95,6 +104,14 @@ args = "--model sonnet --effort medium"
     let settings = Settings::load(dir.path(), &[]).unwrap();
 
     assert_eq!(settings.prompt_timeout(), Duration::from_secs(15));
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Claude
+    );
+    assert_eq!(
+      settings.launch_agent(SessionKind::Commentator),
+      AgentKind::Claude
+    );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
       [
@@ -188,6 +205,26 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
+  fn should_fail_naming_the_role_the_value_and_the_accepted_agents_when_the_agent_is_unknown() {
+    let error = load_text("[implementer]\nagent = \"cursor\"\n").unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid settings in chainsaw.toml: unknown agent \"cursor\", expected `claude`\nin `implementer.agent`"
+    );
+  }
+
+  #[test]
+  fn should_fail_naming_the_set_when_it_names_an_unknown_agent() {
+    let error = load_sets(&["commentator.agent=cursor"]).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid --set commentator.agent=cursor: unknown agent \"cursor\", expected `claude`\nin `commentator.agent`"
+    );
+  }
+
+  #[test]
   fn should_fail_naming_the_file_and_the_cause_when_a_key_is_unknown() {
     let error = load_text("promt-timeout-seconds = 1\n").unwrap_err();
 
@@ -203,7 +240,7 @@ args = "--model sonnet --effort medium"
 
     assert_eq!(
       message(&error),
-      "invalid settings in chainsaw.toml: unknown field `model`, expected `args`\nin `implementer`"
+      "invalid settings in chainsaw.toml: unknown field `model`, expected `agent` or `args`\nin `implementer`"
     );
   }
 
@@ -270,7 +307,7 @@ args = "--model sonnet --effort medium"
 
     assert_eq!(
       message(&error),
-      "invalid --set implementer.model=x: unknown field `model`, expected `args`\nin `implementer`"
+      "invalid --set implementer.model=x: unknown field `model`, expected `agent` or `args`\nin `implementer`"
     );
   }
 
