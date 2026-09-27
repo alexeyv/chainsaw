@@ -1,6 +1,4 @@
-use std::env;
 use std::io::Read;
-use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -8,7 +6,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, TimeZone, Utc};
 use regex::Regex;
 use serde_json::json;
-use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
@@ -17,18 +14,23 @@ use crate::domain::{
 };
 use crate::infra::agent;
 use crate::infra::git::Repo;
-use crate::infra::session_runtime::{SessionRuntime, StartSession};
+use crate::infra::session_runtime::SessionRuntime;
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
-use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
+use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::{
   calibration, finding, human_wait, observation, run, run_event, session, task,
 };
 
 mod daemon;
 mod prompt;
+mod sessions;
 
 use prompt::{cmd_prompt, daemon_prompt, status_of};
+use sessions::{
+  cmd_context, cmd_launch, cmd_start_commentator, cmd_watch_transcripts, session_name,
+  session_transcript, task_session,
+};
 
 const LEAD_STOP_TOKENS: u64 = 250_000;
 const LEAD_WARN_TOKENS: u64 = 200_000;
@@ -263,13 +265,6 @@ fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
   }
 }
 
-fn task_session(coordinator: &Coordinator, task: &Task) -> Result<Option<Session>> {
-  Ok(match task.session_id() {
-    Some(session_id) => coordinator.store.read(|tx| session::get(tx, session_id))?,
-    None => None,
-  })
-}
-
 /// Commit ids the task's session may have made since the task was dispatched;
 /// `new_commit_for` decides whether one is really new.
 fn task_commits(coordinator: &Coordinator, task: &Task) -> Result<Vec<String>> {
@@ -285,42 +280,6 @@ fn task_commits(coordinator: &Coordinator, task: &Task) -> Result<Vec<String>> {
     task.transcript_offset() as u64,
     &head,
   ))
-}
-
-/// Where the session's transcript is, or None until its agent has written
-/// one. The search can scan every project directory, so a hit is remembered
-/// on the session row and never looked for again. Nothing in a run deletes a
-/// transcript, so a remembered one that is gone means something outside the
-/// run removed it, and that is an error rather than a session reading zero.
-fn session_transcript(coordinator: &Coordinator, session: &Session) -> Result<Option<PathBuf>> {
-  if let Some(path) = session.transcript() {
-    if !path.is_file() {
-      bail!(
-        "supervisor: transcript of {} vanished from {}",
-        session.name(),
-        path.display()
-      );
-    }
-    return Ok(Some(path.to_owned()));
-  }
-  let found = agent::for_session(session)
-    .transcript(&coordinator.store.run_dir, session.external_session_id());
-  if let Some(path) = &found {
-    coordinator
-      .store
-      .write(|tx| session::record_transcript(tx, session.id(), path))?;
-  }
-  Ok(found)
-}
-
-fn session_name(coordinator: &Coordinator, id: Option<i64>) -> Result<String> {
-  Ok(match id {
-    Some(id) => coordinator
-      .store
-      .read(|tx| session::get(tx, id))?
-      .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
-    None => "-".to_owned(),
-  })
 }
 
 fn last_task_on(coordinator: &Coordinator, session_id: i64) -> Result<Option<Task>> {
@@ -340,71 +299,6 @@ fn stat_number(text: &str, noun: &str) -> i64 {
     .captures(text)
     .and_then(|capture| capture[1].parse().ok())
     .unwrap_or_default()
-}
-
-fn cmd_launch(coordinator: &Coordinator, name: &str, kind: SessionKind) -> Result<()> {
-  let agent = coordinator.settings.launch_agent(kind);
-  let started = coordinator.runtime.start(StartSession {
-    id: name,
-    run_dir: &coordinator.store.run_dir,
-    kind,
-    agent,
-    args: coordinator.settings.launch_args(kind),
-  })?;
-  let external_session_id = started.external_id;
-  let pane_id = started.pane_id;
-  let tab_id = started.tab_id;
-  let launched_head = coordinator.repo.head().ok();
-  coordinator.store.write(|tx| {
-    session::stop_named(tx, name)?;
-    session::create(
-      tx,
-      name,
-      kind.role(),
-      agent,
-      &external_session_id,
-      launched_head.as_deref(),
-    )?;
-    run_event::create(tx, RunEventKind::Launch, name)?;
-    Ok(())
-  })?;
-  println!(
-    "{}",
-    json!({"name": name, "pane_id": pane_id, "tab_id": tab_id, "session_id": external_session_id})
-  );
-  Ok(())
-}
-
-fn cmd_start_commentator(coordinator: &Coordinator, role_prompt: &Path) -> Result<()> {
-  let name = commentator_agent_name(&coordinator.store.run_dir);
-  cmd_launch(coordinator, &name, SessionKind::Commentator)?;
-  let role_prompt = absolute_path(role_prompt)?;
-  cmd_prompt(
-    coordinator,
-    &name,
-    &format!(
-      "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
-      role_prompt.display(),
-      coordinator.store.transcripts_dir.display(),
-      coordinator.store.run_dir.display()
-    ),
-    false,
-    300,
-  )
-}
-
-fn absolute_path(path: &Path) -> Result<PathBuf> {
-  if path.is_absolute() {
-    Ok(path.to_owned())
-  } else {
-    Ok(env::current_dir()?.join(path))
-  }
-}
-
-fn commentator_agent_name(run_dir: &Path) -> String {
-  let digest = Sha1::digest(run_dir.to_string_lossy().as_bytes());
-  let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-  format!("commentator-{}", &hex[..8])
 }
 
 struct NewTaskOptions<'a> {
@@ -1295,64 +1189,6 @@ fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
       busy / 1000,
       human / 1000
     );
-  }
-  Ok(())
-}
-
-/// Runs until killed; the commentator drives it under Claude Code's Monitor
-/// tool, and each printed line is one wake. A wake is a catch-up on what the
-/// implementer did since the commentator's last look, not a review trigger;
-/// reviews are triggered by commits.
-///
-/// Only implementer transcripts count. The commentator's own transcript grows
-/// on every wake, so watching it would wake the commentator for the sole
-/// reason that it was just woken; the lead's transcript is not its material
-/// either.
-fn cmd_watch_transcripts(coordinator: &Coordinator, interval_ms: u64) -> Result<()> {
-  use std::io::Write;
-
-  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(coordinator)?);
-  loop {
-    std::thread::sleep(Duration::from_millis(interval_ms));
-    if let Some(line) = monitor.poll(&implementer_transcripts(coordinator)?) {
-      println!("{line}");
-      std::io::stdout().flush()?;
-    }
-  }
-}
-
-/// The transcripts of the live implementers that have one, by session id.
-fn implementer_transcripts(coordinator: &Coordinator) -> Result<Vec<(String, PathBuf)>> {
-  let mut transcripts = Vec::new();
-  for session in coordinator
-    .store
-    .read(session::all)?
-    .into_iter()
-    .filter(Session::can_take_task)
-  {
-    if let Some(path) = session_transcript(coordinator, &session)? {
-      transcripts.push((session.external_session_id().to_owned(), path));
-    }
-  }
-  Ok(transcripts)
-}
-
-fn cmd_context(coordinator: &Coordinator, name: Option<&str>) -> Result<()> {
-  for session in coordinator
-    .store
-    .read(session::all)?
-    .into_iter()
-    .filter(|session| name.is_none_or(|name| session.name() == name))
-  {
-    if let Some(transcript) = session_transcript(coordinator, &session)? {
-      println!(
-        "{}\t{}",
-        session.name(),
-        agent::for_session(&session).context_size(&transcript)
-      );
-    } else {
-      println!("{}\tUNAVAILABLE (transcript not found)", session.name());
-    }
   }
   Ok(())
 }
