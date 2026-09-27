@@ -2,6 +2,7 @@ pub mod calibration;
 pub mod finding;
 pub mod observation;
 pub mod run;
+pub mod run_event;
 pub mod session;
 pub mod task;
 pub mod task_event;

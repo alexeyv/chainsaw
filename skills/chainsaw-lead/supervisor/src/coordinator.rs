@@ -18,14 +18,15 @@ use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{
-  AgentKind, ContextSize, FindingVerdict, Role, Session, SessionKind, Task, TaskEvent, TaskState,
+  AgentKind, ContextSize, FindingVerdict, Role, RunEventKind, Session, SessionKind, Task,
+  TaskEvent, TaskState,
 };
 use crate::infra::agent::{self, Agent, PROMPT_ATTEMPTS, PromptState};
 use crate::infra::session_runtime::{SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
 use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
-use crate::persistence::{calibration, finding, observation, run, session, task};
+use crate::persistence::{calibration, finding, observation, run, run_event, session, task};
 
 const LEAD_STOP_TOKENS: u64 = 250_000;
 const LEAD_WARN_TOKENS: u64 = 200_000;
@@ -393,8 +394,8 @@ fn cmd_launch(
     &external_session_id,
     launched_head.as_deref(),
   )?;
+  run_event::create(&transaction, RunEventKind::Launch, name)?;
   transaction.commit()?;
-  store.event("launch", name)?;
   println!(
     "{}",
     json!({"name": name, "pane_id": pane_id, "tab_id": tab_id, "session_id": external_session_id})
@@ -467,7 +468,7 @@ fn cmd_prompt(
           params![now(), prompt_id],
         )?;
         if state == PromptState::Queued {
-          store.event("prompt-queued", name)?;
+          record_run_event(store, RunEventKind::PromptQueued, name)?;
         }
         FileExt::unlock(&lock)?;
         if wait {
@@ -487,7 +488,7 @@ fn cmd_prompt(
       eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
     }
   }
-  store.event("prompt-failed", name)?;
+  record_run_event(store, RunEventKind::PromptFailed, name)?;
   FileExt::unlock(&lock)?;
   bail!("supervisor: prompt to {name} never showed up in its transcript after {attempts} attempts")
 }
@@ -695,8 +696,9 @@ fn cmd_dispatch(
   // The task is only dispatched once the prompt is in the transcript, so a
   // send that never shows up there leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
-    store.event(
-      "dispatch-failed",
+    record_run_event(
+      store,
+      RunEventKind::DispatchFailed,
       &format!("task {task_id} -> {implementer}: prompt never showed up in the transcript"),
     )?;
     return Err(error);
@@ -710,8 +712,12 @@ fn cmd_dispatch(
     &base_head,
     reason,
   )?;
+  run_event::create(
+    &transaction,
+    RunEventKind::Dispatch,
+    &format!("task {task_id} -> {implementer}"),
+  )?;
   transaction.commit()?;
-  store.event("dispatch", &format!("task {task_id} -> {implementer}"))?;
   println!(
     "task {task_id} dispatched to {implementer}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
   );
@@ -846,8 +852,12 @@ fn cmd_task_record_commit(
     );
   }
   task::record_commit(&transaction, task_id, sha, Some(reason))?;
+  run_event::create(
+    &transaction,
+    RunEventKind::ForcedCommit,
+    &format!("task {task_id} {sha}: {reason}"),
+  )?;
   transaction.commit()?;
-  store.event("forced-commit", &format!("task {task_id} {sha}: {reason}"))?;
   println!("task {task_id} commit recorded by force: {sha}");
   Ok(())
 }
@@ -876,8 +886,12 @@ fn cmd_task_record_commentary(
   if !task::record_commentary_delivery(&transaction, task_id)? {
     bail!("supervisor: commentary delivery is already recorded for task {task_id}");
   }
+  run_event::create(
+    &transaction,
+    RunEventKind::ForcedCommentary,
+    &format!("task {task_id}: {reason}"),
+  )?;
   transaction.commit()?;
-  store.event("forced-commentary", &format!("task {task_id}: {reason}"))?;
   println!("task {task_id} commentary delivery recorded by force");
   Ok(())
 }
@@ -913,8 +927,12 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
   }
   let transaction = store.write_transaction()?;
   task::accept(&transaction, task_id, reason)?;
+  run_event::create(
+    &transaction,
+    RunEventKind::Accepted,
+    &format!("task {task_id}: {reason}"),
+  )?;
   transaction.commit()?;
-  store.event("accepted", &format!("task {task_id}: {reason}"))?;
   println!("task {task_id} accepted without the gate: {reason}");
   Ok(())
 }
@@ -1029,8 +1047,12 @@ fn abort_task(
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
   let transaction = store.write_transaction()?;
   task::abort(&transaction, task_id, reason)?;
+  run_event::create(
+    &transaction,
+    RunEventKind::Aborted,
+    &format!("task {task_id}: {reason}"),
+  )?;
   transaction.commit()?;
-  store.event("aborted", &format!("task {task_id}: {reason}"))?;
   if let Some(session_id) = task.session_id()
     && let Some(session) = session_snapshot(store, session_id)?
     && session.is_live()
@@ -1050,8 +1072,12 @@ fn abort_task(
       .with_context(|| format!("abort message did not reach {}", session.name()))
     });
     match outcome {
-      Ok(()) => store.event("abort-interrupt", &detail)?,
-      Err(error) => store.event("abort-unreachable", &format!("{detail}: {error}"))?,
+      Ok(()) => record_run_event(store, RunEventKind::AbortInterrupt, &detail)?,
+      Err(error) => record_run_event(
+        store,
+        RunEventKind::AbortUnreachable,
+        &format!("{detail}: {error}"),
+      )?,
     }
   }
   let failures = failures_in_lineage(store, task_id)?;
@@ -1347,20 +1373,43 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
   if open_wait.is_some() {
     println!("  (a human wait is open)");
   }
-  let mut statement = store.db.prepare(
-        "select at,kind,detail from events where kind in ('stop-lead','kick','compact','prompt-queued','prompt-failed','accepted','forced-commit','forced-commentary','commentary-wake','abort-interrupt','abort-unreachable') order by at desc limit 5",
-    )?;
-  let events = statement.query_map([], |row| {
-    Ok((
-      row.get::<_, i64>(0)?,
-      row.get::<_, String>(1)?,
-      row.get::<_, String>(2)?,
-    ))
-  })?;
+  let transaction = store.db.unchecked_transaction()?;
+  let events = run_event::recent(&transaction, STATE_EVENT_KINDS, 5)?;
+  transaction.commit()?;
   for event in events {
-    let (timestamp, kind, detail) = event?;
-    println!("  {} {kind} {detail}", clock_time(timestamp));
+    println!(
+      "  {} {} {}",
+      clock_time(event.created_at().timestamp_millis()),
+      event.kind(),
+      event.detail()
+    );
   }
+  Ok(())
+}
+
+/// The supervisor actions worth a line at the bottom of `state`: prompts it
+/// pushed at a session or gave up on, the overrides the lead forced, and how
+/// an abort reached its session. Launches, dispatches, commits and the
+/// daemon's own lifecycle are visible elsewhere in `state` and stay out.
+const STATE_EVENT_KINDS: &[RunEventKind] = &[
+  RunEventKind::StopLead,
+  RunEventKind::Kick,
+  RunEventKind::Compact,
+  RunEventKind::PromptQueued,
+  RunEventKind::PromptFailed,
+  RunEventKind::Accepted,
+  RunEventKind::ForcedCommit,
+  RunEventKind::ForcedCommentary,
+  RunEventKind::CommentaryWake,
+  RunEventKind::AbortInterrupt,
+  RunEventKind::AbortUnreachable,
+];
+
+/// Journals one supervisor action that belongs to no other write.
+fn record_run_event(store: &Store, kind: RunEventKind, detail: &str) -> Result<()> {
+  let transaction = store.write_transaction()?;
+  run_event::create(&transaction, kind, detail)?;
+  transaction.commit()?;
   Ok(())
 }
 
@@ -1515,8 +1564,8 @@ fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
 fn cmd_stop(store: &Store) -> Result<()> {
   let transaction = store.write_transaction()?;
   run::request_stop(&transaction)?;
+  run_event::create(&transaction, RunEventKind::Stop, "run ended by the lead")?;
   transaction.commit()?;
-  store.event("stop", "run ended by the lead")?;
   println!("supervisor: stopped; the daemon will exit on its next poll");
   Ok(())
 }
@@ -1531,7 +1580,11 @@ fn daemon_prompt(
   match cmd_prompt(store, runtime, settings, name, text, false, 300) {
     Ok(()) => true,
     Err(error) => {
-      let _ = store.event("prompt-unreachable", &format!("{name}: {error}"));
+      let _ = record_run_event(
+        store,
+        RunEventKind::PromptUnreachable,
+        &format!("{name}: {error}"),
+      );
       false
     }
   }
@@ -1548,8 +1601,12 @@ fn daemon(
   register_lead(store, lead, lead_session_id)?;
   let transaction = store.write_transaction()?;
   run::clear_stop_request(&transaction)?;
+  run_event::create(
+    &transaction,
+    RunEventKind::DaemonStart,
+    &format!("pid {}", std::process::id()),
+  )?;
   transaction.commit()?;
-  store.event("daemon-start", &format!("pid {}", std::process::id()))?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut missing_transcripts = HashSet::new();
   let mut compacting = false;
@@ -1577,7 +1634,7 @@ fn daemon(
           };
           let detail = format!("{name} ({}): transcript not found{danger}", session.role());
           eprintln!("WARNING: {detail}");
-          store.event("transcript-missing", &detail)?;
+          record_run_event(store, RunEventKind::TranscriptMissing, &detail)?;
         }
         continue;
       };
@@ -1586,8 +1643,9 @@ fn daemon(
           "supervisor: transcript found for {name}: {}",
           transcript.display()
         );
-        store.event(
-          "transcript-found",
+        record_run_event(
+          store,
+          RunEventKind::TranscriptFound,
           &format!("{name}: {}", transcript.display()),
         )?;
       }
@@ -1623,7 +1681,11 @@ fn daemon(
     }
     thread::sleep(poll_interval);
   }
-  store.event("daemon-exit", "")
+  record_run_event(
+    store,
+    RunEventKind::DaemonExit,
+    &format!("pid {}", std::process::id()),
+  )
 }
 
 /// The lead is started by the human in Claude Code, so the daemon registers
@@ -1672,9 +1734,9 @@ fn kick_if_stalled(
       .is_some_and(|status| matches!(status, "idle" | "done"))
     && daemon_prompt(store, runtime, settings, session.name(), "continue")
   {
-    store.event("kick", session.name())?;
     let transaction = store.write_transaction()?;
     session::record_kick(&transaction, session.id())?;
+    run_event::create(&transaction, RunEventKind::Kick, session.name())?;
     transaction.commit()?;
   }
   Ok(())
@@ -1712,8 +1774,12 @@ fn observe_implementer(
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
+    run_event::create(
+      &transaction,
+      RunEventKind::Committed,
+      &format!("task {} {sha}", task.id()),
+    )?;
     transaction.commit()?;
-    store.event("committed", &format!("task {} {sha}", task.id()))?;
   } else {
     kick_if_stalled(store, runtime, settings, session, quiet)?;
   }
@@ -1752,11 +1818,14 @@ fn observe_commentator(
     let abbreviation = sha.get(..7).unwrap_or(sha);
     if agent.output_mentions(transcript, abbreviation) {
       let transaction = store.write_transaction()?;
-      let recorded = task::record_commentary_delivery(&transaction, task.id())?;
-      transaction.commit()?;
-      if recorded {
-        store.event("commentary-delivered", &format!("task {}", task.id()))?;
+      if task::record_commentary_delivery(&transaction, task.id())? {
+        run_event::create(
+          &transaction,
+          RunEventKind::CommentaryDelivered,
+          &format!("task {}", task.id()),
+        )?;
       }
+      transaction.commit()?;
     } else if task.commentary_requested_at().is_none()
       && daemon_prompt(
         store,
@@ -1770,11 +1839,14 @@ fn observe_commentator(
       )
     {
       let transaction = store.write_transaction()?;
-      let recorded = task::record_commentary_request(&transaction, task.id())?;
-      transaction.commit()?;
-      if recorded {
-        store.event("commentary-wake", &format!("task {} {sha}", task.id()))?;
+      if task::record_commentary_request(&transaction, task.id())? {
+        run_event::create(
+          &transaction,
+          RunEventKind::CommentaryWake,
+          &format!("task {} {sha}", task.id()),
+        )?;
       }
+      transaction.commit()?;
     }
   }
   if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
@@ -1786,7 +1858,11 @@ fn observe_commentator(
       agent.compact_prompt(),
     ) {
       *compacting = true;
-      store.event("compact", &format!("{} at {context}", session.name()))?;
+      record_run_event(
+        store,
+        RunEventKind::Compact,
+        &format!("{} at {context}", session.name()),
+      )?;
     }
   } else if context.is_under(COMMENTATOR_COMPACT_TOKENS) {
     *compacting = false;
@@ -1802,8 +1878,12 @@ fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Resul
   if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
     let transaction = store.write_transaction()?;
     session::record_over_limit(&transaction, session.id())?;
+    run_event::create(
+      &transaction,
+      RunEventKind::StopLead,
+      &format!("context {context}"),
+    )?;
     transaction.commit()?;
-    store.event("stop-lead", &format!("context {context}"))?;
   }
   Ok(())
 }

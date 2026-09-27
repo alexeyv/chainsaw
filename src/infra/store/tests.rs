@@ -106,13 +106,24 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
     [],
     |row| row.get::<_, i64>(0),
   )?;
+  let run_event_columns = db.query_row(
+    "select count(*) from pragma_table_info('run_events')
+       where name in ('id', 'kind', 'detail', 'created_at') and \"notnull\"=1",
+    [],
+    |row| row.get::<_, i64>(0),
+  )?;
+  let legacy_event_tables = db.query_row(
+    "select count(*) from sqlite_schema where type='table' and name='events'",
+    [],
+    |row| row.get::<_, i64>(0),
+  )?;
   let run_rows = db.query_row(
     "select count(*) from run where daemon_seen_at is null
        and stop_requested_at is null and state_read_at is null",
     [],
     |row| row.get::<_, i64>(0),
   )?;
-  assert_eq!(version, 2);
+  assert_eq!(version, 1);
   assert_eq!(task_id_required, 1);
   assert_eq!(task_foreign_keys, 2);
   assert_eq!(observation_foreign_keys, 1);
@@ -120,6 +131,8 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
   assert_eq!(legacy_finding_columns, 0);
   assert_eq!(commentary_columns, 2);
   assert_eq!(commentary_delivery_tables, 0);
+  assert_eq!(run_event_columns, 3);
+  assert_eq!(legacy_event_tables, 0);
   assert_eq!(run_rows, 1);
   Ok(())
 }
@@ -127,13 +140,13 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
 #[test]
 fn refuses_a_database_from_another_schema_version() -> Result<()> {
   let db = Connection::open_in_memory()?;
-  db.execute_batch("pragma user_version=1;")?;
+  db.execute_batch("pragma user_version=2;")?;
 
   let error = initialize_schema(&db).unwrap_err();
 
   assert_eq!(
     error.to_string(),
-    "database schema version 1 is unsupported; expected 2: remove the database and start a new run"
+    "database schema version 2 is unsupported; expected 1: remove the database and start a new run"
   );
   Ok(())
 }

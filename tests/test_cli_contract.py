@@ -607,6 +607,7 @@ class FreshSessionContractTests(SupervisorContractCase):
         self.assertIn("task 1 accepted without the gate", accepted.stdout)
         self.assertIn("1 accepted", state.stdout)
         self.assertIn("reason: gate failure was a known false positive", state.stdout)
+        self.assertIn("accepted task 1: gate failure was a known false positive", state.stdout)
 
 
 class CommunicationProtocolContractTests(SupervisorContractCase):
@@ -1313,9 +1314,12 @@ class StandingWarningTests(SupervisorContractCase):
         past = self.assert_success(self.cli("state"))
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
+        # The latch is journaled after the reading `past` waited for, so it is
+        # only certain to be in the tail once the daemon has exited.
+        after = self.assert_success(self.cli("state"))
         with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
-                "select detail from events where kind='stop-lead'",
+                "select detail from run_events where kind='stop-lead'",
             ).fetchall()
 
         self.assertIn("WARNING: lead context 210000 of 250000", near.stderr)
@@ -1326,6 +1330,7 @@ class StandingWarningTests(SupervisorContractCase):
             past.stderr,
         )
         self.assertEqual(events, [("context 260000",)])
+        self.assertIn("stop-lead context 260000", after.stdout)
         # The runtime was never touched: no prompt was pushed at the lead.
         self.assertFalse(self.runtime_state_path.exists())
 
@@ -1342,7 +1347,7 @@ class StandingWarningTests(SupervisorContractCase):
         relaunched.wait(timeout=10)
         with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
-                "select detail from events where kind='stop-lead' order by rowid",
+                "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
 
         self.assertEqual(events, [("context 260000",), ("context 270000",)])
@@ -1360,7 +1365,7 @@ class StandingWarningTests(SupervisorContractCase):
         restarted.wait(timeout=10)
         with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
-                "select detail from events where kind='stop-lead' order by rowid",
+                "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
 
         self.assertEqual(events, [("context 260000",)])
@@ -1623,7 +1628,7 @@ class SettingsContractTests(SupervisorContractCase):
                 )
             ]
             unreachable = connection.execute(
-                "select detail from events where kind='prompt-unreachable'"
+                "select detail from run_events where kind='prompt-unreachable'"
             ).fetchall()
         self.assertIn("committed_unverified", states, self.daemon_report())
         self.assertEqual(unreachable, [])

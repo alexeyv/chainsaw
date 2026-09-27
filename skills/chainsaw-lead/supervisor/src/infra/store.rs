@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::agent::Claude;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA: &str = r#"
 create table run(
@@ -51,8 +51,10 @@ create table findings(
   verdict_reason text, fix_task_id int references tasks(id),
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started int, ended int);
-create table events(at int, kind text, detail text);
-pragma user_version=2;
+create table run_events(
+  id integer primary key autoincrement,
+  kind text not null, detail text not null, created_at int not null);
+pragma user_version=1;
 "#;
 
 pub struct Store {
@@ -79,14 +81,6 @@ impl Store {
       path,
       db,
     })
-  }
-
-  pub fn event(&self, kind: &str, detail: &str) -> Result<()> {
-    self.db.execute(
-      "insert into events values(?,?,?)",
-      params![now(), kind, detail],
-    )?;
-    Ok(())
   }
 
   /// Reserve the SQLite writer lock before any reads can make an upgrade fail fast.

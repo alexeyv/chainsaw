@@ -5,8 +5,8 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, Observation, Role, Run, Session,
-  Task, TaskEvent, TaskState,
+  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, Observation, Role, Run, RunEvent,
+  RunEventKind, Session, Task, TaskEvent, TaskState,
 };
 
 pub fn created_at() -> DateTime<Utc> {
@@ -173,6 +173,20 @@ pub fn format_observation(observation: &Observation) -> String {
     format_option(observation.task_id()),
     observation.text(),
     format_time(observation.created_at()),
+  )
+}
+
+pub fn run_event(id: i64, kind: RunEventKind, detail: &str) -> Result<RunEvent> {
+  RunEvent::new(id, kind, detail.to_owned(), created_at())
+}
+
+pub fn format_run_event(event: &RunEvent) -> String {
+  format!(
+    "id: {}\nkind: {}\ndetail: {:?}\ncreated_at: {}",
+    event.id(),
+    event.kind(),
+    event.detail(),
+    format_time(event.created_at()),
   )
 }
 

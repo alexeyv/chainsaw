@@ -2,6 +2,8 @@
 
 **`Run`** (`run.rs`): the run as a whole. Always only one, backed by single row database table. Basically, a persistent store for some state that doesn't have any better home. 
 
+**`RunEvent`** (`run_event.rs`): supervisor's operational journal (launched, kicked, compacted, stopped…).
+
 **`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Records the agent it was launched with and keeps it for life. Has zero-to-many Tasks.
 
 **`Task`** (`task.rs`): One unit of work. Typically belongs to an implementer Session, sometimes more than one Task belong to the same implementer Session. May be a retry of another Task. Owns ordered list of TaskEvents. The last TaskEvent in the list determines Task's state. Also owns zero-to-many Findings, Observations, and Calibrations.  
