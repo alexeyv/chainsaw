@@ -11,7 +11,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, TimeZone, Utc};
 use fs2::FileExt;
 use regex::Regex;
-use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
@@ -26,7 +25,9 @@ use crate::infra::session_runtime::{SessionRuntime, SessionStatus, StartSession}
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
 use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
-use crate::persistence::{calibration, finding, observation, run, run_event, session, task};
+use crate::persistence::{
+  calibration, finding, human_wait, observation, prompt, run, run_event, session, task,
+};
 
 const LEAD_STOP_TOKENS: u64 = 250_000;
 const LEAD_WARN_TOKENS: u64 = 200_000;
@@ -404,11 +405,7 @@ fn cmd_prompt(
   lock.lock_exclusive()?;
   // Only the prompt's opening is matched in the transcript.
   let opening: String = text.chars().take(80).collect();
-  store.db.execute(
-    "insert into prompts(session,text,sent_at,attempts) values(?,?,?,0)",
-    params![name, text, now()],
-  )?;
-  let prompt_id = store.db.last_insert_rowid();
+  let prompt_id = store.write(|tx| prompt::create(tx, name, text))?;
   let prompt_timeout_millis = i64::try_from(settings.prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
   let session = store.read(|tx| session::latest_named(tx, name))?;
@@ -436,10 +433,7 @@ fn cmd_prompt(
     let idle_before = status_of(runtime, name) == Some(SessionStatus::Idle);
     let path_before = transcript()?;
     let mut offset = transcript_size(path_before.as_deref());
-    store.db.execute(
-      "update prompts set attempts=attempts+1 where id=?",
-      [prompt_id],
-    )?;
+    store.write(|tx| prompt::record_attempt(tx, prompt_id))?;
     let _ = runtime.prompt(name, text);
     let deadline = now() + window_millis;
     while now() < deadline {
@@ -452,10 +446,7 @@ fn cmd_prompt(
         && let state @ (PromptState::Started | PromptState::Queued) =
           agent.prompt_state(&path, offset, &opening)
       {
-        store.db.execute(
-          "update prompts set seen_at=? where id=?",
-          params![now(), prompt_id],
-        )?;
+        store.write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
           record_run_event(store, RunEventKind::PromptQueued, name)?;
         }
@@ -1394,13 +1385,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     }
   }
   print_time_summary(store)?;
-  let open_wait: Option<i64> = store
-    .db
-    .query_row("select 1 from human_waits where ended is null", [], |row| {
-      row.get(0)
-    })
-    .optional()?;
-  if open_wait.is_some() {
+  if store.read(human_wait::is_open)? {
     println!("  (a human wait is open)");
   }
   let events = store.read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
@@ -1481,13 +1466,8 @@ fn print_time_summary(store: &Store) -> Result<()> {
       busy += end.unwrap_or_else(now) - start;
     }
   }
-  let mut statement = store.db.prepare("select started,ended from human_waits")?;
-  let waits = statement.query_map([], |row| {
-    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
-  })?;
   let mut human = 0;
-  for wait in waits {
-    let (start, end) = wait?;
+  for (start, end) in store.read(human_wait::intervals)? {
     human += end.unwrap_or_else(now) - start;
   }
   if let Some(first) = first {
@@ -1565,26 +1545,9 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
 
 fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
   match action {
-    HumanWaitAction::Start => {
-      let open: Option<i64> = store
-        .db
-        .query_row("select 1 from human_waits where ended is null", [], |row| {
-          row.get(0)
-        })
-        .optional()?;
-      if open.is_none() {
-        store
-          .db
-          .execute("insert into human_waits(started) values(?)", [now()])?;
-      }
-    }
-    HumanWaitAction::End => {
-      store.db.execute(
-        "update human_waits set ended=? where ended is null",
-        [now()],
-      )?;
-    }
-  }
+    HumanWaitAction::Start => store.write(human_wait::start)?,
+    HumanWaitAction::End => store.write(human_wait::end)?,
+  };
   Ok(())
 }
 
