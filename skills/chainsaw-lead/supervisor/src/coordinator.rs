@@ -53,16 +53,38 @@ const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on 
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
+/// What every command and the daemon act through: the run's store and
+/// repository, the runtime its sessions live in, and the run's settings. It
+/// carries no behavior of its own; commands are functions over it.
+pub struct Coordinator<'a> {
+  store: &'a Store,
+  repo: Repo<'a>,
+  runtime: &'a dyn SessionRuntime,
+  settings: &'a Settings,
+}
+
+impl<'a> Coordinator<'a> {
+  pub fn new(store: &'a Store, runtime: &'a dyn SessionRuntime, settings: &'a Settings) -> Self {
+    Self {
+      store,
+      repo: Repo::new(&store.run_dir),
+      runtime,
+      settings,
+    }
+  }
+}
+
 pub fn execute(
   store: &Store,
   runtime: &dyn SessionRuntime,
   settings: &Settings,
   command: Command,
 ) -> Result<()> {
+  let coordinator = Coordinator::new(store, runtime, settings);
   let lead_facing = is_lead_facing(&command);
-  run(store, runtime, settings, command)?;
+  run(&coordinator, command)?;
   if lead_facing {
-    for warning in standing_warnings(store)? {
+    for warning in standing_warnings(&coordinator)? {
       eprintln!("WARNING: {warning}");
     }
   }
@@ -85,11 +107,12 @@ fn is_lead_facing(command: &Command) -> bool {
 /// Facts the lead must act on, printed after every lead-facing command so
 /// they do not depend on the lead remembering the skill. Each one is measured
 /// from the store, never inferred from what the lead said.
-fn standing_warnings(store: &Store) -> Result<Vec<String>> {
+fn standing_warnings(coordinator: &Coordinator) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
   let at = Utc::now();
   let timestamp = at.timestamp_millis();
-  if let Some(lead) = store
+  if let Some(lead) = coordinator
+    .store
     .read(session::all)?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
@@ -103,7 +126,9 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
       warnings.push(format!("lead context {context} of {LEAD_STOP_TOKENS}"));
     }
   }
-  let (tasks, run) = store.read(|tx| Ok((task::all(tx)?, run::get(tx)?)))?;
+  let (tasks, run) = coordinator
+    .store
+    .read(|tx| Ok((task::all(tx)?, run::get(tx)?)))?;
   for task in &tasks {
     if task.state() != TaskState::CommittedUnverified {
       continue;
@@ -160,37 +185,26 @@ fn duration_text(seconds: i64) -> String {
   }
 }
 
-fn run(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  command: Command,
-) -> Result<()> {
+fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
       session_id,
       poll_interval_ms,
     } => daemon(
-      store,
-      runtime,
-      settings,
+      coordinator,
       &lead,
       &session_id,
       Duration::from_millis(poll_interval_ms),
     ),
-    Command::StartCommentator { role_prompt } => {
-      cmd_start_commentator(store, runtime, settings, &role_prompt)
-    }
-    Command::Launch { name } => {
-      cmd_launch(store, runtime, settings, &name, SessionKind::Implementer)
-    }
+    Command::StartCommentator { role_prompt } => cmd_start_commentator(coordinator, &role_prompt),
+    Command::Launch { name } => cmd_launch(coordinator, &name, SessionKind::Implementer),
     Command::Prompt {
       name,
       text,
       wait,
       timeout,
-    } => cmd_prompt(store, runtime, settings, &name, &text, wait, timeout),
+    } => cmd_prompt(coordinator, &name, &text, wait, timeout),
     Command::Task { action } => match action {
       TaskCommand::New {
         files,
@@ -199,9 +213,7 @@ fn run(
         retry_of_task_id,
         reason,
       } => cmd_task_new(
-        store,
-        runtime,
-        settings,
+        coordinator,
         NewTaskOptions {
           predicted_files,
           predicted_lines,
@@ -215,65 +227,65 @@ fn run(
         sha,
         force,
         reason,
-      } => cmd_task_record_commit(store, task, &sha, force, reason.as_deref()),
+      } => cmd_task_record_commit(coordinator, task, &sha, force, reason.as_deref()),
       TaskCommand::RecordCommentary {
         task,
         force,
         reason,
-      } => cmd_task_record_commentary(store, task, force, reason.as_deref()),
+      } => cmd_task_record_commentary(coordinator, task, force, reason.as_deref()),
     },
-    Command::Abort { task, reason } => cmd_abort(store, runtime, settings, task, &reason),
+    Command::Abort { task, reason } => cmd_abort(coordinator, task, &reason),
     Command::Dispatch { task, to, reason } => {
-      cmd_dispatch(store, runtime, settings, task, &to, reason.as_deref())
+      cmd_dispatch(coordinator, task, &to, reason.as_deref())
     }
     Command::Accept {
       task,
       force,
       reason,
-    } => cmd_accept(store, task, force, reason.as_deref()),
-    Command::Calibrate { task } => cmd_calibrate(store, task),
-    Command::Observe { task, text } => cmd_observe(store, task, &text),
-    Command::Finding { task, description } => cmd_finding(store, task, &description),
+    } => cmd_accept(coordinator, task, force, reason.as_deref()),
+    Command::Calibrate { task } => cmd_calibrate(coordinator, task),
+    Command::Observe { task, text } => cmd_observe(coordinator, task, &text),
+    Command::Finding { task, description } => cmd_finding(coordinator, task, &description),
     Command::Poll {
       after_observation,
       task,
-    } => cmd_poll(store, after_observation, task),
+    } => cmd_poll(coordinator, after_observation, task),
     Command::Resolve {
       finding,
       verdict,
       fix_task_id,
       reason,
-    } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
-    Command::Resolutions => cmd_resolutions(store),
-    Command::State { task } => cmd_state(store, task),
+    } => cmd_resolve(coordinator, finding, &verdict, fix_task_id, &reason),
+    Command::Resolutions => cmd_resolutions(coordinator),
+    Command::State { task } => cmd_state(coordinator, task),
     Command::TranscriptsDir => {
-      println!("{}", store.transcripts_dir.display());
+      println!("{}", coordinator.store.transcripts_dir.display());
       Ok(())
     }
-    Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(store, interval_ms),
-    Command::Context { name } => cmd_context(store, name.as_deref()),
-    Command::HumanWait { action } => cmd_human_wait(store, action),
-    Command::Stop => cmd_stop(store),
+    Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(coordinator, interval_ms),
+    Command::Context { name } => cmd_context(coordinator, name.as_deref()),
+    Command::HumanWait { action } => cmd_human_wait(coordinator, action),
+    Command::Stop => cmd_stop(coordinator),
   }
 }
 
-fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
+fn task_session(coordinator: &Coordinator, task: &Task) -> Result<Option<Session>> {
   Ok(match task.session_id() {
-    Some(session_id) => store.read(|tx| session::get(tx, session_id))?,
+    Some(session_id) => coordinator.store.read(|tx| session::get(tx, session_id))?,
     None => None,
   })
 }
 
 /// Commit ids the task's session may have made since the task was dispatched;
 /// `new_commit_for` decides whether one is really new.
-fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
-  let Some(session) = task_session(store, task)? else {
+fn task_commits(coordinator: &Coordinator, task: &Task) -> Result<Vec<String>> {
+  let Some(session) = task_session(coordinator, task)? else {
     return Ok(Vec::new());
   };
-  let Some(transcript) = session_transcript(store, &session)? else {
+  let Some(transcript) = session_transcript(coordinator, &session)? else {
     return Ok(Vec::new());
   };
-  let head = repo(store).head()?;
+  let head = coordinator.repo.head()?;
   Ok(agent::for_session(&session).commit_candidates(
     &transcript,
     task.transcript_offset() as u64,
@@ -286,7 +298,7 @@ fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
 /// on the session row and never looked for again. Nothing in a run deletes a
 /// transcript, so a remembered one that is gone means something outside the
 /// run removed it, and that is an error rather than a session reading zero.
-fn session_transcript(store: &Store, session: &Session) -> Result<Option<PathBuf>> {
+fn session_transcript(coordinator: &Coordinator, session: &Session) -> Result<Option<PathBuf>> {
   if let Some(path) = session.transcript() {
     if !path.is_file() {
       bail!(
@@ -297,29 +309,30 @@ fn session_transcript(store: &Store, session: &Session) -> Result<Option<PathBuf
     }
     return Ok(Some(path.to_owned()));
   }
-  let found = agent::for_session(session).transcript(&store.run_dir, session.external_session_id());
+  let found = agent::for_session(session)
+    .transcript(&coordinator.store.run_dir, session.external_session_id());
   if let Some(path) = &found {
-    store.write(|tx| session::record_transcript(tx, session.id(), path))?;
+    coordinator
+      .store
+      .write(|tx| session::record_transcript(tx, session.id(), path))?;
   }
   Ok(found)
 }
 
-fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
+fn session_name(coordinator: &Coordinator, id: Option<i64>) -> Result<String> {
   Ok(match id {
-    Some(id) => store
+    Some(id) => coordinator
+      .store
       .read(|tx| session::get(tx, id))?
       .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
     None => "-".to_owned(),
   })
 }
 
-fn repo(store: &Store) -> Repo<'_> {
-  Repo::new(&store.run_dir)
-}
-
-fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
+fn last_task_on(coordinator: &Coordinator, session_id: i64) -> Result<Option<Task>> {
   Ok(
-    store
+    coordinator
+      .store
       .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .rev()
@@ -335,26 +348,20 @@ fn stat_number(text: &str, noun: &str) -> i64 {
     .unwrap_or_default()
 }
 
-fn cmd_launch(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  name: &str,
-  kind: SessionKind,
-) -> Result<()> {
-  let agent = settings.launch_agent(kind);
-  let started = runtime.start(StartSession {
+fn cmd_launch(coordinator: &Coordinator, name: &str, kind: SessionKind) -> Result<()> {
+  let agent = coordinator.settings.launch_agent(kind);
+  let started = coordinator.runtime.start(StartSession {
     id: name,
-    run_dir: &store.run_dir,
+    run_dir: &coordinator.store.run_dir,
     kind,
     agent,
-    args: settings.launch_args(kind),
+    args: coordinator.settings.launch_args(kind),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
-  let launched_head = repo(store).head().ok();
-  store.write(|tx| {
+  let launched_head = coordinator.repo.head().ok();
+  coordinator.store.write(|tx| {
     session::stop_named(tx, name)?;
     session::create(
       tx,
@@ -375,15 +382,13 @@ fn cmd_launch(
 }
 
 fn cmd_prompt(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
+  coordinator: &Coordinator,
   name: &str,
   text: &str,
   wait: bool,
   timeout: u64,
 ) -> Result<()> {
-  let lock_path = PathBuf::from(format!("{}.prompt-lock", store.path.display()));
+  let lock_path = PathBuf::from(format!("{}.prompt-lock", coordinator.store.path.display()));
   let lock = OpenOptions::new()
     .create(true)
     .write(true)
@@ -392,13 +397,17 @@ fn cmd_prompt(
   lock.lock_exclusive()?;
   // Only the prompt's opening is matched in the transcript.
   let opening: String = text.chars().take(80).collect();
-  let prompt_id = store.write(|tx| prompt::create(tx, name, text))?;
-  let prompt_timeout_millis = i64::try_from(settings.prompt_timeout().as_millis())
+  let prompt_id = coordinator
+    .store
+    .write(|tx| prompt::create(tx, name, text))?;
+  let prompt_timeout_millis = i64::try_from(coordinator.settings.prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
-  let session = store.read(|tx| session::latest_named(tx, name))?;
+  let session = coordinator
+    .store
+    .read(|tx| session::latest_named(tx, name))?;
   let transcript = || -> Result<Option<PathBuf>> {
     match &session {
-      Some(session) => session_transcript(store, session),
+      Some(session) => session_transcript(coordinator, session),
       None => Ok(None),
     }
   };
@@ -417,14 +426,16 @@ fn cmd_prompt(
     // Polling the runtime gives it a turn to deliver what a busy session has
     // queued; the state check below then reads what actually arrived. What it
     // reports is the state the send finds the session in.
-    let idle_before = status_of(runtime, name) == Some(SessionStatus::Idle);
+    let idle_before = status_of(coordinator.runtime, name) == Some(SessionStatus::Idle);
     let path_before = transcript()?;
     let mut offset = transcript_size(path_before.as_deref());
-    store.write(|tx| prompt::record_attempt(tx, prompt_id))?;
-    let _ = runtime.prompt(name, text);
+    coordinator
+      .store
+      .write(|tx| prompt::record_attempt(tx, prompt_id))?;
+    let _ = coordinator.runtime.prompt(name, text);
     let deadline = now() + window_millis;
     while now() < deadline {
-      let status = status_of(runtime, name);
+      let status = status_of(coordinator.runtime, name);
       let path = transcript()?;
       if path != path_before {
         offset = 0;
@@ -433,11 +444,13 @@ fn cmd_prompt(
         && let state @ (PromptState::Started | PromptState::Queued) =
           agent.prompt_state(&path, offset, &opening)
       {
-        store.write(|tx| prompt::record_seen(tx, prompt_id))?;
+        coordinator
+          .store
+          .write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
-          record_run_event(store, RunEventKind::PromptQueued, name)?;
+          record_run_event(coordinator, RunEventKind::PromptQueued, name)?;
         }
-        return prompt_taken(&lock, runtime, name, agent, &transcript, wait, timeout);
+        return prompt_taken(&lock, coordinator, name, agent, &transcript, wait, timeout);
       }
       // An agent that echoes a prompt only with its reply has taken it once
       // the session the send found idle is busy. A session busy already, on
@@ -448,11 +461,11 @@ fn cmd_prompt(
         && status == Some(SessionStatus::Busy)
       {
         record_run_event(
-          store,
+          coordinator,
           RunEventKind::PromptTaken,
           &format!("{name}: session went busy before its transcript showed the prompt"),
         )?;
-        return prompt_taken(&lock, runtime, name, agent, &transcript, wait, timeout);
+        return prompt_taken(&lock, coordinator, name, agent, &transcript, wait, timeout);
       }
       thread::sleep(Duration::from_secs(1));
     }
@@ -460,7 +473,7 @@ fn cmd_prompt(
       eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
     }
   }
-  record_run_event(store, RunEventKind::PromptFailed, name)?;
+  record_run_event(coordinator, RunEventKind::PromptFailed, name)?;
   FileExt::unlock(&lock)?;
   match echo {
     PromptEcho::OnTake => {
@@ -488,7 +501,7 @@ fn status_of(runtime: &dyn SessionRuntime, name: &str) -> Option<SessionStatus> 
 /// the turn to end and print the last thing the agent said.
 fn prompt_taken(
   lock: &File,
-  runtime: &dyn SessionRuntime,
+  coordinator: &Coordinator,
   name: &str,
   agent: &dyn Agent,
   transcript: &dyn Fn() -> Result<Option<PathBuf>>,
@@ -497,7 +510,7 @@ fn prompt_taken(
 ) -> Result<()> {
   FileExt::unlock(lock)?;
   if wait {
-    let _ = runtime.wait(name, Duration::from_secs(timeout));
+    let _ = coordinator.runtime.wait(name, Duration::from_secs(timeout));
     println!(
       "{}",
       transcript()?
@@ -508,25 +521,18 @@ fn prompt_taken(
   Ok(())
 }
 
-fn cmd_start_commentator(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  role_prompt: &Path,
-) -> Result<()> {
-  let name = commentator_agent_name(&store.run_dir);
-  cmd_launch(store, runtime, settings, &name, SessionKind::Commentator)?;
+fn cmd_start_commentator(coordinator: &Coordinator, role_prompt: &Path) -> Result<()> {
+  let name = commentator_agent_name(&coordinator.store.run_dir);
+  cmd_launch(coordinator, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
-    store,
-    runtime,
-    settings,
+    coordinator,
     &name,
     &format!(
       "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
       role_prompt.display(),
-      store.transcripts_dir.display(),
-      store.run_dir.display()
+      coordinator.store.transcripts_dir.display(),
+      coordinator.store.run_dir.display()
     ),
     false,
     300,
@@ -555,12 +561,7 @@ struct NewTaskOptions<'a> {
   reason: Option<&'a str>,
 }
 
-fn cmd_task_new(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  options: NewTaskOptions<'_>,
-) -> Result<()> {
+fn cmd_task_new(coordinator: &Coordinator, options: NewTaskOptions<'_>) -> Result<()> {
   let NewTaskOptions {
     mut predicted_files,
     predicted_lines,
@@ -575,7 +576,8 @@ fn cmd_task_new(
   }
   let active_retry = match retry_of_task_id {
     Some(retry_of_task_id) => {
-      let predecessor = store
+      let predecessor = coordinator
+        .store
         .read(|tx| task::get(tx, retry_of_task_id))?
         .with_context(|| {
           format!(
@@ -622,9 +624,9 @@ fn cmd_task_new(
   let predicted_file_list =
     (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
   if let Some((retry_of_task_id, reason)) = active_retry {
-    abort_task(store, runtime, settings, retry_of_task_id, reason)?;
+    abort_task(coordinator, retry_of_task_id, reason)?;
   }
-  let task = store.write(|tx| {
+  let task = coordinator.store.write(|tx| {
     task::create(
       tx,
       &text,
@@ -639,31 +641,33 @@ fn cmd_task_new(
 }
 
 fn cmd_dispatch(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
+  coordinator: &Coordinator,
   task_id: i64,
   implementer: &str,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} is not in state drafted");
   };
   if task.state() != TaskState::Drafted {
     bail!("supervisor: task {task_id} is not in state drafted");
   }
-  let flying = store
+  let flying = coordinator
+    .store
     .read(task::all)?
     .into_iter()
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
   if let Some(flying) = flying {
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
-      session_name(store, flying.session_id())?,
+      session_name(coordinator, flying.session_id())?,
       flying.id()
     );
   }
-  let Some(session) = store.read(|tx| session::latest_named(tx, implementer))? else {
+  let Some(session) = coordinator
+    .store
+    .read(|tx| session::latest_named(tx, implementer))?
+  else {
     bail!("supervisor: no session {implementer}; launch it first");
   };
   if !session.can_take_task() {
@@ -675,7 +679,7 @@ fn cmd_dispatch(
     }
     bail!("supervisor: {implementer} is stopped; launch it again first");
   }
-  if let Some(prior) = last_task_on(store, session.id())? {
+  if let Some(prior) = last_task_on(coordinator, session.id())? {
     bail!(
       "supervisor: {implementer} already took task {} ({}); every task gets a fresh implementer",
       prior.id(),
@@ -683,7 +687,7 @@ fn cmd_dispatch(
     );
   }
 
-  let preamble = files_changed_since_launch(store, &session)?;
+  let preamble = files_changed_since_launch(coordinator, &session)?;
 
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
@@ -693,19 +697,19 @@ fn cmd_dispatch(
   // The task is measured from where the transcript and the branch stood
   // before the send: an agent may be at work, even past its commit, before
   // its transcript shows the prompt.
-  let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
-  let base_head = repo(store).head()?;
+  let transcript_offset = transcript_size(session_transcript(coordinator, &session)?.as_deref());
+  let base_head = coordinator.repo.head()?;
   // The task is only dispatched once the prompt is taken, so a send that
   // never is leaves it drafted and dispatchable again.
-  if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
+  if let Err(error) = cmd_prompt(coordinator, implementer, &prompt, false, 300) {
     record_run_event(
-      store,
+      coordinator,
       RunEventKind::DispatchFailed,
       &format!("task {task_id} -> {implementer}: {error}"),
     )?;
     return Err(error);
   }
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     task::dispatch(
       tx,
       task_id,
@@ -729,11 +733,11 @@ fn cmd_dispatch(
 
 /// The session may have read the tree before its task arrived; name what moved
 /// since it started so it rereads that first. Empty when nothing has.
-fn files_changed_since_launch(store: &Store, session: &Session) -> Result<String> {
+fn files_changed_since_launch(coordinator: &Coordinator, session: &Session) -> Result<String> {
   let Some(head) = session.launched_head() else {
     return Ok(String::new());
   };
-  let files = repo(store).files_changed(head, "HEAD")?;
+  let files = coordinator.repo.files_changed(head, "HEAD")?;
   if files.is_empty() {
     return Ok(String::new());
   }
@@ -748,12 +752,12 @@ fn short_sha(sha: &str) -> &str {
 }
 
 fn new_commit_for(
-  store: &Store,
+  coordinator: &Coordinator,
   shas: &[String],
   base_head: Option<&str>,
 ) -> Result<Option<String>> {
   match base_head {
-    Some(base_head) => repo(store).new_commit_among(shas, base_head),
+    Some(base_head) => coordinator.repo.new_commit_among(shas, base_head),
     None => Ok(None),
   }
 }
@@ -774,13 +778,13 @@ fn forced_remedy_reason<'a>(
 }
 
 fn cmd_task_record_commit(
-  store: &Store,
+  coordinator: &Coordinator,
   task_id: i64,
   sha: &str,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commit", force, reason)?;
@@ -790,10 +794,10 @@ fn cmd_task_record_commit(
       task.state()
     );
   }
-  let Some(commit_sha) = repo(store).canonical_commit(sha)? else {
+  let Some(commit_sha) = coordinator.repo.canonical_commit(sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     for other in task::all(tx)? {
       if other.id() != task_id
         && other
@@ -809,8 +813,12 @@ fn cmd_task_record_commit(
     let base_head = task.base_head().with_context(|| {
       format!("supervisor: task {task_id} has no base_head to validate the commit against")
     })?;
-    if commit_sha == repo(store).canonical_commit(base_head)?.unwrap_or_default()
-      || !repo(store).is_ancestor(base_head, &commit_sha)?
+    if commit_sha
+      == coordinator
+        .repo
+        .canonical_commit(base_head)?
+        .unwrap_or_default()
+      || !coordinator.repo.is_ancestor(base_head, &commit_sha)?
     {
       bail!(
         "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
@@ -829,12 +837,12 @@ fn cmd_task_record_commit(
 }
 
 fn cmd_task_record_commentary(
-  store: &Store,
+  coordinator: &Coordinator,
   task_id: i64,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commentary", force, reason)?;
@@ -848,7 +856,7 @@ fn cmd_task_record_commentary(
       task.state()
     );
   }
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     if !task::record_commentary_delivery(tx, task_id)? {
       bail!("supervisor: commentary delivery is already recorded for task {task_id}");
     }
@@ -864,22 +872,31 @@ fn cmd_task_record_commentary(
 
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
-fn cmd_accept(store: &Store, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
-  if store.read(|tx| task::get(tx, task_id))?.is_none() {
+fn cmd_accept(
+  coordinator: &Coordinator,
+  task_id: i64,
+  force: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  if coordinator
+    .store
+    .read(|tx| task::get(tx, task_id))?
+    .is_none()
+  {
     bail!("supervisor: no task {task_id}");
   }
   match (force, reason) {
-    (true, Some(reason)) => accept_without_the_gate(store, task_id, reason),
+    (true, Some(reason)) => accept_without_the_gate(coordinator, task_id, reason),
     (true, None) => bail!("supervisor: accept --force requires a non-empty --reason"),
     (false, Some(_)) => {
       bail!("supervisor: --reason only applies with --force; accept without it runs the checks")
     }
-    (false, None) => accept_through_the_gate(store, task_id),
+    (false, None) => accept_through_the_gate(coordinator, task_id),
   }
 }
 
-fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+fn accept_without_the_gate(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<()> {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -891,7 +908,7 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
       task.state()
     );
   }
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     task::accept(tx, task_id, reason)?;
     run_event::create(
       tx,
@@ -904,27 +921,35 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
   Ok(())
 }
 
-fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+fn accept_through_the_gate(coordinator: &Coordinator, task_id: i64) -> Result<()> {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut sha = match task.commit_sha() {
     Some(sha) => Some(sha.to_owned()),
-    None => new_commit_for(store, &task_commits(store, &task)?, task.base_head())?,
+    None => new_commit_for(
+      coordinator,
+      &task_commits(coordinator, &task)?,
+      task.base_head(),
+    )?,
   };
-  if sha.is_none() && head_advanced_cleanly(store, task.base_head())? {
+  if sha.is_none() && head_advanced_cleanly(coordinator, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
-    sha = new_commit_for(store, &task_commits(store, &task)?, task.base_head())?;
+    sha = new_commit_for(
+      coordinator,
+      &task_commits(coordinator, &task)?,
+      task.base_head(),
+    )?;
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
-    match repo(store).commit(sha)? {
+    match coordinator.repo.commit(sha)? {
       None => problems.push(format!("commit {sha} not in git")),
       Some(commit) => {
         if has_attribution_trailer(&commit.message) {
           problems.push("commit carries an attribution trailer".to_owned());
         }
-        if !repo(store).head()?.starts_with(&commit.sha) {
+        if !coordinator.repo.head()?.starts_with(&commit.sha) {
           problems.push("commit is not HEAD".to_owned());
         }
       }
@@ -932,7 +957,7 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   } else {
     problems.push("no new commit since the task was dispatched".to_owned());
   }
-  if !repo(store).is_clean()? {
+  if !coordinator.repo.is_clean()? {
     problems.push("tree is dirty".to_owned());
   }
   // The implementer runs the quality gate before it commits; that is its
@@ -941,7 +966,7 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     let sha = sha
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
-    store.write(|tx| {
+    coordinator.store.write(|tx| {
       task::record_commit(tx, task_id, sha, None)?;
       task::accept(tx, task_id, &format!("checks passed at {sha}"))?;
       Ok(())
@@ -956,9 +981,9 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   Err(anyhow!(""))
 }
 
-fn head_advanced_cleanly(store: &Store, base_head: Option<&str>) -> Result<bool> {
+fn head_advanced_cleanly(coordinator: &Coordinator, base_head: Option<&str>) -> Result<bool> {
   match base_head {
-    Some(base_head) => repo(store).head_advanced_cleanly_from(base_head),
+    Some(base_head) => coordinator.repo.head_advanced_cleanly_from(base_head),
     None => Ok(false),
   }
 }
@@ -970,29 +995,25 @@ fn has_attribution_trailer(message: &str) -> bool {
   })
 }
 
-fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
+fn failures_in_lineage(coordinator: &Coordinator, task_id: i64) -> Result<i64> {
   let mut failures = 0;
-  let mut current = store.read(|tx| task::get(tx, task_id))?;
+  let mut current = coordinator.store.read(|tx| task::get(tx, task_id))?;
   while let Some(task) = current {
     if task.state() == TaskState::Aborted {
       failures += 1;
     }
     current = match task.retry_of_task_id() {
-      Some(retry_of_task_id) => store.read(|tx| task::get(tx, retry_of_task_id))?,
+      Some(retry_of_task_id) => coordinator
+        .store
+        .read(|tx| task::get(tx, retry_of_task_id))?,
       None => None,
     };
   }
   Ok(failures)
 }
 
-fn abort_task(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  task_id: i64,
-  reason: &str,
-) -> Result<(i64, String)> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+fn abort_task(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<(i64, String)> {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -1001,8 +1022,8 @@ fn abort_task(
   if task.state().is_terminal() {
     bail!("supervisor: task {task_id} is already {}", task.state());
   }
-  let dirty = repo(store).status()?;
-  store.write(|tx| {
+  let dirty = coordinator.repo.status()?;
+  coordinator.store.write(|tx| {
     task::abort(tx, task_id, reason)?;
     run_event::create(
       tx,
@@ -1012,15 +1033,13 @@ fn abort_task(
     Ok(())
   })?;
   if let Some(session_id) = task.session_id()
-    && let Some(session) = store.read(|tx| session::get(tx, session_id))?
+    && let Some(session) = coordinator.store.read(|tx| session::get(tx, session_id))?
     && session.is_live()
   {
     let detail = format!("task {task_id} -> {}", session.name());
-    let outcome = runtime.interrupt(session.name()).and_then(|()| {
+    let outcome = coordinator.runtime.interrupt(session.name()).and_then(|()| {
       daemon_prompt(
-        store,
-        runtime,
-        settings,
+        coordinator,
         session.name(),
         &format!(
           "supervisor: task {task_id} is aborted: {reason}. Stop, leave the tree clean, do not commit."
@@ -1030,26 +1049,20 @@ fn abort_task(
       .with_context(|| format!("abort message did not reach {}", session.name()))
     });
     match outcome {
-      Ok(()) => record_run_event(store, RunEventKind::AbortInterrupt, &detail)?,
+      Ok(()) => record_run_event(coordinator, RunEventKind::AbortInterrupt, &detail)?,
       Err(error) => record_run_event(
-        store,
+        coordinator,
         RunEventKind::AbortUnreachable,
         &format!("{detail}: {error}"),
       )?,
     }
   }
-  let failures = failures_in_lineage(store, task_id)?;
+  let failures = failures_in_lineage(coordinator, task_id)?;
   Ok((failures, dirty))
 }
 
-fn cmd_abort(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  task_id: i64,
-  reason: &str,
-) -> Result<()> {
-  let (failures, dirty) = abort_task(store, runtime, settings, task_id, reason)?;
+fn cmd_abort(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<()> {
+  let (failures, dirty) = abort_task(coordinator, task_id, reason)?;
   let plural = if failures == 1 { "" } else { "s" };
   println!("task {task_id} aborted ({failures} abort{plural} on this task): {reason}");
   if !dirty.is_empty() {
@@ -1065,14 +1078,14 @@ fn cmd_abort(
   Ok(())
 }
 
-fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
-  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
+fn cmd_calibrate(coordinator: &Coordinator, task_id: i64) -> Result<()> {
+  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
   let Some(commit_sha) = task.commit_sha() else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
-  let stat = repo(store).shortstat(commit_sha)?;
+  let stat = coordinator.repo.shortstat(commit_sha)?;
   let actual_files = stat_number(&stat, "file");
   let actual_lines = stat_number(&stat, "insertion") + stat_number(&stat, "deletion");
   let dispatched_at = last_event_at(&task, |event| event.state() == TaskState::Dispatched);
@@ -1082,9 +1095,10 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| (end - start) as f64 / 1000.0);
-  let session = task_session(store, &task)?;
+  let session = task_session(coordinator, &task)?;
   let next_offset = match task.session_id() {
-    Some(session_id) => store
+    Some(session_id) => coordinator
+      .store
       .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .find(|candidate| candidate.id() > task_id && candidate.transcript_offset() > 0)
@@ -1092,7 +1106,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     None => None,
   };
   let peak = match &session {
-    Some(session) => match session_transcript(store, session)? {
+    Some(session) => match session_transcript(coordinator, session)? {
       Some(transcript) => agent::for_session(session).context_peak(
         &transcript,
         task.transcript_offset() as u64,
@@ -1114,7 +1128,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   };
   let base = task.context_size_start();
   let context = end.since(base);
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     calibration::create(
       tx,
       task_id,
@@ -1136,8 +1150,8 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   Ok(())
 }
 
-fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
-  let observation = store.write(|tx| {
+fn cmd_observe(coordinator: &Coordinator, task_id: Option<i64>, text: &str) -> Result<()> {
+  let observation = coordinator.store.write(|tx| {
     if let Some(task_id) = task_id {
       require_task(tx, task_id)?;
     }
@@ -1147,8 +1161,8 @@ fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
   Ok(())
 }
 
-fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
-  let finding = store.write(|tx| {
+fn cmd_finding(coordinator: &Coordinator, task_id: i64, description: &str) -> Result<()> {
+  let finding = coordinator.store.write(|tx| {
     require_task(tx, task_id)?;
     finding::register(tx, task_id, description)
   })?;
@@ -1156,11 +1170,11 @@ fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
   Ok(())
 }
 
-fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Result<()> {
+fn cmd_poll(coordinator: &Coordinator, after_observation: i64, task_id: Option<i64>) -> Result<()> {
   if after_observation < 0 {
     bail!("supervisor: --after-observation must be nonnegative");
   }
-  let (observations, findings) = store.read(|tx| {
+  let (observations, findings) = coordinator.store.read(|tx| {
     if let Some(task_id) = task_id {
       require_task(tx, task_id)?;
     }
@@ -1206,7 +1220,7 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
 }
 
 fn cmd_resolve(
-  store: &Store,
+  coordinator: &Coordinator,
   finding_id: i64,
   verdict: &Verdict,
   fix_task_id: Option<i64>,
@@ -1216,7 +1230,7 @@ fn cmd_resolve(
     Verdict::Task => FindingVerdict::Task,
     Verdict::Dropped => FindingVerdict::Dropped,
   };
-  store.write(|tx| {
+  coordinator.store.write(|tx| {
     let finding = finding::get(tx, finding_id)?
       .with_context(|| format!("supervisor: no finding {finding_id}"))?;
     if let Some(fix_task_id) = fix_task_id {
@@ -1230,8 +1244,9 @@ fn cmd_resolve(
   Ok(())
 }
 
-fn cmd_resolutions(store: &Store) -> Result<()> {
-  let resolutions = store
+fn cmd_resolutions(coordinator: &Coordinator) -> Result<()> {
+  let resolutions = coordinator
+    .store
     .read(finding::resolved)?
     .into_iter()
     .map(|finding| {
@@ -1254,17 +1269,18 @@ fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result
   task::get(transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))
 }
 
-fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
-  store.write(run::record_state_read)?;
+fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Result<()> {
+  coordinator.store.write(run::record_state_read)?;
   if let Some(task_id) = only_task {
-    let task = store
+    let task = coordinator
+      .store
       .read(|tx| task::get(tx, task_id))?
       .with_context(|| format!("supervisor: no task {task_id}"))?;
     println!("{task_id} {}", task.state());
     return Ok(());
   }
   println!("tasks");
-  let tasks = store.read(task::all)?;
+  let tasks = coordinator.store.read(task::all)?;
   for task in tasks {
     let mut timeline = TaskState::iter()
       .filter_map(|state| {
@@ -1289,19 +1305,19 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
       task.id(),
       task.state(),
-      session_name(store, task.session_id())?,
+      session_name(coordinator, task.session_id())?,
       task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
-  for session in store.read(session::all)? {
+  for session in coordinator.store.read(session::all)? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_transcript(store, &session)?.is_some() {
+    if session_transcript(coordinator, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -1322,11 +1338,13 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
       );
     }
   }
-  print_time_summary(store)?;
-  if store.read(human_wait::is_open)? {
+  print_time_summary(coordinator)?;
+  if coordinator.store.read(human_wait::is_open)? {
     println!("  (a human wait is open)");
   }
-  let events = store.read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
+  let events = coordinator
+    .store
+    .read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
   for event in events {
     println!(
       "  {} {} {}",
@@ -1358,8 +1376,10 @@ const STATE_EVENT_KINDS: &[RunEventKind] = &[
 ];
 
 /// Journals one supervisor action that belongs to no other write.
-fn record_run_event(store: &Store, kind: RunEventKind, detail: &str) -> Result<()> {
-  store.write(|tx| run_event::create(tx, kind, detail))?;
+fn record_run_event(coordinator: &Coordinator, kind: RunEventKind, detail: &str) -> Result<()> {
+  coordinator
+    .store
+    .write(|tx| run_event::create(tx, kind, detail))?;
   Ok(())
 }
 
@@ -1380,8 +1400,8 @@ fn clock_time(millis: i64) -> String {
   )
 }
 
-fn print_time_summary(store: &Store) -> Result<()> {
-  let tasks = store.read(task::all)?;
+fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
+  let tasks = coordinator.store.read(task::all)?;
   let first = tasks
     .iter()
     .flat_map(|task| task.events())
@@ -1405,7 +1425,7 @@ fn print_time_summary(store: &Store) -> Result<()> {
     }
   }
   let mut human = 0;
-  for (start, end) in store.read(human_wait::intervals)? {
+  for (start, end) in coordinator.store.read(human_wait::intervals)? {
     human += end.unwrap_or_else(now) - start;
   }
   if let Some(first) = first {
@@ -1434,13 +1454,13 @@ fn print_time_summary(store: &Store) -> Result<()> {
 /// on every wake, so watching it would wake the commentator for the sole
 /// reason that it was just woken; the lead's transcript is not its material
 /// either.
-fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
+fn cmd_watch_transcripts(coordinator: &Coordinator, interval_ms: u64) -> Result<()> {
   use std::io::Write;
 
-  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(store)?);
+  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(coordinator)?);
   loop {
     std::thread::sleep(Duration::from_millis(interval_ms));
-    if let Some(line) = monitor.poll(&implementer_transcripts(store)?) {
+    if let Some(line) = monitor.poll(&implementer_transcripts(coordinator)?) {
       println!("{line}");
       std::io::stdout().flush()?;
     }
@@ -1448,27 +1468,29 @@ fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
 }
 
 /// The transcripts of the live implementers that have one, by session id.
-fn implementer_transcripts(store: &Store) -> Result<Vec<(String, PathBuf)>> {
+fn implementer_transcripts(coordinator: &Coordinator) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
-  for session in store
+  for session in coordinator
+    .store
     .read(session::all)?
     .into_iter()
     .filter(Session::can_take_task)
   {
-    if let Some(path) = session_transcript(store, &session)? {
+    if let Some(path) = session_transcript(coordinator, &session)? {
       transcripts.push((session.external_session_id().to_owned(), path));
     }
   }
   Ok(transcripts)
 }
 
-fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
-  for session in store
+fn cmd_context(coordinator: &Coordinator, name: Option<&str>) -> Result<()> {
+  for session in coordinator
+    .store
     .read(session::all)?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(transcript) = session_transcript(store, &session)? {
+    if let Some(transcript) = session_transcript(coordinator, &session)? {
       println!(
         "{}\t{}",
         session.name(),
@@ -1481,16 +1503,16 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
   Ok(())
 }
 
-fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
+fn cmd_human_wait(coordinator: &Coordinator, action: HumanWaitAction) -> Result<()> {
   match action {
-    HumanWaitAction::Start => store.write(human_wait::start)?,
-    HumanWaitAction::End => store.write(human_wait::end)?,
+    HumanWaitAction::Start => coordinator.store.write(human_wait::start)?,
+    HumanWaitAction::End => coordinator.store.write(human_wait::end)?,
   };
   Ok(())
 }
 
-fn cmd_stop(store: &Store) -> Result<()> {
-  store.write(|tx| {
+fn cmd_stop(coordinator: &Coordinator) -> Result<()> {
+  coordinator.store.write(|tx| {
     run::request_stop(tx)?;
     run_event::create(tx, RunEventKind::Stop, "run ended by the lead")?;
     Ok(())
@@ -1499,18 +1521,12 @@ fn cmd_stop(store: &Store) -> Result<()> {
   Ok(())
 }
 
-fn daemon_prompt(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  name: &str,
-  text: &str,
-) -> bool {
-  match cmd_prompt(store, runtime, settings, name, text, false, 300) {
+fn daemon_prompt(coordinator: &Coordinator, name: &str, text: &str) -> bool {
+  match cmd_prompt(coordinator, name, text, false, 300) {
     Ok(()) => true,
     Err(error) => {
       let _ = record_run_event(
-        store,
+        coordinator,
         RunEventKind::PromptUnreachable,
         &format!("{name}: {error}"),
       );
@@ -1520,15 +1536,13 @@ fn daemon_prompt(
 }
 
 fn daemon(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
+  coordinator: &Coordinator,
   lead: &str,
   lead_session_id: &str,
   poll_interval: Duration,
 ) -> Result<()> {
-  register_lead(store, lead, lead_session_id)?;
-  store.write(|tx| {
+  register_lead(coordinator, lead, lead_session_id)?;
+  coordinator.store.write(|tx| {
     run::clear_stop_request(tx)?;
     run_event::create(
       tx,
@@ -1542,7 +1556,7 @@ fn daemon(
   let mut compacting = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
-    let stopping = store.write(|tx| {
+    let stopping = coordinator.store.write(|tx| {
       let stopping = run::get(tx)?.is_stopping();
       if !stopping {
         run::record_daemon_seen(tx)?;
@@ -1553,13 +1567,14 @@ fn daemon(
       break;
     }
     let timestamp = Utc::now();
-    for session in store
+    for session in coordinator
+      .store
       .read(session::all)?
       .into_iter()
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(transcript) = session_transcript(store, &session)? else {
+      let Some(transcript) = session_transcript(coordinator, &session)? else {
         if missing_transcripts.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"
@@ -1568,7 +1583,7 @@ fn daemon(
           };
           let detail = format!("{name} ({}): transcript not found{danger}", session.role());
           eprintln!("WARNING: {detail}");
-          record_run_event(store, RunEventKind::TranscriptMissing, &detail)?;
+          record_run_event(coordinator, RunEventKind::TranscriptMissing, &detail)?;
         }
         continue;
       };
@@ -1578,7 +1593,7 @@ fn daemon(
           transcript.display()
         );
         record_run_event(
-          store,
+          coordinator,
           RunEventKind::TranscriptFound,
           &format!("{name}: {}", transcript.display()),
         )?;
@@ -1587,18 +1602,18 @@ fn daemon(
       let context = agent::for_session(&session).context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
-      store.write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
+      coordinator
+        .store
+        .write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
       let quiet = session.quiet_seconds(timestamp) as f64;
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(store, runtime, settings, &session, &transcript, quiet)?;
+          observe_implementer(coordinator, &session, &transcript, quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
-            store,
-            runtime,
-            settings,
+            coordinator,
             &session,
             Reading {
               transcript: &transcript,
@@ -1608,13 +1623,13 @@ fn daemon(
             &mut compacting,
           )?;
         }
-        Role::Lead => observe_lead(store, &session, context)?,
+        Role::Lead => observe_lead(coordinator, &session, context)?,
       }
     }
     thread::sleep(poll_interval);
   }
   record_run_event(
-    store,
+    coordinator,
     RunEventKind::DaemonExit,
     &format!("pid {}", std::process::id()),
   )
@@ -1624,8 +1639,8 @@ fn daemon(
 /// it from what the lead says about itself. The same session id keeps its row
 /// across daemon restarts; a different one is a new incarnation and stops the
 /// old row.
-fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
-  store.write(|tx| {
+fn register_lead(coordinator: &Coordinator, lead: &str, lead_session_id: &str) -> Result<()> {
+  coordinator.store.write(|tx| {
     let current = session::latest_named(tx, lead)?;
     if !current.is_some_and(|session| {
       session.is_live()
@@ -1649,19 +1664,13 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
 
 /// Nudge a session that has gone quiet while its runtime reports it idle. The
 /// kick is latched on the session so it happens once per stall.
-fn kick_if_stalled(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  session: &Session,
-  quiet: f64,
-) -> Result<()> {
+fn kick_if_stalled(coordinator: &Coordinator, session: &Session, quiet: f64) -> Result<()> {
   if quiet > STALE_SECONDS
     && session.can_be_kicked()
-    && status_of(runtime, session.name()) == Some(SessionStatus::Idle)
-    && daemon_prompt(store, runtime, settings, session.name(), "continue")
+    && status_of(coordinator.runtime, session.name()) == Some(SessionStatus::Idle)
+    && daemon_prompt(coordinator, session.name(), "continue")
   {
-    store.write(|tx| {
+    coordinator.store.write(|tx| {
       session::record_kick(tx, session.id())?;
       run_event::create(tx, RunEventKind::Kick, session.name())?;
       Ok(())
@@ -1671,15 +1680,14 @@ fn kick_if_stalled(
 }
 
 fn observe_implementer(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
+  coordinator: &Coordinator,
   session: &Session,
   transcript: &Path,
   quiet: f64,
 ) -> Result<()> {
   let agent = agent::for_session(session);
-  let task = store
+  let task = coordinator
+    .store
     .read(|tx| task::tasks_for_session(tx, session.id()))?
     .into_iter()
     .rev()
@@ -1693,13 +1701,15 @@ fn observe_implementer(
       return Ok(());
     }
     let context = agent.context_before(transcript, dispatch_offset);
-    store.write(|tx| task::take_flight(tx, task.id(), context))?;
+    coordinator
+      .store
+      .write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
-  let head = repo(store).head()?;
+  let head = coordinator.repo.head()?;
   let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
-  if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
-    store.write(|tx| {
+  if let Some(sha) = new_commit_for(coordinator, &shas, task.base_head())? {
+    coordinator.store.write(|tx| {
       task::record_commit(tx, task.id(), &sha, None)?;
       run_event::create(
         tx,
@@ -1709,7 +1719,7 @@ fn observe_implementer(
       Ok(())
     })?;
   } else {
-    kick_if_stalled(store, runtime, settings, session, quiet)?;
+    kick_if_stalled(coordinator, session, quiet)?;
   }
   Ok(())
 }
@@ -1722,9 +1732,7 @@ struct Reading<'a> {
 }
 
 fn observe_commentator(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
+  coordinator: &Coordinator,
   session: &Session,
   reading: Reading<'_>,
   compacting: &mut bool,
@@ -1734,7 +1742,8 @@ fn observe_commentator(
     context,
     quiet,
   } = reading;
-  let pending = store
+  let pending = coordinator
+    .store
     .read(task::all)?
     .into_iter()
     .filter(Task::awaits_commentary)
@@ -1744,7 +1753,7 @@ fn observe_commentator(
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
     if agent.output_mentions(transcript, abbreviation) {
-      store.write(|tx| {
+      coordinator.store.write(|tx| {
         if task::record_commentary_delivery(tx, task.id())? {
           run_event::create(
             tx,
@@ -1756,9 +1765,7 @@ fn observe_commentator(
       })?;
     } else if task.commentary_requested_at().is_none()
       && daemon_prompt(
-        store,
-        runtime,
-        settings,
+        coordinator,
         session.name(),
         &format!(
           "supervisor: commit {sha} landed for task {}; review it from git",
@@ -1766,7 +1773,7 @@ fn observe_commentator(
         ),
       )
     {
-      store.write(|tx| {
+      coordinator.store.write(|tx| {
         if task::record_commentary_request(tx, task.id())? {
           run_event::create(
             tx,
@@ -1779,16 +1786,10 @@ fn observe_commentator(
     }
   }
   if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
-    if daemon_prompt(
-      store,
-      runtime,
-      settings,
-      session.name(),
-      agent.compact_prompt(),
-    ) {
+    if daemon_prompt(coordinator, session.name(), agent.compact_prompt()) {
       *compacting = true;
       record_run_event(
-        store,
+        coordinator,
         RunEventKind::Compact,
         &format!("{} at {context}", session.name()),
       )?;
@@ -1796,16 +1797,16 @@ fn observe_commentator(
   } else if context.is_under(COMMENTATOR_COMPACT_TOKENS) {
     *compacting = false;
   }
-  kick_if_stalled(store, runtime, settings, session, quiet)
+  kick_if_stalled(coordinator, session, quiet)
 }
 
 /// Records the lead crossing its stop threshold once per lead session. Nothing
 /// is pushed at the lead: an unsolicited prompt mid-thought is a context switch
 /// it did not choose. The warning printed after every lead-facing command
 /// carries the same fact at the moment the lead is already reading output.
-fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Result<()> {
+fn observe_lead(coordinator: &Coordinator, session: &Session, context: ContextSize) -> Result<()> {
   if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
-    store.write(|tx| {
+    coordinator.store.write(|tx| {
       session::record_over_limit(tx, session.id())?;
       run_event::create(tx, RunEventKind::StopLead, &format!("context {context}"))?;
       Ok(())
