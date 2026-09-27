@@ -39,6 +39,28 @@ impl TryFrom<&str> for Role {
   }
 }
 
+/// The kind of session the supervisor launches. The lead is never launched,
+/// so it has no kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionKind {
+  Implementer,
+  Commentator,
+}
+
+impl SessionKind {
+  pub fn label(self) -> &'static str {
+    self.role().as_str()
+  }
+
+  /// The role a session of this kind is recorded with.
+  pub fn role(self) -> Role {
+    match self {
+      Self::Implementer => Role::Implementer,
+      Self::Commentator => Role::Commentator,
+    }
+  }
+}
+
 impl fmt::Display for Role {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter.write_str(self.as_str())

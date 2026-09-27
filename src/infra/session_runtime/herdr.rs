@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use super::{SessionKind, SessionQuery, SessionRuntime, StartSession, StartedSession};
-use crate::domain::AgentKind;
+use super::{SessionQuery, SessionRuntime, StartSession, StartedSession};
+use crate::domain::{AgentKind, SessionKind};
 
 /// Drives sessions through the `herdr` CLI. The pane the supervisor itself runs in
 /// is ambient, so it is read once here rather than rediscovered inside `start`.

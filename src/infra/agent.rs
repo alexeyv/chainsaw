@@ -9,8 +9,7 @@ use std::time::SystemTime;
 use regex::Regex;
 use serde_json::Value;
 
-use super::session_runtime::SessionKind;
-use crate::domain::{AgentKind, ContextSize, Session};
+use crate::domain::{AgentKind, ContextSize, Session, SessionKind};
 
 mod claude;
 mod codex;

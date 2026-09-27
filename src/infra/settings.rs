@@ -17,8 +17,7 @@ use strum::IntoEnumIterator;
 use toml::{Table, Value};
 
 use super::agent;
-use super::session_runtime::SessionKind;
-use crate::domain::AgentKind;
+use crate::domain::{AgentKind, SessionKind};
 
 pub const FILE_NAME: &str = "chainsaw.toml";
 pub const LOCAL_FILE_NAME: &str = "chainsaw.local.toml";

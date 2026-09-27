@@ -10,8 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{Agent, PromptState, entries, read_lossy, text_of};
-use crate::domain::ContextSize;
-use crate::infra::session_runtime::SessionKind;
+use crate::domain::{ContextSize, SessionKind};
 
 pub struct Claude;
 

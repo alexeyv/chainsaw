@@ -8,34 +8,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::domain::{AgentKind, Role};
+use crate::domain::{AgentKind, SessionKind};
 
 mod herdr;
 mod orca;
 
 pub use herdr::HerdrSessionRuntime;
 pub use orca::OrcaSessionRuntime;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionKind {
-  Implementer,
-  Commentator,
-}
-
-impl SessionKind {
-  pub fn label(self) -> &'static str {
-    self.role().as_str()
-  }
-
-  /// The role a session of this kind is recorded with. The lead is never
-  /// launched, so it has no kind.
-  pub fn role(self) -> Role {
-    match self {
-      Self::Implementer => Role::Implementer,
-      Self::Commentator => Role::Commentator,
-    }
-  }
-}
 
 pub struct StartSession<'a> {
   pub id: &'a str,

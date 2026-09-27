@@ -18,10 +18,10 @@ use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
 use crate::domain::{
-  AgentKind, ContextSize, FindingVerdict, Role, Session, Task, TaskEvent, TaskState,
+  AgentKind, ContextSize, FindingVerdict, Role, Session, SessionKind, Task, TaskEvent, TaskState,
 };
 use crate::infra::agent::{self, Agent, PROMPT_ATTEMPTS, PromptState};
-use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
+use crate::infra::session_runtime::{SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
 use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};

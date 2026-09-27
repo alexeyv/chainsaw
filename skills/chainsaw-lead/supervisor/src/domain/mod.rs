@@ -17,7 +17,7 @@ pub use context_size::ContextSize;
 pub use finding::{Finding, FindingVerdict};
 pub use observation::Observation;
 pub use run::Run;
-pub use session::{AgentKind, Role, Session};
+pub use session::{AgentKind, Role, Session, SessionKind};
 pub use task::{Task, TaskState};
 pub use task_event::TaskEvent;
 

@@ -19,7 +19,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{SessionKind, SessionQuery, SessionRuntime, StartSession, StartedSession};
+use super::{SessionQuery, SessionRuntime, StartSession, StartedSession};
+use crate::domain::SessionKind;
 use crate::infra::agent::{self, Agent, Claude};
 
 /// The registry's name, beside the run's database.
