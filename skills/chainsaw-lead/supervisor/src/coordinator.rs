@@ -1,16 +1,15 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use chrono::{Local, TimeZone, Utc};
-use strum::IntoEnumIterator;
+use anyhow::Result;
+use chrono::Utc;
 
-use crate::cli::{Command, HumanWaitAction, TaskCommand};
+use crate::cli::{Command, TaskCommand};
 use crate::domain::{Role, RunEventKind, SessionKind, Task, TaskEvent, TaskState};
 use crate::infra::git::Repo;
 use crate::infra::session_runtime::SessionRuntime;
 use crate::infra::settings::Settings;
-use crate::infra::store::{Store, now};
-use crate::persistence::{human_wait, run, run_event, session, task};
+use crate::infra::store::Store;
+use crate::persistence::{run, run_event, session, task};
 
 mod accept;
 mod calibrate;
@@ -18,6 +17,7 @@ mod daemon;
 mod prompt;
 mod review;
 mod sessions;
+mod state;
 mod tasks;
 
 use accept::{cmd_accept, cmd_task_record_commentary, cmd_task_record_commit};
@@ -28,6 +28,7 @@ use sessions::{
   cmd_context, cmd_launch, cmd_start_commentator, cmd_watch_transcripts, session_name,
   session_transcript, task_session,
 };
+use state::{cmd_human_wait, cmd_state, cmd_stop};
 use tasks::{NewTaskOptions, cmd_abort, cmd_dispatch, cmd_task_new, new_commit_for, task_commits};
 
 const LEAD_STOP_TOKENS: u64 = 250_000;
@@ -41,7 +42,7 @@ const STATE_UNREAD_SECONDS: i64 = 120;
 /// this long means no daemon is running, whether it never started, was
 /// stopped, or died.
 const DAEMON_SILENT_SECONDS: i64 = 30;
-const IMPLEMENTER_LIMIT_TOKENS: u64 = 100_000;
+
 /// What every command and the daemon act through: the run's store and
 /// repository, the runtime its sessions live in, and the run's settings. It
 /// carries no behavior of its own; commands are functions over it.
@@ -258,116 +259,6 @@ fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
   }
 }
 
-fn short_sha(sha: &str) -> &str {
-  sha.get(..10).unwrap_or(sha)
-}
-
-fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Result<()> {
-  coordinator.store.write(run::record_state_read)?;
-  if let Some(task_id) = only_task {
-    let task = coordinator
-      .store
-      .read(|tx| task::get(tx, task_id))?
-      .with_context(|| format!("supervisor: no task {task_id}"))?;
-    println!("{task_id} {}", task.state());
-    return Ok(());
-  }
-  println!("tasks");
-  let tasks = coordinator.store.read(task::all)?;
-  for task in tasks {
-    let mut timeline = TaskState::iter()
-      .filter_map(|state| {
-        last_event_at(&task, |event| event.state() == state)
-          .map(|at| format!("{state}@{}", clock_time(at)))
-      })
-      .collect::<Vec<_>>();
-    if let Some(delivered_at) = task.commentary_delivered_at() {
-      timeline.push(format!(
-        "commentary-delivered@{}",
-        clock_time(delivered_at.timestamp_millis())
-      ));
-    }
-    let timeline = timeline.join(" ");
-    let retry = task
-      .retry_of_task_id()
-      .map_or_else(String::new, |id| format!("  retry of {id}"));
-    let reason = task
-      .reason()
-      .map_or_else(String::new, |reason| format!("  reason: {reason}"));
-    println!(
-      "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
-      task.id(),
-      task.state(),
-      session_name(coordinator, task.session_id())?,
-      task.commit_sha().map(short_sha).unwrap_or("-")
-    );
-  }
-  println!("sessions");
-  for session in coordinator.store.read(session::all)? {
-    let mut flags = String::new();
-    let implementer = session.role() == Role::Implementer;
-    if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
-      flags.push_str(" OVER-LIMIT");
-    }
-    let quiet = session.quiet_seconds(Utc::now());
-    if session_transcript(coordinator, &session)?.is_some() {
-      println!(
-        "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
-        session.name(),
-        session.role(),
-        session.context(),
-        session.context_max()
-      );
-    } else {
-      let danger = if session.role() == Role::Lead {
-        "; lead stop threshold disabled"
-      } else {
-        ""
-      };
-      println!(
-        "  {:<16} {:<12} context UNAVAILABLE (transcript not found{danger}) quiet {quiet}s{flags}",
-        session.name(),
-        session.role()
-      );
-    }
-  }
-  print_time_summary(coordinator)?;
-  if coordinator.store.read(human_wait::is_open)? {
-    println!("  (a human wait is open)");
-  }
-  let events = coordinator
-    .store
-    .read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
-  for event in events {
-    println!(
-      "  {} {} {}",
-      clock_time(event.created_at().timestamp_millis()),
-      event.kind(),
-      event.detail()
-    );
-  }
-  Ok(())
-}
-
-/// The supervisor actions worth a line at the bottom of `state`: prompts it
-/// pushed at a session or gave up on, the overrides the lead forced, and how
-/// an abort reached its session. Launches, dispatches, commits and the
-/// daemon's own lifecycle are visible elsewhere in `state` and stay out.
-const STATE_EVENT_KINDS: &[RunEventKind] = &[
-  RunEventKind::StopLead,
-  RunEventKind::Kick,
-  RunEventKind::Compact,
-  RunEventKind::PromptQueued,
-  RunEventKind::PromptTaken,
-  RunEventKind::PromptFailed,
-  RunEventKind::Accepted,
-  RunEventKind::ForcedCommit,
-  RunEventKind::ForcedCommentary,
-  RunEventKind::CommentaryWake,
-  RunEventKind::AbortInterrupt,
-  RunEventKind::AbortUnreachable,
-];
-
 /// Journals one supervisor action that belongs to no other write.
 fn record_run_event(coordinator: &Coordinator, kind: RunEventKind, detail: &str) -> Result<()> {
   coordinator
@@ -384,74 +275,4 @@ fn last_event_at(task: &Task, matches: impl Fn(&TaskEvent) -> bool) -> Option<i6
     .rev()
     .find(|event| matches(event))
     .map(|event| event.created_at().timestamp_millis())
-}
-
-fn clock_time(millis: i64) -> String {
-  Local.timestamp_millis_opt(millis).single().map_or_else(
-    || "-".to_owned(),
-    |time| time.format("%H:%M:%S").to_string(),
-  )
-}
-
-fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
-  let tasks = coordinator.store.read(task::all)?;
-  let first = tasks
-    .iter()
-    .flat_map(|task| task.events())
-    .map(|event| event.created_at().timestamp_millis())
-    .min();
-  let mut busy = 0;
-  for task in &tasks {
-    let start = last_event_at(task, |event| event.state() == TaskState::Dispatched);
-    let end = task
-      .events()
-      .iter()
-      .find(|event| {
-        matches!(
-          event.state(),
-          TaskState::CommittedUnverified | TaskState::Accepted | TaskState::Aborted
-        )
-      })
-      .map(|event| event.created_at().timestamp_millis());
-    if let Some(start) = start {
-      busy += end.unwrap_or_else(now) - start;
-    }
-  }
-  let mut human = 0;
-  for (start, end) in coordinator.store.read(human_wait::intervals)? {
-    human += end.unwrap_or_else(now) - start;
-  }
-  if let Some(first) = first {
-    let wall = now() - first;
-    let percentage = if wall == 0 {
-      0.0
-    } else {
-      100.0 * busy as f64 / wall as f64
-    };
-    println!(
-      "time  wall {}s  implementer-busy {}s ({percentage:.0}%)  waiting-on-human {}s",
-      wall / 1000,
-      busy / 1000,
-      human / 1000
-    );
-  }
-  Ok(())
-}
-
-fn cmd_human_wait(coordinator: &Coordinator, action: HumanWaitAction) -> Result<()> {
-  match action {
-    HumanWaitAction::Start => coordinator.store.write(human_wait::start)?,
-    HumanWaitAction::End => coordinator.store.write(human_wait::end)?,
-  };
-  Ok(())
-}
-
-fn cmd_stop(coordinator: &Coordinator) -> Result<()> {
-  coordinator.store.write(|tx| {
-    run::request_stop(tx)?;
-    run_event::create(tx, RunEventKind::Stop, "run ended by the lead")?;
-    Ok(())
-  })?;
-  println!("supervisor: stopped; the daemon will exit on its next poll");
-  Ok(())
 }
