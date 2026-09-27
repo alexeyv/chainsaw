@@ -23,10 +23,14 @@ trivial getters, functions, or constructors.
 ### What to construct
 
 - Use actual objects.
-- For the session runtime, the contract tests put `tests/fake_herdr.py` on
-  PATH as `herdr`; extend it when a scenario needs more behavior. The Orca
-  runtime is proven by its unit tests against a shim `orca`; the contract
-  suite drives Herdr only.
+- For the session runtime, the contract tests put a fake on PATH under the
+  real CLI's name: `tests/fake_herdr.py` as `herdr`, `tests/fake_orca.py` as
+  `orca`, chosen by the case's `runtime` attribute. What the agent behind
+  either does (transcripts, prompts, replies, queueing) lives once in
+  `tests/fake_agent.py`. Extend them when a scenario needs more behavior.
+  `test_cli_contract.py` drives Herdr; `test_cli_contract_orca.py` runs the
+  same classes under Orca, restating the few cases that spell out the runtime
+  conversation, and adds what only Orca does.
 
 ### Fixtures
 

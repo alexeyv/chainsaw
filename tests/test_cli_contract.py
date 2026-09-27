@@ -81,7 +81,7 @@ class TaskContractTests(SupervisorContractCase):
 class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_prompt_wait_prints_the_agent_reply(self):
         self.launch()
-        self.update_herdr_state(reply_on_prompt="fixture reply")
+        self.update_runtime_state(reply_on_prompt="fixture reply")
 
         result = self.assert_success(
             self.cli("prompt", "worker", "hello agent", "--wait")
@@ -103,7 +103,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_a_lost_prompt_is_retried_three_times_and_reported(self):
         self.write_settings("prompt-timeout-seconds = 0\n")
         self.launch()
-        self.update_herdr_state(drop_prompts=3)
+        self.update_runtime_state(drop_prompts=3)
 
         result = self.cli("prompt", "worker", "lost in transit")
         state = self.assert_success(self.cli("state"))
@@ -118,13 +118,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
 
     def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
         task = self.new_task()
-        self.assert_success(self.cli(
-            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
-        ))
-        commentator = next(
-            name for name in self.herdr_state()["agents"]
-            if name.startswith("commentator-")
-        )
+        commentator = self.start_commentator()
 
         result = self.dispatch(task, commentator)
         state = self.assert_success(self.cli("state"))
@@ -255,9 +249,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task))
-        runtime_state = self.herdr_state()
-        del runtime_state["agents"]["worker"]
-        self.update_herdr_state(**runtime_state)
+        self.forget_session("worker")
 
         result = self.assert_success(
             self.cli("abort", str(task), "--reason", "the session disappeared")
@@ -839,7 +831,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         harness = self.sandbox / "harness"
         harness.mkdir()
         session_id = "lead-outside-run"
-        self.update_herdr_state(
+        self.update_runtime_state(
             agents={"lead": {
                 "session_id": session_id,
                 "status": "idle",
@@ -1073,15 +1065,9 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
     run_dir_name = "run.wt"
 
     def test_commentator_is_pointed_at_the_directory_claude_code_actually_writes(self):
-        self.assert_success(self.cli(
-            "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
-        ))
+        commentator = self.start_commentator()
 
-        prompt = next(
-            operation["text"] for operation in self.runtime_operations()
-            if operation["operation"] == "prompt"
-            and operation["session_id"].startswith("commentator-")
-        )
+        prompt = self.prompts_to(commentator)[0]
         prefix = "Transcripts directory: "
         announced = next(
             line.removeprefix(prefix)
@@ -1665,7 +1651,9 @@ class CodexImplementerContractTests(SupervisorContractCase):
         rollout = self.session_transcript("worker")
         self.assertEqual(rollout.parents[3], self.home / ".codex" / "sessions", rollout)
         self.assertRegex(rollout.name, r"^rollout-.*-session-worker-1\.jsonl$")
-        first = json.loads(rollout.read_text().splitlines()[0])
+        meta, first = (json.loads(line) for line in rollout.read_text().splitlines()[:2])
+        self.assertEqual(meta["type"], "session_meta")
+        self.assertEqual(Path(meta["payload"]["cwd"]).resolve(), self.run_dir.resolve())
         self.assertEqual(first["payload"]["role"], "user")
         self.assertIn("Implement it the Codex way.", first["payload"]["content"][0]["text"])
         self.assertIn(f"task {task} dispatched to worker", result.stdout)
