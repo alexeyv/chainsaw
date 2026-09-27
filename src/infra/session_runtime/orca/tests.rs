@@ -296,6 +296,38 @@ mod start {
   }
 
   #[test]
+  fn should_run_cursor_through_its_cli() {
+    let orca = FakeOrca::new();
+    let runtime = orca.runtime();
+    let run_dir = orca.run_dir();
+
+    let error = runtime
+      .start(StartSession {
+        id: "worker",
+        run_dir: &run_dir,
+        kind: SessionKind::Implementer,
+        agent: AgentKind::Cursor,
+        args: &["--trust".to_owned(), "--force".to_owned(), ".".to_owned()],
+      })
+      .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      format!(
+        "orca: cursor in term-7 never wrote a transcript for {}",
+        run_dir.display()
+      )
+    );
+    assert_eq!(
+      orca.calls()[0][7],
+      format!(
+        "cd {} && exec cursor-agent --trust --force .",
+        run_dir.display()
+      )
+    );
+  }
+
+  #[test]
   fn should_fail_when_orca_refuses() {
     let orca = FakeOrca::new();
 

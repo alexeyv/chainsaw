@@ -15,8 +15,8 @@ struct SessionRow {
   launched_head: Option<String>,
   started_at: i64,
   stopped_at: Option<i64>,
-  context: i64,
-  context_max: i64,
+  context: Option<i64>,
+  context_max: Option<i64>,
   last_growth: i64,
   kicked_at: Option<i64>,
   over_limit_at: Option<i64>,
@@ -105,11 +105,13 @@ pub fn record_transcript(transaction: &Transaction<'_>, id: i64, path: &Path) ->
 }
 
 /// Record one poll's reading of the transcript. Growth moves the last-growth
-/// mark to `at` and re-arms the kick; the maximum only ever rises.
+/// mark to `at` and re-arms the kick; the maximum only ever rises. A reading
+/// whose context is unknown clears the context and leaves the maximum as it
+/// was.
 pub fn record_reading(
   transaction: &Transaction<'_>,
   id: i64,
-  context: i64,
+  context: Option<i64>,
   grew: bool,
   at: DateTime<Utc>,
 ) -> Result<Session> {
@@ -117,7 +119,8 @@ pub fn record_reading(
     "
       update sessions set
         context=?1,
-        context_max=max(context_max, ?1),
+        context_max=case when ?1 is null then context_max
+                         else max(coalesce(context_max, ?1), ?1) end,
         last_growth=case when ?2 then ?3 else last_growth end,
         kicked_at=case when ?2 then null else kicked_at end
       where id=?4

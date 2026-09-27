@@ -17,6 +17,10 @@ use crate::infra::session_runtime::SessionKind;
 pub struct Codex;
 
 impl Agent for Codex {
+  fn program(&self) -> &'static str {
+    "codex"
+  }
+
   /// An unattended session edits, builds, tests and commits without asking.
   /// Codex's sandboxes keep `.git` read-only, so under `--sandbox
   /// workspace-write` a `git commit` fails with "Unable to create
@@ -49,34 +53,42 @@ impl Agent for Codex {
     rollout_of(&Self::sessions_dir().ok()?, external_session_id, 4)
   }
 
-  fn context_size(&self, transcript: &Path) -> u64 {
+  /// Zero until a response reports usage: the transcript records usage, so
+  /// none yet means none used.
+  fn context_size(&self, transcript: &Path) -> Option<u64> {
     let Ok(text) = read_lossy(transcript, 0, None) else {
-      return 0;
+      return Some(0);
     };
-    text
-      .lines()
-      .rev()
-      .take(50)
-      .find_map(usage_of_line)
-      .unwrap_or_default()
+    Some(
+      text
+        .lines()
+        .rev()
+        .take(50)
+        .find_map(usage_of_line)
+        .unwrap_or_default(),
+    )
   }
 
-  fn context_before(&self, transcript: &Path, offset: u64) -> u64 {
-    read_lossy(transcript, 0, Some(offset))
-      .map(|text| {
-        text
-          .lines()
-          .filter_map(usage_of_line)
-          .next_back()
-          .unwrap_or(0)
-      })
-      .unwrap_or_default()
+  fn context_before(&self, transcript: &Path, offset: u64) -> Option<u64> {
+    Some(
+      read_lossy(transcript, 0, Some(offset))
+        .map(|text| {
+          text
+            .lines()
+            .filter_map(usage_of_line)
+            .next_back()
+            .unwrap_or(0)
+        })
+        .unwrap_or_default(),
+    )
   }
 
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> u64 {
-    read_lossy(transcript, start, end)
-      .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
-      .unwrap_or_default()
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> Option<u64> {
+    Some(
+      read_lossy(transcript, start, end)
+        .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
+        .unwrap_or_default(),
+    )
   }
 
   /// Codex writes a prompt only when it takes it up, and writes user messages

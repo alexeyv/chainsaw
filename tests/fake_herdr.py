@@ -68,7 +68,7 @@ def agent_start(arguments):
         kind = flags["--kind"]
         agent = agents.new_agent(kind, run_dir, session_id)
         current["agents"][name] = agent
-        agents.open_transcript(agent)
+        agents.open_transcript(current, agent, flags.get("--", []))
         agents.record(current, "start", name, kind=kind, args=flags["--"])
     reply({"agent": {"agent_session": {"value": session_id}, "status": "idle"}})
     return 0

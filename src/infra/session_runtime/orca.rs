@@ -215,7 +215,7 @@ impl SessionRuntime for OrcaSessionRuntime {
     let agent = agent::implementing(session.agent);
     let minted = mint_session_id()?;
     let assigned = agent.session_id_args(&minted);
-    let mut words = vec![session.agent.as_str().to_owned()];
+    let mut words = vec![agent.program().to_owned()];
     words.extend(assigned.iter().flatten().cloned());
     words.extend(session.args.iter().cloned());
     let run_dir = session.run_dir.to_string_lossy();

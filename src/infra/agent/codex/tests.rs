@@ -108,6 +108,15 @@ fn usage_line(input: u64, cached: u64, total: u64) -> String {
   )
 }
 
+mod program {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(Codex.program(), "codex");
+  }
+}
+
 mod default_args {
   use super::*;
 
@@ -148,7 +157,7 @@ mod context_size {
       usage_line(40, 8, 50)
     ));
 
-    assert_eq!(Codex.context_size(transcript.path()), 40);
+    assert_eq!(Codex.context_size(transcript.path()), Some(40));
   }
 
   #[test]
@@ -159,14 +168,14 @@ mod context_size {
       usage_line(65_537, 60_000, 2_052_395)
     ));
 
-    assert_eq!(Codex.context_size(transcript.path()), 65_537);
+    assert_eq!(Codex.context_size(transcript.path()), Some(65_537));
   }
 
   #[test]
   fn should_read_zero_when_no_response_reports_usage() {
     let transcript = Transcript::containing(&user_line("hi"));
 
-    assert_eq!(Codex.context_size(transcript.path()), 0);
+    assert_eq!(Codex.context_size(transcript.path()), Some(0));
   }
 }
 
@@ -180,7 +189,7 @@ mod context_before {
 
     assert_eq!(
       Codex.context_before(transcript.path(), first.len() as u64 + 1),
-      10
+      Some(10)
     );
   }
 }
@@ -199,7 +208,7 @@ mod context_peak {
 
     assert_eq!(
       Codex.context_peak(transcript.path(), first.len() as u64 + 1, None),
-      40
+      Some(40)
     );
   }
 }
@@ -324,7 +333,7 @@ mod commits_in_transcript {
 
     assert_eq!(
       Codex.commits_in_transcript(transcript.path(), 0),
-      vec!["0123abc"]
+      Some(vec!["0123abc".to_owned()])
     );
   }
 
@@ -338,7 +347,7 @@ mod commits_in_transcript {
 
     assert_eq!(
       Codex.commits_in_transcript(transcript.path(), old.len() as u64 + 1),
-      vec!["4567def"]
+      Some(vec!["4567def".to_owned()])
     );
   }
 }

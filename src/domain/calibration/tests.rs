@@ -1,4 +1,6 @@
-use crate::domain::test_helpers::{calibration, calibration_measuring, format_calibration};
+use crate::domain::test_helpers::{
+  calibration, calibration_measuring, calibration_without_context, format_calibration,
+};
 
 mod new {
   use super::*;
@@ -44,6 +46,25 @@ wall_seconds: 0
 created_at: 2023-11-14T22:13:20Z
 context_size_start: 500
 context_size_end: 500"#
+    );
+  }
+
+  #[test]
+  fn should_accept_an_unknown_context() {
+    let calibration = calibration_without_context(3, 7).unwrap();
+
+    assert_eq!(
+      format_calibration(&calibration),
+      r#"id: 3
+task_id: 7
+predicted_files: 2
+predicted_lines: 20
+actual_files: 4
+actual_lines: 35
+wall_seconds: 12.5
+created_at: 2023-11-14T22:13:20Z
+context_size_start: none
+context_size_end: none"#
     );
   }
 

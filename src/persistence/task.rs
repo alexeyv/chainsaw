@@ -155,12 +155,13 @@ pub fn dispatch(
   )
 }
 
-/// The dispatch `transcript_offset` stays as the measurement baseline.
+/// The dispatch `transcript_offset` stays as the measurement baseline. The
+/// context at dispatch is None when the session's agent cannot report one.
 pub fn take_flight(
   transaction: &Transaction<'_>,
   id: i64,
   base_head: &str,
-  context_size_start: i64,
+  context_size_start: Option<i64>,
 ) -> Result<Task> {
   advance(
     transaction,
@@ -173,7 +174,7 @@ pub fn take_flight(
         current,
         "context size start",
         current.context_size_start(),
-        Some(context_size_start),
+        context_size_start,
       )
     },
     |transaction| {

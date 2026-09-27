@@ -194,6 +194,34 @@ mod start {
   }
 
   #[test]
+  fn should_start_cursor_under_its_own_kind() {
+    let herdr = FakeHerdr::new();
+    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let args = ["--trust", "--force", "."].map(str::to_owned);
+
+    let started = runtime
+      .start(StartSession {
+        id: "worker",
+        run_dir: Path::new("/tmp/run"),
+        kind: SessionKind::Implementer,
+        agent: AgentKind::Cursor,
+        args: &args,
+      })
+      .unwrap();
+
+    assert_eq!(started.external_id, "sess-1");
+    let calls = herdr.calls();
+    assert_eq!(
+      calls[1][..8],
+      [
+        "agent", "start", "worker", "--kind", "cursor", "--pane", "pane-7", "--"
+      ]
+    );
+    assert_eq!(calls[1][8..], args);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+  }
+
+  #[test]
   fn should_split_the_current_pane_and_keep_the_ambient_tab_for_a_commentator() {
     let herdr = FakeHerdr::new();
     let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");

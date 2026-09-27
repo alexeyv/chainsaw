@@ -15,6 +15,10 @@ use crate::infra::session_runtime::SessionKind;
 pub struct Claude;
 
 impl Agent for Claude {
+  fn program(&self) -> &'static str {
+    "claude"
+  }
+
   /// Today's flags; the commentator keeps slash commands
   fn default_args(&self, kind: SessionKind) -> String {
     let slash = match kind {
@@ -53,34 +57,42 @@ impl Agent for Claude {
       .find(|path| path.is_file())
   }
 
-  fn context_size(&self, transcript: &Path) -> u64 {
+  /// Zero until a response reports usage: the transcript records usage, so
+  /// none yet means none used.
+  fn context_size(&self, transcript: &Path) -> Option<u64> {
     let Ok(text) = read_lossy(transcript, 0, None) else {
-      return 0;
+      return Some(0);
     };
-    text
-      .lines()
-      .rev()
-      .take(50)
-      .find_map(usage_of_line)
-      .unwrap_or_default()
+    Some(
+      text
+        .lines()
+        .rev()
+        .take(50)
+        .find_map(usage_of_line)
+        .unwrap_or_default(),
+    )
   }
 
-  fn context_before(&self, transcript: &Path, offset: u64) -> u64 {
-    read_lossy(transcript, 0, Some(offset))
-      .map(|text| {
-        text
-          .lines()
-          .filter_map(usage_of_line)
-          .next_back()
-          .unwrap_or(0)
-      })
-      .unwrap_or_default()
+  fn context_before(&self, transcript: &Path, offset: u64) -> Option<u64> {
+    Some(
+      read_lossy(transcript, 0, Some(offset))
+        .map(|text| {
+          text
+            .lines()
+            .filter_map(usage_of_line)
+            .next_back()
+            .unwrap_or(0)
+        })
+        .unwrap_or_default(),
+    )
   }
 
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> u64 {
-    read_lossy(transcript, start, end)
-      .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
-      .unwrap_or_default()
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> Option<u64> {
+    Some(
+      read_lossy(transcript, start, end)
+        .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
+        .unwrap_or_default(),
+    )
   }
 
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState {

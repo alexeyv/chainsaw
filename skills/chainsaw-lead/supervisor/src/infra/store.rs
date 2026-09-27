@@ -7,7 +7,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 use super::agent::Claude;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 create table run(
@@ -19,7 +19,7 @@ create table sessions(
   agent text not null, external_session_id text not null unique,
   launched_head text,
   started_at int not null, stopped_at int,
-  context int not null default 0, context_max int not null default 0,
+  context int, context_max int,
   last_growth int not null, kicked_at int, over_limit_at int,
   transcript text);
 create table tasks(id integer primary key, text text, predicted_files int,
@@ -38,8 +38,8 @@ create table calibrations(
   task_id int not null unique references tasks(id),
   predicted_files int not null, predicted_lines int not null,
   actual_files int not null, actual_lines int not null, wall_seconds real,
-  created_at int not null, context_size_start int not null,
-  context_size_end int not null);
+  created_at int not null, context_size_start int,
+  context_size_end int);
 create table observations(
   id integer primary key autoincrement,
   task_id int references tasks(id), text text not null,
@@ -52,7 +52,7 @@ create table findings(
   created_at int not null, resolved_at int);
 create table human_waits(id integer primary key, started int, ended int);
 create table events(at int, kind text, detail text);
-pragma user_version=1;
+pragma user_version=2;
 "#;
 
 pub struct Store {

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
-use super::{require_nonnegative, require_positive};
+use super::{require_nonnegative, require_optional_nonnegative, require_positive};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
@@ -13,8 +13,8 @@ pub struct Calibration {
   actual_lines: i64,
   wall_seconds: Option<f64>,
   created_at: DateTime<Utc>,
-  context_size_start: i64,
-  context_size_end: i64,
+  context_size_start: Option<i64>,
+  context_size_end: Option<i64>,
 }
 
 impl Calibration {
@@ -28,8 +28,8 @@ impl Calibration {
     actual_lines: i64,
     wall_seconds: Option<f64>,
     created_at: DateTime<Utc>,
-    context_size_start: i64,
-    context_size_end: i64,
+    context_size_start: Option<i64>,
+    context_size_end: Option<i64>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_positive("task_id", task_id)?;
@@ -40,9 +40,11 @@ impl Calibration {
     if wall_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0) {
       bail!("wall_seconds must be finite and nonnegative");
     }
-    require_nonnegative("context_size_start", context_size_start)?;
-    require_nonnegative("context_size_end", context_size_end)?;
-    if context_size_end < context_size_start {
+    require_optional_nonnegative("context_size_start", context_size_start)?;
+    require_optional_nonnegative("context_size_end", context_size_end)?;
+    if let (Some(start), Some(end)) = (context_size_start, context_size_end)
+      && end < start
+    {
       bail!("context_size_end cannot precede context_size_start");
     }
 
@@ -92,11 +94,15 @@ impl Calibration {
     self.created_at
   }
 
-  pub fn context_size_start(&self) -> i64 {
+  /// The session's context when the task was dispatched, or None when its
+  /// agent's transcript cannot say.
+  pub fn context_size_start(&self) -> Option<i64> {
     self.context_size_start
   }
 
-  pub fn context_size_end(&self) -> i64 {
+  /// The session's peak context over the task, or None when its agent's
+  /// transcript cannot say.
+  pub fn context_size_end(&self) -> Option<i64> {
     self.context_size_end
   }
 }

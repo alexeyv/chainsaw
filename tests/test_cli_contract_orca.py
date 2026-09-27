@@ -143,6 +143,10 @@ class CodexImplementerContractTests(herdr.CodexImplementerContractTests):
     runtime = "orca"
 
 
+class CursorImplementerContractTests(herdr.CursorImplementerContractTests):
+    runtime = "orca"
+
+
 class OrcaTerminalContractTests(SupervisorContractCase):
     """What the supervisor does with a runtime that knows terminals, not agents."""
 
@@ -183,6 +187,20 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         self.launch()
 
         external_id = self.external_session_id("worker")
+        self.assertEqual(external_id, "session-worker-1")
+        self.assertEqual(self.session_state("worker")["session_id"], external_id)
+
+    def test_cursor_runs_as_cursor_agent_and_the_supervisor_reads_its_session_from_the_transcript(self):
+        self.write_settings('[implementer]\nagent = "cursor"\n')
+        self.launch()
+
+        (start,) = [
+            operation for operation in self.operations_on("worker")
+            if operation["operation"] == "start"
+        ]
+        external_id = self.external_session_id("worker")
+        self.assertEqual(start["program"], "cursor-agent")
+        self.assertEqual(start["args"], ["--trust", "--force", "."])
         self.assertEqual(external_id, "session-worker-1")
         self.assertEqual(self.session_state("worker")["session_id"], external_id)
 

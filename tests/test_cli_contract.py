@@ -827,6 +827,20 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assertIn("actual 1 files/2 lines", result.stdout)
         self.assertIn("context 60 (session 60, base 0)", result.stdout)
 
+    def test_calibration_falls_back_to_the_session_maximum_when_the_task_used_no_context(self):
+        self.launch()
+        self.append_usage("worker", input_tokens=60)
+        task = self.new_task()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        sha = self.commit_file()
+        self.record_commit("worker", sha)
+        self.assert_success(self.cli("accept", str(task)))
+
+        result = self.assert_success(self.cli("calibrate", str(task)))
+
+        self.assertIn("context 0 (session 60, base 60)", result.stdout)
+
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"
         harness.mkdir()
@@ -862,11 +876,11 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
     def test_a_session_naming_an_unknown_agent_is_an_error(self):
         self.launch()
-        self.write_supervisor_db("update sessions set agent='cursor' where name='worker'")
+        self.write_supervisor_db("update sessions set agent='gemini' where name='worker'")
 
         result = self.cli("context", "worker")
 
-        self.assert_failure(result, 'session worker: unknown agent "cursor"')
+        self.assert_failure(result, 'session worker: unknown agent "gemini"')
 
     def test_missing_lead_transcript_is_not_reported_as_zero_context(self):
         daemon = self.start_daemon()
@@ -1536,24 +1550,24 @@ class SettingsContractTests(SupervisorContractCase):
         self.assertEqual(self.session_agent("worker"), "claude")
 
     def test_an_unknown_agent_in_the_file_fails_naming_the_role_and_the_accepted_agents(self):
-        self.write_settings('[commentator]\nagent = "cursor"\n')
+        self.write_settings('[commentator]\nagent = "gemini"\n')
 
         result = self.cli("state")
 
         self.assert_failure(
             result,
-            'invalid settings in chainsaw.toml: unknown agent "cursor", '
-            'expected one of `claude`, `codex`',
+            'invalid settings in chainsaw.toml: unknown agent "gemini", '
+            'expected one of `claude`, `codex`, `cursor`',
         )
         self.assert_failure(result, "in `commentator.agent`")
 
     def test_an_unknown_agent_in_a_set_fails_naming_the_set(self):
-        result = self.cli("--set", "implementer.agent=cursor", "launch", "worker")
+        result = self.cli("--set", "implementer.agent=gemini", "launch", "worker")
 
         self.assert_failure(
             result,
-            'invalid --set implementer.agent=cursor: unknown agent "cursor", '
-            'expected one of `claude`, `codex`',
+            'invalid --set implementer.agent=gemini: unknown agent "gemini", '
+            'expected one of `claude`, `codex`, `cursor`',
         )
         self.assert_success(self.cli("launch", "worker"))
 
@@ -1671,3 +1685,135 @@ class CodexImplementerContractTests(SupervisorContractCase):
         result = self.assert_success(self.cli("context", "worker"))
 
         self.assertEqual(result.stdout, "worker\t65537\n")
+
+
+class CursorImplementerContractTests(SupervisorContractCase):
+    """A role that names cursor runs the Cursor Agent CLI. Its transcript records no
+    usage and no tool output, so the supervisor reports the context as unknown and
+    takes the commit from git."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_settings('[implementer]\nagent = "cursor"\n')
+        # The gate refuses a dirty tree, so the settings file is part of the fixture's history.
+        self.git("add", "chainsaw.toml")
+        self.git("commit", "-q", "-m", "chore: run cursor")
+
+    def test_launch_starts_cursor_trusted_and_forced_and_the_row_records_it(self):
+        self.launch()
+
+        self.assertEqual(self.session_agent("worker"), "cursor")
+        self.assertEqual(self.launch_args("worker"), ["--trust", "--force", "."])
+
+    def test_dispatch_finds_its_prompt_in_the_transcript_under_the_project(self):
+        task = self.new_task(text="Implement it the Cursor way.")
+        self.launch()
+
+        result = self.assert_success(self.dispatch(task))
+
+        transcript = self.session_transcript("worker")
+        self.assertEqual(transcript.parents[3], self.home / ".cursor" / "projects", transcript)
+        self.assertEqual(transcript.parent.name, "session-worker-1")
+        self.assertEqual(transcript.name, "session-worker-1.jsonl")
+        opening, prompt = (json.loads(line) for line in transcript.read_text().splitlines())
+        self.assertEqual((opening["role"], prompt["role"]), ("user", "user"))
+        # The `.` on the command line is the session's first prompt.
+        self.assertIn("<user_query>\n.\n</user_query>", opening["message"]["content"][0]["text"])
+        self.assertIn(
+            "<user_query>\nImplement it the Cursor way.", prompt["message"]["content"][0]["text"],
+        )
+        self.assertIn(f"task {task} dispatched to worker", result.stdout)
+
+    def test_prompt_wait_prints_the_agent_reply(self):
+        self.launch()
+        self.update_runtime_state(reply_on_prompt="fixture reply")
+
+        result = self.assert_success(
+            self.cli("prompt", "worker", "hello agent", "--wait")
+        )
+
+        self.assertEqual(result.stdout, "fixture reply\n")
+
+    def test_context_is_unknown_rather_than_zero(self):
+        self.launch()
+        self.append_entry("worker", {
+            "role": "assistant",
+            "message": {"content": [{"type": "text", "text": "working"}]},
+        })
+
+        context = self.assert_success(self.cli("context", "worker"))
+        daemon = self.start_daemon()
+        state = self.wait_for_state("context unknown (max unknown)")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertEqual(context.stdout, "worker\tunknown\n")
+        self.assertNotIn("OVER-LIMIT", state.stdout)
+
+    def test_the_commit_is_taken_from_head_and_accepted(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+
+        sha = self.commit_file()
+        daemon = self.start_daemon()
+        state = self.wait_for_state(f"{task} committed_unverified")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        accepted = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"{task} committed_unverified", state.stdout)
+        self.assertIn(sha[:10], state.stdout)
+        self.assertIn(f"task {task} accepted: checks passed at {sha}", accepted.stdout)
+
+    def test_accept_fails_when_head_has_not_moved(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+
+        result = self.cli("accept", str(task))
+
+        self.assert_failure(result)
+        self.assertIn("no new commit at HEAD since the task was dispatched", result.stdout)
+
+    def test_calibrate_reports_an_unknown_context(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        self.commit_file()
+        daemon = self.start_daemon()
+        self.wait_for_state(f"{task} committed_unverified")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        result = self.assert_success(self.cli("calibrate", str(task)))
+
+        self.assertIn("context unknown (session unknown, base unknown)", result.stdout)
+        self.assertIn("actual 1 files/1 lines", result.stdout)
+
+
+class ClaudeCommitDetectionContractTests(SupervisorContractCase):
+    """A Claude implementer's commit is read from its transcript alone: a commit
+    that reached git without git's output reaching the transcript is not its."""
+
+    def test_a_commit_absent_from_the_transcript_is_not_recorded(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+
+        self.commit_file()
+        daemon = self.start_daemon()
+        self.append_text("worker", "still working")
+        self.wait_for_state("context       0")
+        state = self.assert_success(self.cli("state"))
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        result = self.cli("accept", str(task))
+
+        self.assertIn(f"{task} in_flight", state.stdout)
+        self.assert_failure(result)
+        self.assertIn("no commit found in the implementer's transcript", result.stdout)

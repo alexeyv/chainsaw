@@ -34,12 +34,14 @@ mod agent_kind_try_from {
     assert_eq!(AgentKind::Claude.to_string(), "claude");
     assert_eq!(AgentKind::try_from("codex").unwrap(), AgentKind::Codex);
     assert_eq!(AgentKind::Codex.to_string(), "codex");
+    assert_eq!(AgentKind::try_from("cursor").unwrap(), AgentKind::Cursor);
+    assert_eq!(AgentKind::Cursor.to_string(), "cursor");
   }
 
   #[test]
   fn should_fail_when_the_agent_is_unknown() {
-    let error = AgentKind::try_from("cursor").unwrap_err();
-    assert_eq!(error.to_string(), "unknown agent \"cursor\"");
+    let error = AgentKind::try_from("gemini").unwrap_err();
+    assert_eq!(error.to_string(), "unknown agent \"gemini\"");
   }
 }
 
@@ -87,8 +89,8 @@ external_session_id: "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e"
 launched_head: "base123"
 started_at: 2023-11-14T22:13:20Z
 stopped_at: none
-context: 0
-context_max: 0
+context: none
+context_max: none
 last_growth: 2023-11-14T22:13:20Z
 kicked_at: none
 over_limit_at: none
@@ -153,8 +155,8 @@ can_latch_over_limit: false"#
       name: "lead",
       role: Role::Lead,
       launched_head: None,
-      context: 260_000,
-      context_max: 260_000,
+      context: Some(260_000),
+      context_max: Some(260_000),
       over_limit_at: Some(timestamp(1_700_000_900)),
       ..working_implementer()
     })
@@ -253,14 +255,42 @@ can_latch_over_limit: false"#
   }
 
   #[test]
+  fn should_accept_a_reading_whose_context_is_unknown() {
+    let session = build_session(SessionSpec {
+      agent: AgentKind::Cursor,
+      context: None,
+      context_max: None,
+      ..working_implementer()
+    })
+    .unwrap();
+
+    assert_eq!(session.agent(), AgentKind::Cursor);
+    assert_eq!(session.context(), None);
+    assert_eq!(session.context_max(), None);
+  }
+
+  #[test]
+  fn should_accept_a_known_maximum_beside_an_unknown_context() {
+    let session = build_session(SessionSpec {
+      context: None,
+      context_max: Some(5_000),
+      ..working_implementer()
+    })
+    .unwrap();
+
+    assert_eq!(session.context(), None);
+    assert_eq!(session.context_max(), Some(5_000));
+  }
+
+  #[test]
   fn should_fail_when_a_context_reading_is_negative() {
     let context = build_session(SessionSpec {
-      context: -1,
+      context: Some(-1),
       ..working_implementer()
     })
     .unwrap_err();
     let context_max = build_session(SessionSpec {
-      context_max: -1,
+      context_max: Some(-1),
       ..launched_implementer()
     })
     .unwrap_err();
@@ -272,7 +302,7 @@ can_latch_over_limit: false"#
   #[test]
   fn should_fail_when_the_maximum_is_below_the_current_context() {
     let error = build_session(SessionSpec {
-      context: 5_001,
+      context: Some(5_001),
       ..working_implementer()
     })
     .unwrap_err();

@@ -6,12 +6,15 @@ for the tests to read.
 An agent is a dict in the state's `agents`: `session_id`, `status`, `run_dir`,
 `agent` (its kind), `transcript`, `queued`, and `busy_until`, the moment its
 current turn ends. A test marks an agent busy through `status`; a fake marks it
-busy for a moment after each prompt, as a real agent is.
+busy for a moment after each prompt, as a real agent is. While the state's
+`hold_transcript` is set, an agent works without writing, as Cursor does until
+its first reply; what it would have written waits in `held`.
 """
 
 import fcntl
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +22,17 @@ from pathlib import Path
 #: How long an agent is mid-turn after a prompt lands. Long enough for the
 #: supervisor's first probe to find it busy, as it would find a real one.
 TURN_SECONDS = 0.75
+
+#: The executable each kind of agent is, as a terminal runs it.
+PROGRAMS = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}
+
+
+def kind_running(program):
+    """The kind of agent behind an executable."""
+    for kind, name in PROGRAMS.items():
+        if name == program:
+            return kind
+    raise SystemExit(f"fake runtime cannot stand in for {program}")
 
 
 def new_agent(kind, run_dir, session_id):
@@ -50,22 +64,53 @@ def end_turn(agent):
 # --- what a real agent does
 
 
-def open_transcript(agent):
-    """What an agent writes the moment it starts, before any prompt: Codex
-    names the session and its working directory, Claude writes nothing."""
+def open_transcript(current, agent, args):
+    """What an agent writes the moment it starts, given `args`: Codex names the
+    session and its working directory, Cursor takes the prompt on its command
+    line, Claude writes nothing."""
     if agent["agent"] == "codex":
         append_entry(agent, {
             "type": "session_meta",
             "payload": {"id": agent["session_id"], "cwd": agent["run_dir"]},
         })
+    if agent["agent"] == "cursor":
+        prompts = [word for word in args if not word.startswith("--")]
+        if prompts:
+            deliver(current, agent, prompts[-1])
 
 
 def deliver(current, agent, text):
-    """A real agent picks up a prompt and, when the test says so, answers it."""
-    append_entry(agent, prompt_entry(agent["agent"], text))
+    """A real agent picks up a prompt and, when the test says so, answers it.
+    While the test holds the transcript, it works without writing, as Cursor
+    does until its first reply."""
+    entries = [prompt_entry(agent["agent"], text)]
     reply_text = current.get("reply_on_prompt")
     if reply_text is not None:
-        append_entry(agent, reply_entry(agent["agent"], reply_text))
+        entries.append(reply_entry(agent["agent"], reply_text))
+    if agent["agent"] == "cursor":
+        drop_turn_ended(agent)
+    if current.get("hold_transcript"):
+        agent.setdefault("held", []).extend(entries)
+    else:
+        append_entry(agent, entries)
+
+
+def drop_turn_ended(agent):
+    """Cursor ends its transcript with a `turn_ended` line that the next turn
+    removes before writing, so the file shrinks by that line as the turn begins."""
+    path = Path(agent["transcript"])
+    if not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    if lines and json.loads(lines[-1]).get("type") == "turn_ended":
+        path.write_text("".join(lines[:-1]))
+
+
+def flush_held(current, agent):
+    """A late-writing agent's transcript catches up once the test releases it."""
+    if current.get("hold_transcript") or not agent.get("held"):
+        return
+    append_entry(agent, agent.pop("held"))
 
 
 def enqueue(agent, text):
@@ -77,8 +122,12 @@ def enqueue(agent, text):
 
 
 def drain_queue(current, agent):
-    """A real agent works through what it queued while busy once it is idle."""
-    if agent is None or is_busy(agent):
+    """A real agent writes what it held back and, once idle, works through what
+    it queued while busy."""
+    if agent is None:
+        return
+    flush_held(current, agent)
+    if is_busy(agent):
         return
     for text in agent.get("queued", []):
         deliver(current, agent, text)
@@ -98,18 +147,27 @@ def transcript_for(kind, run_dir, session_id):
         codex_home = Path(os.environ.get("CODEX_HOME") or home / ".codex")
         return (codex_home / "sessions" / now.strftime("%Y/%m/%d")
                 / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{session_id}.jsonl")
+    if kind == "cursor":
+        project = re.sub(r"[^A-Za-z0-9]+", "-", os.path.realpath(run_dir)).strip("-")
+        return (home / ".cursor" / "projects" / project / "agent-transcripts" / session_id
+                / f"{session_id}.jsonl")
     raise SystemExit(f"fake runtime cannot stand in for {kind}")
 
 
 def prompt_entry(kind, text):
     if kind == "codex":
         return codex_message("user", "input_text", text)
+    if kind == "cursor":
+        stamp = datetime.now(timezone.utc).strftime("%A, %B %d, %Y %I:%M %p")
+        return cursor_message(
+            "user", f"<timestamp>{stamp}</timestamp>\n<user_query>\n{text}\n</user_query>"
+        )
     return {"type": "user", "message": {"content": text}}
 
 
 def queued_prompt_entry(kind, text):
-    """Codex writes nothing for a prompt waiting behind the current turn."""
-    if kind == "codex":
+    """Codex and Cursor write nothing for a prompt waiting behind the current turn."""
+    if kind in ("codex", "cursor"):
         return None
     return {
         "type": "queue-operation",
@@ -122,6 +180,8 @@ def queued_prompt_entry(kind, text):
 def reply_entry(kind, text):
     if kind == "codex":
         return codex_message("assistant", "output_text", text)
+    if kind == "cursor":
+        return [cursor_message("assistant", text), {"type": "turn_ended", "status": "success"}]
     return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
 
 
@@ -136,11 +196,27 @@ def codex_message(role, block_type, text):
     }
 
 
+def cursor_message(role, text):
+    return {
+        "role": role,
+        "message": {"content": [{"type": "text", "text": text}]},
+    }
+
+
 def append_entry(agent, entry):
+    """Write one entry, or each of a list of them (however nested), to the agent's
+    transcript."""
     path = Path(agent["transcript"])
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as transcript:
-        transcript.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        for item in flattened(entry):
+            transcript.write(json.dumps(item, separators=(",", ":")) + "\n")
+
+
+def flattened(entry):
+    if not isinstance(entry, list):
+        return [entry]
+    return [item for element in entry for item in flattened(element)]
 
 
 # --- plumbing

@@ -13,8 +13,8 @@ pub fn create(
   actual_files: i64,
   actual_lines: i64,
   wall_seconds: Option<f64>,
-  context_size_start: i64,
-  context_size_end: i64,
+  context_size_start: Option<i64>,
+  context_size_end: Option<i64>,
 ) -> Result<Calibration> {
   let created_at = Utc::now();
   let id = transaction.query_row(

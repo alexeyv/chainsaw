@@ -36,7 +36,7 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
     [id],
     |row| {
       Ok(format!(
-        "{} {} {} {} {:?} started={} stopped={:?} context={}/{} growth={} kicked={:?} over_limit={:?} transcript={:?}",
+        "{} {} {} {} {:?} started={} stopped={:?} context={:?}/{:?} growth={} kicked={:?} over_limit={:?} transcript={:?}",
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
@@ -44,8 +44,8 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
         row.get::<_, Option<String>>(4)?,
         row.get::<_, i64>(5)?,
         row.get::<_, Option<i64>>(6)?,
-        row.get::<_, i64>(7)?,
-        row.get::<_, i64>(8)?,
+        row.get::<_, Option<i64>>(7)?,
+        row.get::<_, Option<i64>>(8)?,
         row.get::<_, i64>(9)?,
         row.get::<_, Option<i64>>(10)?,
         row.get::<_, Option<i64>>(11)?,
@@ -81,8 +81,8 @@ external_session_id: "uuid-1"
 launched_head: "base123"
 started_at: {started}
 stopped_at: none
-context: 0
-context_max: 0
+context: none
+context_max: none
 last_growth: {started}
 kicked_at: none
 over_limit_at: none
@@ -97,7 +97,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=0/0 growth={millis} kicked=None over_limit=None transcript=None",
+        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=None",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -192,7 +192,7 @@ mod get {
     db.execute(
       "
         insert into sessions(name, role, agent, external_session_id, started_at, last_growth)
-        values('implementer-1', 'implementer', 'cursor', 'uuid-1', 0, 0)
+        values('implementer-1', 'implementer', 'gemini', 'uuid-1', 0, 0)
         ",
       [],
     )?;
@@ -202,7 +202,7 @@ mod get {
 
     assert_eq!(
       error.to_string(),
-      "session implementer-1: unknown agent \"cursor\""
+      "session implementer-1: unknown agent \"gemini\""
     );
     Ok(())
   }
@@ -370,7 +370,7 @@ mod record_reading {
     let started = session.started_at();
     let polled = started + chrono::Duration::seconds(30);
 
-    let read = record_reading(&transaction, session.id(), 4_000, true, polled)?;
+    let read = record_reading(&transaction, session.id(), Some(4_000), true, polled)?;
 
     assert_eq!(
       format_session(&read),
@@ -406,13 +406,13 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let grown = session.started_at() + chrono::Duration::seconds(30);
-    record_reading(&transaction, session.id(), 4_000, true, grown)?;
+    record_reading(&transaction, session.id(), Some(4_000), true, grown)?;
     let kicked = record_kick(&transaction, session.id())?;
 
     let read = record_reading(
       &transaction,
       session.id(),
-      4_000,
+      Some(4_000),
       false,
       grown + chrono::Duration::seconds(700),
     )?;
@@ -431,7 +431,7 @@ can_latch_over_limit: true"#,
     record_kick(&transaction, session.id())?;
     let grown = session.started_at() + chrono::Duration::seconds(900);
 
-    let read = record_reading(&transaction, session.id(), 100, true, grown)?;
+    let read = record_reading(&transaction, session.id(), Some(100), true, grown)?;
 
     assert_eq!(read.kicked_at(), None);
     assert_eq!(read.last_growth(), grown);
@@ -445,12 +445,42 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let at = session.started_at() + chrono::Duration::seconds(30);
-    record_reading(&transaction, session.id(), 9_000, true, at)?;
+    record_reading(&transaction, session.id(), Some(9_000), true, at)?;
 
-    let read = record_reading(&transaction, session.id(), 2_000, true, at)?;
+    let read = record_reading(&transaction, session.id(), Some(2_000), true, at)?;
 
-    assert_eq!(read.context(), 2_000);
-    assert_eq!(read.context_max(), 9_000);
+    assert_eq!(read.context(), Some(2_000));
+    assert_eq!(read.context_max(), Some(9_000));
+    Ok(())
+  }
+
+  #[test]
+  fn should_leave_the_context_unknown_when_the_reading_cannot_say() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let session = implementer(&transaction, "implementer-1", "uuid-1")?;
+    let at = session.started_at() + chrono::Duration::seconds(30);
+
+    let read = record_reading(&transaction, session.id(), None, true, at)?;
+
+    assert_eq!(read.context(), None);
+    assert_eq!(read.context_max(), None);
+    assert_eq!(read.last_growth(), at);
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_the_maximum_when_a_later_reading_is_unknown() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    let session = implementer(&transaction, "implementer-1", "uuid-1")?;
+    let at = session.started_at() + chrono::Duration::seconds(30);
+    record_reading(&transaction, session.id(), Some(9_000), true, at)?;
+
+    let read = record_reading(&transaction, session.id(), None, true, at)?;
+
+    assert_eq!(read.context(), None);
+    assert_eq!(read.context_max(), Some(9_000));
     Ok(())
   }
 
@@ -459,7 +489,8 @@ can_latch_over_limit: true"#,
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error = record_reading(&transaction, 42, 1, true, timestamp(1_700_000_000)).unwrap_err();
+    let error =
+      record_reading(&transaction, 42, Some(1), true, timestamp(1_700_000_000)).unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())
@@ -540,7 +571,7 @@ mod record_over_limit {
     let latched = record_over_limit(&transaction, lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
 
-    let read = record_reading(&transaction, lead.id(), 260_000, true, grown)?;
+    let read = record_reading(&transaction, lead.id(), Some(260_000), true, grown)?;
 
     assert_eq!(read.over_limit_at(), latched.over_limit_at());
     assert!(!read.can_latch_over_limit());

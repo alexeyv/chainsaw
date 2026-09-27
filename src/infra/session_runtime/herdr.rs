@@ -58,6 +58,7 @@ impl HerdrSessionRuntime {
     match agent {
       AgentKind::Claude => "claude",
       AgentKind::Codex => "codex",
+      AgentKind::Cursor => "cursor",
     }
   }
 

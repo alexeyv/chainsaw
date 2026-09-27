@@ -24,7 +24,7 @@ fn dispatched(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
 /// A task dispatched to session 7, flown, and committed as `landed123`.
 fn committed(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
   let task = dispatched(transaction, text)?;
-  take_flight(transaction, task.id(), "base123", 900)?;
+  take_flight(transaction, task.id(), "base123", Some(900))?;
   record_commit(transaction, task.id(), "landed123", None)
 }
 
@@ -545,7 +545,7 @@ mod take_flight {
     let task = draft(&transaction, "fly")?;
     let task = dispatch(&transaction, task.id(), 7, 42, None)?;
 
-    let task = take_flight(&transaction, task.id(), "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", Some(900))?;
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::InFlight);
@@ -562,7 +562,7 @@ mod take_flight {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "fly")?;
 
-    let error = take_flight(&transaction, task.id(), "base123", 900).unwrap_err();
+    let error = take_flight(&transaction, task.id(), "base123", Some(900)).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "InFlight task requires a session");
@@ -579,7 +579,7 @@ mod record_commit {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "commit")?;
-    let task = take_flight(&transaction, task.id(), "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", Some(900))?;
 
     let task = record_commit(&transaction, task.id(), "landed123", Some("hooks ran"))?;
     transaction.commit()?;
@@ -634,7 +634,7 @@ mod accept {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "accept me")?;
-    let task = take_flight(&transaction, task.id(), "base123", 900)?;
+    let task = take_flight(&transaction, task.id(), "base123", Some(900))?;
     let task = record_commit(&transaction, task.id(), "landed123", None)?;
 
     let task = accept(&transaction, task.id(), "gate passed")?;

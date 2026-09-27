@@ -1,7 +1,7 @@
 //! The agent a session runs: what flags it launches with, and where and how
 //! its transcript is read. A session runtime launches the CLI an `AgentKind`
 //! names and drives the terminal; the agent reads what the process in it
-//! wrote. A session runs Claude Code or OpenAI Codex.
+//! wrote. A session runs Claude Code, OpenAI Codex or the Cursor Agent CLI.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -14,9 +14,11 @@ use crate::domain::{AgentKind, Session};
 
 mod claude;
 mod codex;
+mod cursor;
 
 pub use claude::Claude;
 pub use codex::Codex;
+pub use cursor::Cursor;
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +32,10 @@ pub enum PromptState {
 }
 
 pub trait Agent {
+  /// The executable a session of this kind runs, as the agent's CLI is
+  /// installed on PATH.
+  fn program(&self) -> &'static str;
+
   /// The flags a session of this kind launches with when settings name none.
   fn default_args(&self, kind: SessionKind) -> String;
 
@@ -48,15 +54,18 @@ pub trait Agent {
   /// The transcript of a session started in `run_dir`, or None until it exists.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;
 
-  /// Context the session held at its latest turn.
-  fn context_size(&self, transcript: &Path) -> u64;
+  /// Context the session held at its latest turn, or None when the agent's
+  /// transcript records no usage at all.
+  fn context_size(&self, transcript: &Path) -> Option<u64>;
 
-  /// Context the session held at its last turn before `offset`.
-  fn context_before(&self, transcript: &Path, offset: u64) -> u64;
+  /// Context the session held at its last turn before `offset`, or None when
+  /// the agent's transcript records no usage at all.
+  fn context_before(&self, transcript: &Path, offset: u64) -> Option<u64>;
 
   /// The largest context the session held between `start` and `end`, or to
-  /// the end of the transcript.
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> u64;
+  /// the end of the transcript; None when the agent's transcript records no
+  /// usage at all.
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> Option<u64>;
 
   /// The state of a prompt opening with `prompt`, sent after `offset`.
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
@@ -68,17 +77,20 @@ pub trait Agent {
   fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
 
   /// Commit ids recorded from `offset` on, as `[branch sha]` in git's own
-  /// commit output. Every agent shows the shell what git printed, so this
-  /// reads the transcript as text.
-  fn commits_in_transcript(&self, transcript: &Path, offset: u64) -> Vec<String> {
+  /// commit output. An agent that shows the shell what git printed reads the
+  /// transcript as text; one whose transcript keeps no tool output at all
+  /// returns None, and the coordinator asks git instead.
+  fn commits_in_transcript(&self, transcript: &Path, offset: u64) -> Option<Vec<String>> {
     let Ok(text) = read_lossy(transcript, offset, None) else {
-      return Vec::new();
+      return Some(Vec::new());
     };
     let pattern = Regex::new(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]").expect("valid commit regex");
-    pattern
-      .captures_iter(&text)
-      .map(|capture| capture[1].to_owned())
-      .collect()
+    Some(
+      pattern
+        .captures_iter(&text)
+        .map(|capture| capture[1].to_owned())
+        .collect(),
+    )
   }
 }
 
@@ -92,6 +104,7 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
   match kind {
     AgentKind::Claude => &Claude,
     AgentKind::Codex => &Codex,
+    AgentKind::Cursor => &Cursor,
   }
 }
 

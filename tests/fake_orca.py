@@ -123,12 +123,13 @@ def open_terminal(current, command, title=None, split_from=None):
     current["sequence"] += 1
     number = current["sequence"]
     handle, tab_id = f"term-{number}", f"tab-{number}"
-    run_dir, kind, session_id, args = launched(command)
+    run_dir, program, session_id, args = launched(command)
+    kind = agents.kind_running(program)
     session_id = session_id or f"session-{title or handle}-{number}"
     agent = agents.new_agent(kind, run_dir, session_id)
     current["agents"][handle] = agent
-    agents.open_transcript(agent)
-    details = {"kind": kind, "args": args}
+    agents.open_transcript(current, agent, args)
+    details = {"kind": kind, "program": program, "args": args}
     if title is not None:
         details["title"] = title
     if split_from is not None:
@@ -138,16 +139,16 @@ def open_terminal(current, command, title=None, split_from=None):
 
 
 def launched(command):
-    """The agent behind the shell command the supervisor hands a terminal:
-    `cd RUN_DIR && exec AGENT [--session-id ID] ARGS...`."""
+    """The program behind the shell command the supervisor hands a terminal:
+    `cd RUN_DIR && exec PROGRAM [--session-id ID] ARGS...`."""
     words = shlex.split(command)
     if words[:1] != ["cd"] or words[2:4] != ["&&", "exec"] or len(words) < 5:
         raise SystemExit(f"fake orca cannot run {command!r}")
-    run_dir, kind, args = words[1], words[4], words[5:]
+    run_dir, program, args = words[1], words[4], words[5:]
     session_id = None
     if args[:1] == ["--session-id"]:
         session_id, args = args[1], args[2:]
-    return run_dir, kind, session_id, args
+    return run_dir, program, session_id, args
 
 
 # --- plumbing

@@ -5,7 +5,9 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
-use super::{require_nonblank, require_nonnegative, require_optional_nonblank, require_positive};
+use super::{
+  require_nonblank, require_optional_nonblank, require_optional_nonnegative, require_positive,
+};
 
 /// What a session is for. The lead runs the process, implementers take tasks,
 /// and the commentator reviews commits; only implementers are ever dispatched to.
@@ -45,13 +47,14 @@ impl fmt::Display for Role {
   }
 }
 
-/// Which coding agent runs a session: Claude Code or OpenAI Codex. The name
-/// is what the session row stores. Iterating the enum lists every agent the
-/// supervisor accepts.
+/// Which coding agent runs a session: Claude Code, OpenAI Codex or the Cursor
+/// Agent CLI. The name is what the session row stores. Iterating the enum
+/// lists every agent the supervisor accepts.
 #[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
 pub enum AgentKind {
   Claude,
   Codex,
+  Cursor,
 }
 
 impl AgentKind {
@@ -59,6 +62,7 @@ impl AgentKind {
     match self {
       Self::Claude => "claude",
       Self::Codex => "codex",
+      Self::Cursor => "cursor",
     }
   }
 }
@@ -70,6 +74,7 @@ impl TryFrom<&str> for AgentKind {
     match value {
       "claude" => Ok(Self::Claude),
       "codex" => Ok(Self::Codex),
+      "cursor" => Ok(Self::Cursor),
       value => bail!("unknown agent {value:?}"),
     }
   }
@@ -93,8 +98,8 @@ pub struct Session {
   launched_head: Option<String>,
   started_at: DateTime<Utc>,
   stopped_at: Option<DateTime<Utc>>,
-  context: i64,
-  context_max: i64,
+  context: Option<i64>,
+  context_max: Option<i64>,
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
@@ -112,8 +117,8 @@ impl Session {
     launched_head: Option<String>,
     started_at: DateTime<Utc>,
     stopped_at: Option<DateTime<Utc>>,
-    context: i64,
-    context_max: i64,
+    context: Option<i64>,
+    context_max: Option<i64>,
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
     over_limit_at: Option<DateTime<Utc>>,
@@ -129,9 +134,11 @@ impl Session {
     {
       bail!("transcript cannot be blank");
     }
-    require_nonnegative("context", context)?;
-    require_nonnegative("context_max", context_max)?;
-    if context_max < context {
+    require_optional_nonnegative("context", context)?;
+    require_optional_nonnegative("context_max", context_max)?;
+    if let (Some(context), Some(context_max)) = (context, context_max)
+      && context_max < context
+    {
       bail!("context_max cannot be below context");
     }
     if stopped_at.is_some_and(|stopped| stopped < started_at) {
@@ -197,11 +204,15 @@ impl Session {
     self.stopped_at
   }
 
-  pub fn context(&self) -> i64 {
+  /// Context the session held at its latest reading, or None while nothing
+  /// has been read or the agent's transcript cannot say.
+  pub fn context(&self) -> Option<i64> {
     self.context
   }
 
-  pub fn context_max(&self) -> i64 {
+  /// The largest context ever read for the session, or None while no reading
+  /// has said.
+  pub fn context_max(&self) -> Option<i64> {
     self.context_max
   }
 

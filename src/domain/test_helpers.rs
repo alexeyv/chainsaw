@@ -130,8 +130,24 @@ pub fn calibration_measuring(
     actual_lines,
     wall_seconds,
     created_at(),
-    start,
-    end,
+    Some(start),
+    Some(end),
+  )
+}
+
+/// A calibration for a task whose session's context could not be read.
+pub fn calibration_without_context(id: i64, task_id: i64) -> Result<Calibration> {
+  Calibration::new(
+    id,
+    task_id,
+    2,
+    20,
+    4,
+    35,
+    Some(12.5),
+    created_at(),
+    None,
+    None,
   )
 }
 
@@ -146,8 +162,8 @@ pub fn format_calibration(calibration: &Calibration) -> String {
     calibration.actual_lines(),
     format_option(calibration.wall_seconds()),
     format_time(calibration.created_at()),
-    calibration.context_size_start(),
-    calibration.context_size_end(),
+    format_option(calibration.context_size_start()),
+    format_option(calibration.context_size_end()),
   )
 }
 
@@ -358,8 +374,8 @@ pub struct SessionSpec {
   pub launched_head: Option<&'static str>,
   pub started_at: DateTime<Utc>,
   pub stopped_at: Option<DateTime<Utc>>,
-  pub context: i64,
-  pub context_max: i64,
+  pub context: Option<i64>,
+  pub context_max: Option<i64>,
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
   pub over_limit_at: Option<DateTime<Utc>>,
@@ -377,8 +393,8 @@ pub fn launched_implementer() -> SessionSpec {
     launched_head: Some("base123"),
     started_at: created_at(),
     stopped_at: None,
-    context: 0,
-    context_max: 0,
+    context: None,
+    context_max: None,
     last_growth: created_at(),
     kicked_at: None,
     over_limit_at: None,
@@ -390,8 +406,8 @@ pub fn launched_implementer() -> SessionSpec {
 /// grown, and its context read.
 pub fn working_implementer() -> SessionSpec {
   SessionSpec {
-    context: 4_000,
-    context_max: 5_000,
+    context: Some(4_000),
+    context_max: Some(5_000),
     last_growth: timestamp(1_700_000_600),
     transcript: Some("/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"),
     ..launched_implementer()
@@ -428,8 +444,8 @@ pub fn format_session(session: &Session) -> String {
     format_option_text(session.launched_head()),
     format_time(session.started_at()),
     format_option(session.stopped_at().map(format_time)),
-    session.context(),
-    session.context_max(),
+    format_option(session.context()),
+    format_option(session.context_max()),
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),

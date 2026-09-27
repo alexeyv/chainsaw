@@ -41,6 +41,15 @@ fn usage_line(input: u64) -> String {
   format!(r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":{input}}}}}}}"#)
 }
 
+mod program {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(Claude.program(), "claude");
+  }
+}
+
 mod default_args {
   use super::*;
 
@@ -84,14 +93,14 @@ mod context_size {
   fn should_work() {
     let transcript = Transcript::containing(&format!("{}\n{}\n", usage_line(10), usage_line(40)));
 
-    assert_eq!(Claude.context_size(transcript.path()), 40);
+    assert_eq!(Claude.context_size(transcript.path()), Some(40));
   }
 
   #[test]
   fn should_read_zero_when_no_turn_reports_usage() {
     let transcript = Transcript::containing(r#"{"type":"user","message":{"content":"hi"}}"#);
 
-    assert_eq!(Claude.context_size(transcript.path()), 0);
+    assert_eq!(Claude.context_size(transcript.path()), Some(0));
   }
 }
 
@@ -105,7 +114,7 @@ mod context_before {
 
     assert_eq!(
       Claude.context_before(transcript.path(), first.len() as u64 + 1),
-      10
+      Some(10)
     );
   }
 }
@@ -124,7 +133,7 @@ mod context_peak {
 
     assert_eq!(
       Claude.context_peak(transcript.path(), first.len() as u64 + 1, None),
-      40
+      Some(40)
     );
   }
 }
@@ -228,7 +237,7 @@ mod commits_in_transcript {
 
     assert_eq!(
       Claude.commits_in_transcript(transcript.path(), 0),
-      vec!["0123abc"]
+      Some(vec!["0123abc".to_owned()])
     );
   }
 
@@ -242,7 +251,7 @@ mod commits_in_transcript {
 
     assert_eq!(
       Claude.commits_in_transcript(transcript.path(), old.len() as u64 + 1),
-      vec!["4567def"]
+      Some(vec!["4567def".to_owned()])
     );
   }
 }

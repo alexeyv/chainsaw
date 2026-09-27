@@ -14,7 +14,17 @@ mod create {
 
     let before = Utc::now();
     let transaction = db.transaction()?;
-    let calibration = create(&transaction, 7, 2, 20, 4, 35, Some(12.5), 100, 900)?;
+    let calibration = create(
+      &transaction,
+      7,
+      2,
+      20,
+      4,
+      35,
+      Some(12.5),
+      Some(100),
+      Some(900),
+    )?;
     transaction.commit()?;
     let after = Utc::now();
 
@@ -35,8 +45,8 @@ mod create {
           row.get::<_, i64>(4)?,
           row.get::<_, Option<f64>>(5)?,
           row.get::<_, i64>(6)?,
-          row.get::<_, i64>(7)?,
-          row.get::<_, i64>(8)?,
+          row.get::<_, Option<i64>>(7)?,
+          row.get::<_, Option<i64>>(8)?,
         ))
       },
     )?;
@@ -54,10 +64,30 @@ mod create {
         35,
         Some(12.5),
         calibration.created_at().timestamp_millis(),
-        100,
-        900,
+        Some(100),
+        Some(900),
       )
     );
+    Ok(())
+  }
+
+  #[test]
+  fn should_store_an_unknown_context_as_null() -> Result<()> {
+    let mut db = database();
+    task_row(&db, 7)?;
+
+    let transaction = db.transaction()?;
+    let calibration = create(&transaction, 7, 2, 20, 4, 35, Some(12.5), None, None)?;
+    transaction.commit()?;
+
+    let stored = db.query_row(
+      "select context_size_start, context_size_end from calibrations where id=?",
+      [calibration.id()],
+      |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+    )?;
+    assert_eq!(stored, (None, None));
+    assert_eq!(calibration.context_size_start(), None);
+    assert_eq!(calibration.context_size_end(), None);
     Ok(())
   }
 
@@ -68,8 +98,8 @@ mod create {
     task_row(&db, 8)?;
 
     let transaction = db.transaction()?;
-    let first = create(&transaction, 7, 0, 0, 0, 0, None, 0, 0)?;
-    let second = create(&transaction, 8, 0, 0, 0, 0, None, 0, 0)?;
+    let first = create(&transaction, 7, 0, 0, 0, 0, None, Some(0), Some(0))?;
+    let second = create(&transaction, 8, 0, 0, 0, 0, None, Some(0), Some(0))?;
     transaction.commit()?;
 
     assert_eq!((first.id(), second.id()), (1, 2));
@@ -82,7 +112,7 @@ mod create {
     task_row(&db, 7)?;
 
     let transaction = db.transaction()?;
-    create(&transaction, 7, 0, 0, 0, 0, None, 0, 0)?;
+    create(&transaction, 7, 0, 0, 0, 0, None, Some(0), Some(0))?;
     transaction.rollback()?;
 
     assert_eq!(row_count(&db, "calibrations")?, 0);
@@ -94,11 +124,11 @@ mod create {
     let mut db = database();
     task_row(&db, 7)?;
     let transaction = db.transaction()?;
-    create(&transaction, 7, 0, 0, 0, 0, None, 0, 0)?;
+    create(&transaction, 7, 0, 0, 0, 0, None, Some(0), Some(0))?;
     transaction.commit()?;
 
     let transaction = db.transaction()?;
-    let error = create(&transaction, 7, 0, 0, 0, 0, None, 0, 0).unwrap_err();
+    let error = create(&transaction, 7, 0, 0, 0, 0, None, Some(0), Some(0)).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(
@@ -114,7 +144,7 @@ mod create {
     let mut db = database();
 
     let transaction = db.transaction()?;
-    let error = create(&transaction, 7, 0, 0, 0, 0, None, 0, 0).unwrap_err();
+    let error = create(&transaction, 7, 0, 0, 0, 0, None, Some(0), Some(0)).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
@@ -128,7 +158,7 @@ mod create {
     task_row(&db, 7)?;
 
     let transaction = db.transaction()?;
-    let error = create(&transaction, 7, -1, 0, 0, 0, None, 0, 0).unwrap_err();
+    let error = create(&transaction, 7, -1, 0, 0, 0, None, Some(0), Some(0)).unwrap_err();
     assert_eq!(error.to_string(), "predicted_files cannot be negative");
     transaction.rollback()?;
 
