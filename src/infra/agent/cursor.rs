@@ -15,8 +15,11 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{Agent, PromptState, entries, read_lossy, text_of};
+use super::{Agent, PromptEcho, PromptState, entries, read_lossy, text_of};
 use crate::domain::{ContextSize, SessionKind};
+
+/// The prompt a new session is launched with.
+pub const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the task.";
 
 pub struct Cursor;
 
@@ -33,8 +36,11 @@ impl Agent for Cursor {
   /// stays on. The model stays whatever Cursor's own configuration says. The
   /// trailing `.` is the session's first prompt: Cursor writes its
   /// transcript, and so has a session id to report, only once a prompt lands.
+  /// Cursor writes a session's transcript, and so its id, only once a prompt
+  /// has been answered; this first one asks for nothing more. A bare `.`
+  /// once drew a chooser, which then swallowed the task sent into it.
   fn default_args(&self, _kind: SessionKind) -> String {
-    "--trust --force .".to_owned()
+    format!("--trust --force {}", shell_words::quote(LAUNCH_PROMPT))
   }
 
   /// Cursor's own compaction command. The daemon sends it only past a context
@@ -95,12 +101,11 @@ impl Agent for Cursor {
     }
   }
 
-  /// Once: Cursor writes the prompt together with its first reply, which in a
-  /// real run came 39 seconds after the prompt was sent, 16 seconds after the
-  /// commit it asked for had already landed. A second send would be a second
-  /// prompt.
-  fn prompt_attempts(&self) -> i64 {
-    1
+  /// Cursor writes the prompt together with its first reply, which in a real
+  /// run came 39 seconds after the prompt was sent, 16 seconds after the
+  /// commit it asked for had already landed.
+  fn prompt_echo(&self) -> PromptEcho {
+    PromptEcho::WithReply
   }
 
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String> {

@@ -456,7 +456,11 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
-      ["--trust", "--force", "."]
+      [
+        "--trust",
+        "--force",
+        "Reply only with the word ready, then wait for the task."
+      ]
     );
     assert_eq!(
       settings.launch_agent(SessionKind::Commentator),

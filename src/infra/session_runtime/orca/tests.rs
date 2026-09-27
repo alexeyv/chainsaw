@@ -307,7 +307,11 @@ mod start {
         run_dir: &run_dir,
         kind: SessionKind::Implementer,
         agent: AgentKind::Cursor,
-        args: &["--trust".to_owned(), "--force".to_owned(), ".".to_owned()],
+        args: &[
+          "--trust".to_owned(),
+          "--force".to_owned(),
+          "Reply only with the word ready, then wait for the task.".to_owned(),
+        ],
       })
       .unwrap_err();
 
@@ -321,7 +325,7 @@ mod start {
     assert_eq!(
       orca.calls()[0][7],
       format!(
-        "cd {} && exec cursor-agent --trust --force .",
+        "cd {} && exec cursor-agent --trust --force 'Reply only with the word ready, then wait for the task.'",
         run_dir.display()
       )
     );
@@ -399,7 +403,7 @@ mod query {
       .unwrap();
 
     assert_eq!(session.external_id, "sess-1");
-    assert_eq!(session.status, "idle");
+    assert_eq!(session.status, SessionStatus::Idle);
     assert_eq!(
       orca.calls(),
       [[
@@ -426,7 +430,7 @@ mod query {
       .unwrap()
       .unwrap();
 
-    assert_eq!(session.status, "busy");
+    assert_eq!(session.status, SessionStatus::Busy);
   }
 
   #[test]
@@ -439,7 +443,7 @@ mod query {
       .unwrap()
       .unwrap();
 
-    assert_eq!(session.status, "busy");
+    assert_eq!(session.status, SessionStatus::Busy);
   }
 
   #[test]

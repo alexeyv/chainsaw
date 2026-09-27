@@ -30,10 +30,17 @@ pub enum PromptState {
   Queued,
 }
 
-/// How many times an agent that echoes its prompts promptly is sent one that
-/// has not shown up, and so how many prompt timeouts every prompt has to show
-/// up, however many sends they are spread over.
-pub const PROMPT_ATTEMPTS: i64 = 3;
+/// When an agent writes a prompt to its transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptEcho {
+  /// As it takes the prompt. One still unseen after a while was lost, and can
+  /// be sent again.
+  OnTake,
+  /// Only with its first reply. One still unseen may be at work, and a second
+  /// send would be a second prompt; sooner than the reply, only the session
+  /// going busy tells that it was taken.
+  WithReply,
+}
 
 pub trait Agent {
   /// The executable a session of this kind runs, as the agent's CLI is
@@ -71,12 +78,10 @@ pub trait Agent {
   /// The state of a prompt opening with `prompt`, sent after `offset`.
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
 
-  /// How many times a prompt still unseen in the transcript is sent before
-  /// the send is given up. An agent that echoes a prompt as it takes it can be
-  /// sent it again; one that writes it only with its first reply may be at
-  /// work on it, and a second send would be a second prompt.
-  fn prompt_attempts(&self) -> i64 {
-    PROMPT_ATTEMPTS
+  /// When this agent writes a prompt it was sent to its transcript, and so
+  /// what an unseen prompt means.
+  fn prompt_echo(&self) -> PromptEcho {
+    PromptEcho::OnTake
   }
 
   /// The last text the agent said, if it has said anything.

@@ -11,6 +11,7 @@ mod try_from {
     let names = [
       (RunEventKind::Launch, "launch"),
       (RunEventKind::PromptQueued, "prompt-queued"),
+      (RunEventKind::PromptTaken, "prompt-taken"),
       (RunEventKind::PromptFailed, "prompt-failed"),
       (RunEventKind::PromptUnreachable, "prompt-unreachable"),
       (RunEventKind::Dispatch, "dispatch"),

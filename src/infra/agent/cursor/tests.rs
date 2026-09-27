@@ -109,7 +109,7 @@ mod default_args {
   fn should_work() {
     assert_eq!(
       Cursor.default_args(SessionKind::Implementer),
-      "--trust --force ."
+      "--trust --force 'Reply only with the word ready, then wait for the task.'"
     );
   }
 
@@ -259,12 +259,12 @@ mod prompt_state {
   }
 }
 
-mod prompt_attempts {
+mod prompt_echo {
   use super::*;
 
   #[test]
   fn should_work() {
-    assert_eq!(Cursor.prompt_attempts(), 1);
+    assert_eq!(Cursor.prompt_echo(), PromptEcho::WithReply);
   }
 }
 

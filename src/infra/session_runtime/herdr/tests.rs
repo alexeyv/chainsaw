@@ -54,7 +54,7 @@ case "$1 $2" in
     fi
     printf '{"result":{"agent":{"agent_session":{"value":"abc"},"status":"idle"}}}\n'; exit 0
   fi
-  printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"busy"}}}\n' ;;
+  printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"working"}}}\n' ;;
 'agent prompt')
   printf '{"result":{"delivered":true}}\n' ;;
 'agent send-keys')
@@ -197,7 +197,12 @@ mod start {
   fn should_start_cursor_under_its_own_kind() {
     let herdr = FakeHerdr::new();
     let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
-    let args = ["--trust", "--force", "."].map(str::to_owned);
+    let args = [
+      "--trust",
+      "--force",
+      "Reply only with the word ready, then wait for the task.",
+    ]
+    .map(str::to_owned);
 
     let started = runtime
       .start(StartSession {
@@ -342,7 +347,7 @@ mod query {
       .unwrap();
 
     assert_eq!(session.external_id, "sess-1");
-    assert_eq!(session.status, "busy");
+    assert_eq!(session.status, SessionStatus::Busy);
     assert_eq!(herdr.calls()[0], ["agent", "get", "worker"]);
   }
 
@@ -368,6 +373,35 @@ mod query {
       .unwrap();
 
     assert!(session.is_none());
+  }
+}
+
+mod status_named {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(status_named("working"), SessionStatus::Busy);
+  }
+
+  #[test]
+  fn should_report_idle_when_the_agent_is_at_its_prompt() {
+    assert_eq!(status_named("idle"), SessionStatus::Idle);
+  }
+
+  #[test]
+  fn should_report_idle_when_the_agent_is_done() {
+    assert_eq!(status_named("done"), SessionStatus::Idle);
+  }
+
+  #[test]
+  fn should_report_busy_when_the_agent_waits_on_a_permission() {
+    assert_eq!(status_named("blocked"), SessionStatus::Busy);
+  }
+
+  #[test]
+  fn should_not_guess_when_herdr_cannot_tell() {
+    assert_eq!(status_named("unknown"), SessionStatus::Unknown);
   }
 }
 

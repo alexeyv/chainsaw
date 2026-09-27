@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Output};
@@ -21,8 +21,8 @@ use crate::domain::{
   AgentKind, ContextSize, FindingVerdict, Role, RunEventKind, Session, SessionKind, Task,
   TaskEvent, TaskState,
 };
-use crate::infra::agent::{self, Agent, PROMPT_ATTEMPTS, PromptState};
-use crate::infra::session_runtime::{SessionRuntime, StartSession};
+use crate::infra::agent::{self, Agent, PromptEcho, PromptState};
+use crate::infra::session_runtime::{SessionRuntime, SessionStatus, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
 use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
@@ -42,6 +42,11 @@ const DAEMON_SILENT_SECONDS: i64 = 30;
 const COMMENTATOR_COMPACT_TOKENS: u64 = 150_000;
 const IMPLEMENTER_LIMIT_TOKENS: u64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
+
+/// How many times an agent that echoes its prompts as it takes them is sent
+/// one that has not shown up, and so how many prompt timeouts every prompt
+/// has to be taken in, however many sends they are spread over.
+const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on its own; use --force --reason only to remedy a coordinator failure";
 
@@ -436,15 +441,21 @@ fn cmd_prompt(
     }
   };
   let agent = session.as_ref().map(agent::for_session);
-  // Every prompt has the same time to show up, spread over as many sends as
-  // its agent allows.
-  let attempts = agent.map_or(PROMPT_ATTEMPTS, Agent::prompt_attempts);
+  // Every prompt has the same time to be taken in, spread over as many sends
+  // as its agent allows: one that echoes a prompt as it takes it can be sent
+  // it again; one that echoes it only with its reply may be at work on it.
+  let echo = agent.map_or(PromptEcho::OnTake, Agent::prompt_echo);
+  let attempts = match echo {
+    PromptEcho::OnTake => PROMPT_ATTEMPTS,
+    PromptEcho::WithReply => 1,
+  };
   let window_millis = prompt_timeout_millis * PROMPT_ATTEMPTS / attempts;
 
   for attempt in 1..=attempts {
     // Polling the runtime gives it a turn to deliver what a busy session has
-    // queued; the state check below then reads what actually arrived.
-    let _ = runtime.query(name);
+    // queued; the state check below then reads what actually arrived. What it
+    // reports is the state the send finds the session in.
+    let idle_before = status_of(runtime, name) == Some(SessionStatus::Idle);
     let path_before = transcript()?;
     let mut offset = transcript_size(path_before.as_deref());
     store.db.execute(
@@ -454,7 +465,7 @@ fn cmd_prompt(
     let _ = runtime.prompt(name, text);
     let deadline = now() + window_millis;
     while now() < deadline {
-      let _ = runtime.query(name);
+      let status = status_of(runtime, name);
       let path = transcript()?;
       if path != path_before {
         offset = 0;
@@ -470,17 +481,22 @@ fn cmd_prompt(
         if state == PromptState::Queued {
           record_run_event(store, RunEventKind::PromptQueued, name)?;
         }
-        FileExt::unlock(&lock)?;
-        if wait {
-          let _ = runtime.wait(name, Duration::from_secs(timeout));
-          println!(
-            "{}",
-            agent
-              .latest_assistant_text(&path)
-              .unwrap_or_else(|| "(no assistant text)".to_owned())
-          );
-        }
-        return Ok(());
+        return prompt_taken(&lock, runtime, name, agent, &transcript, wait, timeout);
+      }
+      // An agent that echoes a prompt only with its reply has taken it once
+      // the session the send found idle is busy. A session busy already, on
+      // its launch prompt or something else, proves nothing about this one.
+      if let Some(agent) = agent
+        && echo == PromptEcho::WithReply
+        && idle_before
+        && status == Some(SessionStatus::Busy)
+      {
+        record_run_event(
+          store,
+          RunEventKind::PromptTaken,
+          &format!("{name}: session went busy before its transcript showed the prompt"),
+        )?;
+        return prompt_taken(&lock, runtime, name, agent, &transcript, wait, timeout);
       }
       thread::sleep(Duration::from_secs(1));
     }
@@ -490,7 +506,50 @@ fn cmd_prompt(
   }
   record_run_event(store, RunEventKind::PromptFailed, name)?;
   FileExt::unlock(&lock)?;
-  bail!("supervisor: prompt to {name} never showed up in its transcript after {attempts} attempts")
+  match echo {
+    PromptEcho::OnTake => {
+      bail!(
+        "supervisor: prompt to {name} never showed up in its transcript after {attempts} attempts"
+      )
+    }
+    PromptEcho::WithReply => bail!(
+      "supervisor: prompt to {name} never showed up in its transcript and the session never went busy"
+    ),
+  }
+}
+
+/// What the runtime says the session is doing, or None when it has no such
+/// session or cannot be reached.
+fn status_of(runtime: &dyn SessionRuntime, name: &str) -> Option<SessionStatus> {
+  runtime
+    .query(name)
+    .ok()
+    .flatten()
+    .map(|session| session.status)
+}
+
+/// The prompt is taken: let the next one through and, when asked, wait for
+/// the turn to end and print the last thing the agent said.
+fn prompt_taken(
+  lock: &File,
+  runtime: &dyn SessionRuntime,
+  name: &str,
+  agent: &dyn Agent,
+  transcript: &dyn Fn() -> Result<Option<PathBuf>>,
+  wait: bool,
+  timeout: u64,
+) -> Result<()> {
+  FileExt::unlock(lock)?;
+  if wait {
+    let _ = runtime.wait(name, Duration::from_secs(timeout));
+    println!(
+      "{}",
+      transcript()?
+        .and_then(|path| agent.latest_assistant_text(&path))
+        .unwrap_or_else(|| "(no assistant text)".to_owned())
+    );
+  }
+  Ok(())
 }
 
 fn cmd_start_commentator(
@@ -693,13 +752,13 @@ fn cmd_dispatch(
   // its transcript shows the prompt.
   let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
   let base_head = git_stdout(store, &["rev-parse", "HEAD"])?;
-  // The task is only dispatched once the prompt is in the transcript, so a
-  // send that never shows up there leaves it drafted and dispatchable again.
+  // The task is only dispatched once the prompt is taken, so a send that
+  // never is leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
     record_run_event(
       store,
       RunEventKind::DispatchFailed,
-      &format!("task {task_id} -> {implementer}: prompt never showed up in the transcript"),
+      &format!("task {task_id} -> {implementer}: {error}"),
     )?;
     return Err(error);
   }
@@ -1396,6 +1455,7 @@ const STATE_EVENT_KINDS: &[RunEventKind] = &[
   RunEventKind::Kick,
   RunEventKind::Compact,
   RunEventKind::PromptQueued,
+  RunEventKind::PromptTaken,
   RunEventKind::PromptFailed,
   RunEventKind::Accepted,
   RunEventKind::ForcedCommit,
@@ -1725,13 +1785,7 @@ fn kick_if_stalled(
 ) -> Result<()> {
   if quiet > STALE_SECONDS
     && session.can_be_kicked()
-    && runtime
-      .query(session.name())
-      .ok()
-      .flatten()
-      .map(|session| session.status)
-      .as_deref()
-      .is_some_and(|status| matches!(status, "idle" | "done"))
+    && status_of(runtime, session.name()) == Some(SessionStatus::Idle)
     && daemon_prompt(store, runtime, settings, session.name(), "continue")
   {
     let transaction = store.write_transaction()?;

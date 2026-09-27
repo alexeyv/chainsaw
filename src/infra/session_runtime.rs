@@ -33,10 +33,22 @@ pub struct StartedSession {
   pub tab_id: String,
 }
 
+/// What a session is doing, as far as its runtime can tell. Herdr and Orca
+/// each spell this their own way; the coordinator compares against this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStatus {
+  /// At its prompt, or finished: it would take a prompt now.
+  Idle,
+  /// Mid-turn, including waiting on a permission.
+  Busy,
+  /// The runtime cannot tell.
+  Unknown,
+}
+
 #[derive(Debug)]
 pub struct SessionQuery {
   pub external_id: String,
-  pub status: String,
+  pub status: SessionStatus,
 }
 
 pub trait SessionRuntime {

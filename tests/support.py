@@ -13,6 +13,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests import fake_agent
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = PROJECT_ROOT / "Cargo.toml"
@@ -312,9 +314,12 @@ class SupervisorContractCase(unittest.TestCase):
 
     def hold_transcript(self, held):
         """Make every agent write its transcript late, as Cursor does: what a prompt
-        would write is held back until the hold is released."""
+        would write is held back until the hold is released, when it lands at once."""
         def hold(state):
-            state["hold_transcript"] = held
+            if held:
+                state["hold_transcript"] = True
+            else:
+                fake_agent.release_transcripts(state)
         self.edit_runtime_state_locked(hold)
 
     def release_transcript_after(self, seconds, first=None):

@@ -113,6 +113,14 @@ def flush_held(current, agent):
     append_entry(agent, agent.pop("held"))
 
 
+def release_transcripts(current):
+    """The reply comes: every agent writes what it was holding back, whether or
+    not anyone asks the runtime about it meanwhile."""
+    current["hold_transcript"] = False
+    for agent in current["agents"].values():
+        flush_held(current, agent)
+
+
 def enqueue(agent, text):
     """A busy agent takes the prompt for later."""
     agent.setdefault("queued", []).append(text)

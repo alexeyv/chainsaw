@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use super::{SessionQuery, SessionRuntime, StartSession, StartedSession};
+use super::{SessionQuery, SessionRuntime, SessionStatus, StartSession, StartedSession};
 use crate::domain::{AgentKind, SessionKind};
 
 /// Drives sessions through the `herdr` CLI. The pane the supervisor itself runs in
@@ -163,7 +163,7 @@ impl SessionRuntime for HerdrSessionRuntime {
     };
     Ok(Some(SessionQuery {
       external_id: Self::json_string(&response, "/result/agent/agent_session/value")?,
-      status: Self::json_string(&response, "/result/agent/status")?,
+      status: status_named(&Self::json_string(&response, "/result/agent/status")?),
     }))
   }
 
@@ -181,6 +181,17 @@ impl SessionRuntime for HerdrSessionRuntime {
     let timeout_ms = timeout.as_millis().to_string();
     let _ = self.run(&["agent", "wait", session_id, "--timeout", &timeout_ms])?;
     Ok(())
+  }
+}
+
+/// Herdr's agent states, as `agent wait --until` lists them: idle, working,
+/// blocked, done, unknown. A done agent has left its prompt for good, and
+/// takes nothing more; a blocked one is mid-turn, waiting on a permission.
+fn status_named(status: &str) -> SessionStatus {
+  match status {
+    "idle" | "done" => SessionStatus::Idle,
+    "working" | "blocked" => SessionStatus::Busy,
+    _ => SessionStatus::Unknown,
   }
 }
 

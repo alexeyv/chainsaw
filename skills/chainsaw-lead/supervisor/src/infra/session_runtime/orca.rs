@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{SessionQuery, SessionRuntime, StartSession, StartedSession};
+use super::{SessionQuery, SessionRuntime, SessionStatus, StartSession, StartedSession};
 use crate::domain::SessionKind;
 use crate::infra::agent::{self, Agent, Claude};
 
@@ -291,13 +291,13 @@ impl SessionRuntime for OrcaSessionRuntime {
       return Ok(None);
     };
     let status = match self.activity(&terminal.handle) {
-      Activity::Idle => "idle",
-      Activity::Busy => "busy",
+      Activity::Idle => SessionStatus::Idle,
+      Activity::Busy => SessionStatus::Busy,
       Activity::Gone => return Ok(None),
     };
     Ok(Some(SessionQuery {
       external_id: terminal.external_id,
-      status: status.to_owned(),
+      status,
     }))
   }
 

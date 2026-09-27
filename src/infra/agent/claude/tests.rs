@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::domain::ContextSize;
-use crate::infra::agent::PROMPT_ATTEMPTS;
+use crate::infra::agent::PromptEcho;
 
 const DISALLOWED: &str = "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput";
 
@@ -185,12 +185,12 @@ mod prompt_state {
   }
 }
 
-mod prompt_attempts {
+mod prompt_echo {
   use super::*;
 
   #[test]
   fn should_work() {
-    assert_eq!(Claude.prompt_attempts(), PROMPT_ATTEMPTS);
+    assert_eq!(Claude.prompt_echo(), PromptEcho::OnTake);
   }
 }
 

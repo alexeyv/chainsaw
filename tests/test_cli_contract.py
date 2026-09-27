@@ -116,6 +116,18 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         )
         self.assertIn("prompt-failed worker", state.stdout)
 
+    def test_a_session_going_busy_without_echoing_the_prompt_is_still_resent(self):
+        """Claude echoes a prompt as it takes it, so a busy session is no receipt."""
+        self.write_settings("prompt-timeout-seconds = 1\n")
+        self.launch()
+        self.hold_transcript(True)
+
+        result = self.cli("prompt", "worker", "busy but silent")
+
+        self.assert_failure(result, "never showed up in its transcript after 3 attempts")
+        self.assertEqual(self.prompts_to("worker"), ["busy but silent"] * 3)
+        self.assertEqual(result.stderr.count("resending"), 2)
+
     def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
         task = self.new_task()
         commentator = self.start_commentator()
@@ -1700,6 +1712,8 @@ class CursorImplementerContractTests(SupervisorContractCase):
     usage and no tool output, so the supervisor reports the context as unknown and
     takes the commit from git."""
 
+    LAUNCH_PROMPT = "Reply only with the word ready, then wait for the task."
+
     def setUp(self):
         super().setUp()
         self.write_settings('[implementer]\nagent = "cursor"\n')
@@ -1711,7 +1725,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.launch()
 
         self.assertEqual(self.session_agent("worker"), "cursor")
-        self.assertEqual(self.launch_args("worker"), ["--trust", "--force", "."])
+        self.assertEqual(self.launch_args("worker"), ["--trust", "--force", self.LAUNCH_PROMPT])
 
     def test_dispatch_finds_its_prompt_in_the_transcript_under_the_project(self):
         task = self.new_task(text="Implement it the Cursor way.")
@@ -1725,8 +1739,11 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.assertEqual(transcript.name, "session-worker-1.jsonl")
         opening, prompt = (json.loads(line) for line in transcript.read_text().splitlines())
         self.assertEqual((opening["role"], prompt["role"]), ("user", "user"))
-        # The `.` on the command line is the session's first prompt.
-        self.assertIn("<user_query>\n.\n</user_query>", opening["message"]["content"][0]["text"])
+        # The prompt on the command line is the session's first.
+        self.assertIn(
+            f"<user_query>\n{self.LAUNCH_PROMPT}\n</user_query>",
+            opening["message"]["content"][0]["text"],
+        )
         self.assertIn(
             "<user_query>\nImplement it the Cursor way.", prompt["message"]["content"][0]["text"],
         )
@@ -1755,6 +1772,48 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.assertEqual(self.prompts_to("worker"), ["echoed late"])
         self.assertNotIn("resending", result.stderr)
 
+    def test_a_dispatch_is_taken_when_the_session_goes_busy_before_its_transcript_echoes(self):
+        """Cursor's first reply can take longer than the prompt window; the session
+        going idle to busy on the send is the receipt until then."""
+        self.write_settings('prompt-timeout-seconds = 1\n\n[implementer]\nagent = "cursor"\n')
+        task = self.new_task()
+        self.launch()
+        self.hold_transcript(True)
+
+        result = self.dispatch(task)
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_success(result)
+        self.assertIn(f"task {task} dispatched to worker", result.stdout)
+        self.assertNotIn("resending", result.stderr)
+        self.assertEqual(len(self.prompts_to("worker")), 1)
+        self.assertIn(f"{task} dispatched", state.stdout)
+        self.assertIn(
+            "prompt-taken worker: session went busy before its transcript showed the prompt",
+            state.stdout,
+        )
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+            (seen_at,) = database.execute(
+                "select seen_at from prompts order by id desc limit 1"
+            ).fetchone()
+        self.assertIsNone(seen_at)
+
+    def test_a_dispatch_to_a_session_already_busy_fails_when_the_transcript_never_echoes(self):
+        self.write_settings('prompt-timeout-seconds = 1\n\n[implementer]\nagent = "cursor"\n')
+        task = self.new_task()
+        self.launch()
+        self.set_agent_status("worker", "busy")
+
+        result = self.dispatch(task)
+        state = self.assert_success(self.cli("state"))
+
+        self.assert_failure(
+            result, "never showed up in its transcript and the session never went busy"
+        )
+        self.assertEqual(len(self.prompts_to("worker")), 1)
+        self.assertIn(f"{task} drafted", state.stdout)
+        self.assertIn("prompt-failed worker", state.stdout)
+
     def test_a_prompt_is_seen_although_the_new_turn_drops_the_turn_ended_line(self):
         self.launch()
         self.update_runtime_state(reply_on_prompt="first reply")
@@ -1776,7 +1835,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         task = self.new_task()
         self.launch()
         base = self.head()
-        # Opened by the `.` on the command line; the task's prompt comes after it.
+        # Opened by the prompt on the command line; the task's comes after it.
         offset_before = self.session_transcript("worker").stat().st_size
         self.hold_transcript(True)
 

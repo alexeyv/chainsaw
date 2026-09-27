@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::domain::ContextSize;
-use crate::infra::agent::PROMPT_ATTEMPTS;
+use crate::infra::agent::PromptEcho;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -264,12 +264,12 @@ mod prompt_state {
   }
 }
 
-mod prompt_attempts {
+mod prompt_echo {
   use super::*;
 
   #[test]
   fn should_work() {
-    assert_eq!(Codex.prompt_attempts(), PROMPT_ATTEMPTS);
+    assert_eq!(Codex.prompt_echo(), PromptEcho::OnTake);
   }
 }
 

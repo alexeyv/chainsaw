@@ -83,7 +83,8 @@ def agent_get(arguments):
     if agent is None:
         print("no such agent", file=sys.stderr)
         return 1
-    status = "busy" if agents.is_busy(agent) else "idle"
+    # Herdr's own words for an agent mid-turn and at its prompt.
+    status = "working" if agents.is_busy(agent) else "idle"
     reply({"agent": {"agent_session": {"value": agent["session_id"]}, "status": status}})
     return 0
 
@@ -105,6 +106,7 @@ def agent_prompt(arguments):
         else:
             agents.drain_queue(current, agent)
             agents.deliver(current, agent, text)
+            agents.begin_turn(agent)
     reply({"delivered": True})
     return 0
 

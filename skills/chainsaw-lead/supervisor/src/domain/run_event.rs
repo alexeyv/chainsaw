@@ -13,6 +13,7 @@ use super::{require_nonblank, require_positive};
 pub enum RunEventKind {
   Launch,
   PromptQueued,
+  PromptTaken,
   PromptFailed,
   PromptUnreachable,
   Dispatch,
@@ -41,6 +42,7 @@ impl RunEventKind {
     match self {
       Self::Launch => "launch",
       Self::PromptQueued => "prompt-queued",
+      Self::PromptTaken => "prompt-taken",
       Self::PromptFailed => "prompt-failed",
       Self::PromptUnreachable => "prompt-unreachable",
       Self::Dispatch => "dispatch",
