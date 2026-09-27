@@ -3,7 +3,6 @@ use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Output};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +20,7 @@ use crate::domain::{
   TaskEvent, TaskState,
 };
 use crate::infra::agent::{self, Agent, PromptEcho, PromptState};
+use crate::infra::git::Repo;
 use crate::infra::session_runtime::{SessionRuntime, SessionStatus, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
@@ -273,7 +273,7 @@ fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
   let Some(transcript) = session_transcript(store, &session)? else {
     return Ok(Vec::new());
   };
-  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  let head = repo(store).head()?;
   Ok(agent::for_session(&session).commit_candidates(
     &transcript,
     task.transcript_offset() as u64,
@@ -313,21 +313,8 @@ fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
   })
 }
 
-fn git(store: &Store, args: &[&str]) -> Result<Output> {
-  ProcessCommand::new("git")
-    .arg("-C")
-    .arg(&store.run_dir)
-    .args(args)
-    .output()
-    .context("failed to run git")
-}
-
-fn git_stdout(store: &Store, args: &[&str]) -> Result<String> {
-  Ok(
-    String::from_utf8_lossy(&git(store, args)?.stdout)
-      .trim()
-      .to_owned(),
-  )
+fn repo(store: &Store) -> Repo<'_> {
+  Repo::new(&store.run_dir)
 }
 
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
@@ -366,7 +353,7 @@ fn cmd_launch(
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
-  let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
+  let launched_head = repo(store).head().ok();
   store.write(|tx| {
     session::stop_named(tx, name)?;
     session::create(
@@ -707,7 +694,7 @@ fn cmd_dispatch(
   // before the send: an agent may be at work, even past its commit, before
   // its transcript shows the prompt.
   let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
-  let base_head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  let base_head = repo(store).head()?;
   // The task is only dispatched once the prompt is taken, so a send that
   // never is leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
@@ -746,13 +733,13 @@ fn files_changed_since_launch(store: &Store, session: &Session) -> Result<String
   let Some(head) = session.launched_head() else {
     return Ok(String::new());
   };
-  let files = git_stdout(store, &["diff", "--name-only", &format!("{head}..HEAD")])?;
+  let files = repo(store).files_changed(head, "HEAD")?;
   if files.is_empty() {
     return Ok(String::new());
   }
   Ok(format!(
     "These files changed since your session started; read them first: {}\n\n",
-    files.lines().collect::<Vec<_>>().join(", ")
+    files.join(", ")
   ))
 }
 
@@ -765,25 +752,10 @@ fn new_commit_for(
   shas: &[String],
   base_head: Option<&str>,
 ) -> Result<Option<String>> {
-  let Some(base_head) = base_head else {
-    return Ok(None);
-  };
-  for sha in shas.iter().rev() {
-    if base_head.starts_with(sha) {
-      continue;
-    }
-    if !git(store, &["cat-file", "-e", sha])?.status.success() {
-      continue;
-    }
-    if !git(store, &["merge-base", "--is-ancestor", base_head, sha])?
-      .status
-      .success()
-    {
-      continue;
-    }
-    return Ok(Some(sha.clone()));
+  match base_head {
+    Some(base_head) => repo(store).new_commit_among(shas, base_head),
+    None => Ok(None),
   }
-  Ok(None)
 }
 
 fn forced_remedy_reason<'a>(
@@ -799,24 +771,6 @@ fn forced_remedy_reason<'a>(
     }
     (false, None) => bail!("supervisor: {COORDINATOR_REMEDY_ONLY}"),
   }
-}
-
-fn canonical_commit(store: &Store, sha: &str) -> Result<Option<String>> {
-  if !(7..=40).contains(&sha.len())
-    || !sha
-      .bytes()
-      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-  {
-    return Ok(None);
-  }
-  let revision = format!("{sha}^{{commit}}");
-  let output = git(store, &["rev-parse", "--verify", &revision])?;
-  if !output.status.success() {
-    return Ok(None);
-  }
-  Ok(Some(
-    String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-  ))
 }
 
 fn cmd_task_record_commit(
@@ -836,7 +790,7 @@ fn cmd_task_record_commit(
       task.state()
     );
   }
-  let Some(commit_sha) = canonical_commit(store, sha)? else {
+  let Some(commit_sha) = repo(store).canonical_commit(sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
   store.write(|tx| {
@@ -855,13 +809,8 @@ fn cmd_task_record_commit(
     let base_head = task.base_head().with_context(|| {
       format!("supervisor: task {task_id} has no base_head to validate the commit against")
     })?;
-    if commit_sha == canonical_commit(store, base_head)?.unwrap_or_default()
-      || !git(
-        store,
-        &["merge-base", "--is-ancestor", base_head, &commit_sha],
-      )?
-      .status
-      .success()
+    if commit_sha == repo(store).canonical_commit(base_head)?.unwrap_or_default()
+      || !repo(store).is_ancestor(base_head, &commit_sha)?
     {
       bail!(
         "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
@@ -969,22 +918,21 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
-    let show = git(store, &["log", "-1", "--format=%H%n%B", sha])?;
-    let show_text = String::from_utf8_lossy(&show.stdout);
-    if !show.status.success() {
-      problems.push(format!("commit {sha} not in git"));
-    } else if has_attribution_trailer(&show_text) {
-      problems.push("commit carries an attribution trailer".to_owned());
-    }
-    let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-    let full_sha = show_text.lines().next().unwrap_or_default();
-    if show.status.success() && !head.starts_with(full_sha) {
-      problems.push("commit is not HEAD".to_owned());
+    match repo(store).commit(sha)? {
+      None => problems.push(format!("commit {sha} not in git")),
+      Some(commit) => {
+        if has_attribution_trailer(&commit.message) {
+          problems.push("commit carries an attribution trailer".to_owned());
+        }
+        if !repo(store).head()?.starts_with(&commit.sha) {
+          problems.push("commit is not HEAD".to_owned());
+        }
+      }
     }
   } else {
     problems.push("no new commit since the task was dispatched".to_owned());
   }
-  if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
+  if !repo(store).is_clean()? {
     problems.push("tree is dirty".to_owned());
   }
   // The implementer runs the quality gate before it commits; that is its
@@ -1009,20 +957,10 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
 }
 
 fn head_advanced_cleanly(store: &Store, base_head: Option<&str>) -> Result<bool> {
-  let Some(base_head) = base_head else {
-    return Ok(false);
-  };
-  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-  if head.is_empty() || head == base_head {
-    return Ok(false);
+  match base_head {
+    Some(base_head) => repo(store).head_advanced_cleanly_from(base_head),
+    None => Ok(false),
   }
-  if !git(store, &["merge-base", "--is-ancestor", base_head, &head])?
-    .status
-    .success()
-  {
-    return Ok(false);
-  }
-  Ok(git_stdout(store, &["status", "--porcelain"])?.is_empty())
 }
 
 fn has_attribution_trailer(message: &str) -> bool {
@@ -1063,7 +1001,7 @@ fn abort_task(
   if task.state().is_terminal() {
     bail!("supervisor: task {task_id} is already {}", task.state());
   }
-  let dirty = git_stdout(store, &["status", "--porcelain"])?;
+  let dirty = repo(store).status()?;
   store.write(|tx| {
     task::abort(tx, task_id, reason)?;
     run_event::create(
@@ -1134,7 +1072,7 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   let Some(commit_sha) = task.commit_sha() else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
-  let stat = git_stdout(store, &["show", "--shortstat", "--format=", commit_sha])?;
+  let stat = repo(store).shortstat(commit_sha)?;
   let actual_files = stat_number(&stat, "file");
   let actual_lines = stat_number(&stat, "insertion") + stat_number(&stat, "deletion");
   let dispatched_at = last_event_at(&task, |event| event.state() == TaskState::Dispatched);
@@ -1758,7 +1696,7 @@ fn observe_implementer(
     store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
-  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  let head = repo(store).head()?;
   let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     store.write(|tx| {
