@@ -57,6 +57,8 @@ class SupervisorContractCase(unittest.TestCase):
         # The developer's own global settings must not leak into a run.
         self.env.pop("XDG_CONFIG_HOME", None)
         self.env.pop("CHAINSAW_CONFIG", None)
+        # A suite run from an Orca terminal must still drive the fake Herdr.
+        self.env.pop("ORCA_TERMINAL_HANDLE", None)
         self.env.update({
             "HOME": str(self.home),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",

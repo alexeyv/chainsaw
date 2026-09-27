@@ -1,6 +1,6 @@
 ---
 name: chainsaw-lead
-description: Lead a chainsaw run — decompose a spec into tasks sized for one implementer session each, dispatch them one at a time through the supervisor into fresh Herdr sessions, pre-populate the next implementer while the current one works, route commentator findings into fix tasks, and stop cleanly on request or when a supervisor command's output says your context passed 250k. Use when the user says "run chainsaw" or "chainsaw this spec".
+description: Lead a chainsaw run — decompose a spec into tasks sized for one implementer session each, dispatch them one at a time through the supervisor into fresh terminal sessions, pre-populate the next implementer while the current one works, route commentator findings into fix tasks, and stop cleanly on request or when a supervisor command's output says your context passed 250k. Use when the user says "run chainsaw" or "chainsaw this spec".
 ---
 
 # Chainsaw lead
@@ -11,7 +11,9 @@ the commentator's findings — not implementation detail.
 
 ## Setup
 
-1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`); if not, stop and say so.
+1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`) or Orca
+   (`test -n "${ORCA_TERMINAL_HANDLE:-}"`); if neither, stop and say so. The supervisor
+   opens sessions through whichever one it finds itself in.
 2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
    ever started, so its transcripts directory (`~/.claude/projects/<munged-path>/`)
    holds exactly this run. If transcripts already exist there, tell the human and stop.
@@ -21,7 +23,8 @@ the commentator's findings — not implementation detail.
    the supervisor on first use, so no separate cargo step is needed. Define the client
    invocation once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
-   First name your pane and tab: `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`.
+   First name your pane and tab: under Herdr `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`,
+   under Orca `orca terminal rename --title lead`.
    Then start the supervisor once, as a background process:
    `$SUP daemon --lead lead --session-id <your-session-id> &`. Your
    session id is the UUID that names your scratchpad directory (the path ends in
@@ -46,7 +49,7 @@ the commentator's findings — not implementation detail.
 
 ## Basics
 Every role is a visible interactive session in its own pane or tab, addressable by
-Herdr agent name. Never headless, never a sub-agent.
+the name the supervisor launched it under. Never headless, never a sub-agent.
 
 Human steering in any pane is authoritative and overrides this loop.
 

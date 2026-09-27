@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use super::*;
 
@@ -47,10 +48,16 @@ impl SessionsDir {
 
   fn holding(rollout: &str) -> Self {
     let dir = Self::empty();
-    let path = dir.path().join(rollout);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, "").unwrap();
+    dir.write(rollout, "");
     dir
+  }
+
+  /// Puts a rollout with these contents below the directory.
+  fn write(&self, rollout: &str, text: &str) -> PathBuf {
+    let path = self.path().join(rollout);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+    path
   }
 
   fn path(&self) -> &Path {
@@ -118,6 +125,15 @@ mod default_args {
       Codex.default_args(SessionKind::Commentator),
       Codex.default_args(SessionKind::Implementer)
     );
+  }
+}
+
+mod session_id_args {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(Codex.session_id_args("abc-123"), None);
   }
 }
 
@@ -360,6 +376,165 @@ mod rollout_of {
     let sessions = SessionsDir::holding(ROLLOUT);
 
     assert_eq!(rollout_of(sessions.path(), SESSION, 2), None);
+  }
+}
+
+/// The opening line Codex writes for a session that started in `cwd`.
+fn session_meta_line(id: &str, cwd: &str) -> String {
+  format!(
+    r#"{{"timestamp":"2026-09-26T00:07:26.000Z","type":"session_meta","payload":{{"id":"{id}","cwd":"{cwd}","cli_version":"0.157.1"}}}}"#
+  )
+}
+
+fn a_minute_ago() -> SystemTime {
+  SystemTime::now() - Duration::from_secs(60)
+}
+
+mod newest_rollout_in {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let dir = SessionsDir::empty();
+    let older = dir.write(
+      "2026/09/26/rollout-2026-09-26T00-07-26-older.jsonl",
+      &session_meta_line("older", "/tmp/run"),
+    );
+    fs::File::open(&older)
+      .unwrap()
+      .set_modified(a_minute_ago())
+      .unwrap();
+    dir.write(
+      "2026/09/26/rollout-2026-09-26T00-08-26-newer.jsonl",
+      &session_meta_line("newer", "/tmp/run"),
+    );
+
+    assert_eq!(
+      newest_rollout_in(dir.path(), Path::new("/tmp/run"), a_minute_ago(), 4),
+      Some("newer".to_owned())
+    );
+  }
+
+  #[test]
+  fn should_skip_a_newer_session_from_another_directory() {
+    let dir = SessionsDir::empty();
+    let ours = dir.write(
+      "2026/09/26/rollout-2026-09-26T00-07-26-ours.jsonl",
+      &session_meta_line("ours", "/tmp/run"),
+    );
+    fs::File::open(&ours)
+      .unwrap()
+      .set_modified(SystemTime::now() - Duration::from_secs(30))
+      .unwrap();
+    dir.write(
+      "2026/09/26/rollout-2026-09-26T00-08-26-theirs.jsonl",
+      &session_meta_line("theirs", "/tmp/elsewhere"),
+    );
+
+    assert_eq!(
+      newest_rollout_in(dir.path(), Path::new("/tmp/run"), a_minute_ago(), 4),
+      Some("ours".to_owned())
+    );
+  }
+
+  #[test]
+  fn should_find_nothing_when_every_rollout_predates_since() {
+    let dir = SessionsDir::empty();
+    dir.write(
+      "2026/09/26/rollout-2026-09-26T00-07-26-stale.jsonl",
+      &session_meta_line("stale", "/tmp/run"),
+    );
+
+    assert_eq!(
+      newest_rollout_in(
+        dir.path(),
+        Path::new("/tmp/run"),
+        SystemTime::now() + Duration::from_secs(60),
+        4
+      ),
+      None
+    );
+  }
+
+  #[test]
+  fn should_find_nothing_when_the_directory_does_not_exist() {
+    assert_eq!(
+      newest_rollout_in(
+        Path::new("/nonexistent/sessions"),
+        Path::new("/tmp/run"),
+        a_minute_ago(),
+        4
+      ),
+      None
+    );
+  }
+}
+
+mod session_of_rollout_in {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let dir = SessionsDir::empty();
+    let rollout = dir.write(
+      "rollout.jsonl",
+      &format!(
+        "{}\n{}\n",
+        session_meta_line(SESSION, "/tmp/run"),
+        user_line("hi")
+      ),
+    );
+
+    assert_eq!(
+      session_of_rollout_in(&rollout, Path::new("/tmp/run")),
+      Some(SESSION.to_owned())
+    );
+  }
+
+  #[test]
+  fn should_resolve_the_recorded_directory_before_comparing() {
+    let dir = SessionsDir::empty();
+    let real = dir.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+    let rollout = dir.write(
+      "rollout.jsonl",
+      &session_meta_line(SESSION, dir.path().join("link").to_str().unwrap()),
+    );
+
+    assert_eq!(
+      session_of_rollout_in(&rollout, &real.canonicalize().unwrap()),
+      Some(SESSION.to_owned())
+    );
+  }
+
+  #[test]
+  fn should_find_nothing_when_the_session_ran_elsewhere() {
+    let dir = SessionsDir::empty();
+    let rollout = dir.write(
+      "rollout.jsonl",
+      &session_meta_line(SESSION, "/tmp/elsewhere"),
+    );
+
+    assert_eq!(session_of_rollout_in(&rollout, Path::new("/tmp/run")), None);
+  }
+
+  #[test]
+  fn should_find_nothing_when_the_rollout_does_not_open_with_its_session() {
+    let dir = SessionsDir::empty();
+    let rollout = dir.write("rollout.jsonl", &user_line("hi"));
+
+    assert_eq!(session_of_rollout_in(&rollout, Path::new("/tmp/run")), None);
+  }
+
+  #[test]
+  fn should_find_nothing_in_an_empty_rollout() {
+    let dir = SessionsDir::holding("rollout.jsonl");
+
+    assert_eq!(
+      session_of_rollout_in(&dir.path().join("rollout.jsonl"), Path::new("/tmp/run")),
+      None
+    );
   }
 }
 

@@ -4,7 +4,9 @@
 
 use std::env;
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -29,6 +31,15 @@ impl Agent for Codex {
 
   fn compact_prompt(&self) -> &'static str {
     "/compact"
+  }
+
+  /// Codex names its own sessions.
+  fn session_id_args(&self, _id: &str) -> Option<Vec<String>> {
+    None
+  }
+
+  fn session_started_since(&self, canonical_run_dir: &Path, since: SystemTime) -> Option<String> {
+    newest_rollout_in(&Self::sessions_dir().ok()?, canonical_run_dir, since, 4)
   }
 
   /// Codex shards rollouts by date rather than by working directory, so the
@@ -129,25 +140,80 @@ impl Codex {
 /// `dir`. A directory that cannot be read holds no rollout yet.
 fn rollout_of(dir: &Path, external_session_id: &str, depth: usize) -> Option<PathBuf> {
   let suffix = format!("-{external_session_id}.jsonl");
-  let mut subdirectories = Vec::new();
-  for entry in fs::read_dir(dir).ok()?.filter_map(std::result::Result::ok) {
-    let path = entry.path();
+  rollouts_below(dir, depth)
+    .into_iter()
+    .find(|path| file_name_of(path).ends_with(&suffix))
+}
+
+/// The id of the newest rollout at most `depth` directories below `dir`,
+/// written at or after `since` by a session whose working directory is
+/// `run_dir`.
+fn newest_rollout_in(
+  dir: &Path,
+  run_dir: &Path,
+  since: SystemTime,
+  depth: usize,
+) -> Option<String> {
+  let mut rollouts: Vec<_> = rollouts_below(dir, depth)
+    .into_iter()
+    .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+    .filter(|(modified, _)| *modified >= since)
+    .collect();
+  rollouts.sort_by(|(left, _), (right, _)| right.cmp(left));
+  rollouts
+    .into_iter()
+    .find_map(|(_, path)| session_of_rollout_in(&path, run_dir))
+}
+
+/// Every rollout at most `depth` directories below `dir`, in directory order.
+fn rollouts_below(dir: &Path, depth: usize) -> Vec<PathBuf> {
+  let Ok(entries) = fs::read_dir(dir) else {
+    return Vec::new();
+  };
+  let mut rollouts = Vec::new();
+  for path in entries
+    .filter_map(std::result::Result::ok)
+    .map(|entry| entry.path())
+  {
     if path.is_dir() {
-      subdirectories.push(path);
-    } else if path
-      .file_name()
-      .and_then(|name| name.to_str())
-      .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+      if depth > 0 {
+        rollouts.extend(rollouts_below(&path, depth - 1));
+      }
+    } else if file_name_of(&path).starts_with("rollout-") && file_name_of(&path).ends_with(".jsonl")
     {
-      return Some(path);
+      rollouts.push(path);
     }
   }
-  if depth == 0 {
+  rollouts
+}
+
+fn file_name_of(path: &Path) -> &str {
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .unwrap_or_default()
+}
+
+/// The session id a rollout's opening `session_meta` records, when that
+/// session's working directory is `run_dir`.
+fn session_of_rollout_in(rollout: &Path, run_dir: &Path) -> Option<String> {
+  let mut first_line = String::new();
+  std::io::BufReader::new(fs::File::open(rollout).ok()?)
+    .read_line(&mut first_line)
+    .ok()?;
+  let meta: Value = serde_json::from_str(&first_line).ok()?;
+  if meta.get("type").and_then(Value::as_str) != Some("session_meta") {
     return None;
   }
-  subdirectories
-    .into_iter()
-    .find_map(|subdirectory| rollout_of(&subdirectory, external_session_id, depth - 1))
+  let cwd = meta.pointer("/payload/cwd").and_then(Value::as_str)?;
+  let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+  if cwd != run_dir {
+    return None;
+  }
+  meta
+    .pointer("/payload/id")
+    .and_then(Value::as_str)
+    .map(str::to_owned)
 }
 
 fn is_message_from(entry: &Value, role: &str) -> bool {

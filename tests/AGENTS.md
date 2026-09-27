@@ -24,7 +24,9 @@ trivial getters, functions, or constructors.
 
 - Use actual objects.
 - For the session runtime, the contract tests put `tests/fake_herdr.py` on
-  PATH as `herdr`; extend it when a scenario needs more behavior.
+  PATH as `herdr`; extend it when a scenario needs more behavior. The Orca
+  runtime is proven by its unit tests against a shim `orca`; the contract
+  suite drives Herdr only.
 
 ### Fixtures
 

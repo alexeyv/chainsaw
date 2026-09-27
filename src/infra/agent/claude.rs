@@ -4,6 +4,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -27,6 +28,14 @@ impl Agent for Claude {
 
   fn compact_prompt(&self) -> &'static str {
     "/compact"
+  }
+
+  fn session_id_args(&self, id: &str) -> Option<Vec<String>> {
+    Some(vec!["--session-id".to_owned(), id.to_owned()])
+  }
+
+  fn session_started_since(&self, canonical_run_dir: &Path, since: SystemTime) -> Option<String> {
+    newest_transcript_in(&Self::transcripts_dir(canonical_run_dir).ok()?, since)
   }
 
   /// Under the run directory when Claude Code agrees about the working
@@ -147,6 +156,24 @@ impl Claude {
   fn transcript_under(canonical_run_dir: &Path, external_session_id: &str) -> Result<PathBuf> {
     Ok(Self::transcripts_dir(canonical_run_dir)?.join(format!("{external_session_id}.jsonl")))
   }
+}
+
+/// The session whose transcript directly under `dir` was written last, at or
+/// after `since`. A directory that cannot be read holds no transcript yet.
+fn newest_transcript_in(dir: &Path, since: SystemTime) -> Option<String> {
+  fs::read_dir(dir)
+    .ok()?
+    .filter_map(std::result::Result::ok)
+    .map(|entry| entry.path())
+    .filter(|path| {
+      path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    })
+    .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+    .filter(|(modified, _)| *modified >= since)
+    .max_by_key(|(modified, _)| *modified)
+    .and_then(|(_, path)| Some(path.file_stem()?.to_str()?.to_owned()))
 }
 
 /// Claude Code names a session's transcripts directory after its cwd, replacing

@@ -24,7 +24,7 @@ When the run is over — say, ten stories later — the lead hands you a continu
 
 ## Install
 
-Requires [Herdr](https://herdr.dev) and a Rust toolchain (the supervisor builds itself on first use). Then:
+Requires [Herdr](https://herdr.dev) or Orca as the terminal the run lives in, and a Rust toolchain (the supervisor builds itself on first use). Then:
 
 ```sh
 npx skills add alexeyv/chainsaw

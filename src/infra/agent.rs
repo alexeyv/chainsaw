@@ -4,6 +4,7 @@
 //! wrote. A session runs Claude Code or OpenAI Codex.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use regex::Regex;
 use serde_json::Value;
@@ -34,6 +35,15 @@ pub trait Agent {
 
   /// The prompt that asks a session to compact its context.
   fn compact_prompt(&self) -> &'static str;
+
+  /// The flags that make a new session take `id` as its own, for an agent
+  /// that accepts one. None when the agent names its sessions itself, and the
+  /// id has to be read from the transcript the session starts writing.
+  fn session_id_args(&self, id: &str) -> Option<Vec<String>>;
+
+  /// The id of the newest session this agent started in `run_dir` at or after
+  /// `since`, once it has written its transcript.
+  fn session_started_since(&self, canonical_run_dir: &Path, since: SystemTime) -> Option<String>;
 
   /// The transcript of a session started in `run_dir`, or None until it exists.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;

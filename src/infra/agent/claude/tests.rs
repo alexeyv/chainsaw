@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use super::*;
 
@@ -60,6 +61,18 @@ mod default_args {
       format!(
         "--model opus --effort high --strict-mcp-config --no-chrome --disallowedTools {DISALLOWED}"
       )
+    );
+  }
+}
+
+mod session_id_args {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(
+      Claude.session_id_args("abc-123"),
+      Some(vec!["--session-id".to_owned(), "abc-123".to_owned()])
     );
   }
 }
@@ -230,6 +243,85 @@ mod commits_in_transcript {
     assert_eq!(
       Claude.commits_in_transcript(transcript.path(), old.len() as u64 + 1),
       vec!["4567def"]
+    );
+  }
+}
+
+mod newest_transcript_in {
+  use super::*;
+
+  /// A transcripts directory that is removed when dropped.
+  struct TranscriptsDir(PathBuf);
+
+  impl TranscriptsDir {
+    fn holding(sessions: &[&str]) -> Self {
+      static NEXT: AtomicU64 = AtomicU64::new(0);
+      let path = std::env::temp_dir().join(format!(
+        "chainsaw-claude-transcripts-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+      ));
+      fs::create_dir_all(&path).unwrap();
+      for session in sessions {
+        fs::write(path.join(format!("{session}.jsonl")), "").unwrap();
+      }
+      Self(path)
+    }
+
+    fn path(&self) -> &Path {
+      &self.0
+    }
+  }
+
+  impl Drop for TranscriptsDir {
+    fn drop(&mut self) {
+      let _ = fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn a_minute_ago() -> SystemTime {
+    SystemTime::now() - Duration::from_secs(60)
+  }
+
+  #[test]
+  fn should_work() {
+    let dir = TranscriptsDir::holding(&["older"]);
+    let older = dir.path().join("older.jsonl");
+    fs::File::open(&older)
+      .unwrap()
+      .set_modified(a_minute_ago())
+      .unwrap();
+    fs::write(dir.path().join("newer.jsonl"), "").unwrap();
+
+    assert_eq!(
+      newest_transcript_in(dir.path(), a_minute_ago()),
+      Some("newer".to_owned())
+    );
+  }
+
+  #[test]
+  fn should_find_nothing_when_every_transcript_predates_since() {
+    let dir = TranscriptsDir::holding(&["stale"]);
+
+    assert_eq!(
+      newest_transcript_in(dir.path(), SystemTime::now() + Duration::from_secs(60)),
+      None
+    );
+  }
+
+  #[test]
+  fn should_ignore_what_is_not_a_transcript() {
+    let dir = TranscriptsDir::holding(&[]);
+    fs::write(dir.path().join("chainsaw-supervisor.db"), "").unwrap();
+
+    assert_eq!(newest_transcript_in(dir.path(), a_minute_ago()), None);
+  }
+
+  #[test]
+  fn should_find_nothing_when_the_directory_does_not_exist() {
+    assert_eq!(
+      newest_transcript_in(Path::new("/nonexistent/transcripts"), a_minute_ago()),
+      None
     );
   }
 }
