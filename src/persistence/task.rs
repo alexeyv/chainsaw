@@ -124,11 +124,15 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
+/// `base_head` is given at dispatch only for an agent whose transcript lags
+/// its prompts, whose work may start before the transcript shows it; every
+/// other task takes its base when the daemon sees it in flight.
 pub fn dispatch(
   transaction: &Transaction<'_>,
   id: i64,
   session_id: i64,
   transcript_offset: i64,
+  base_head: Option<&str>,
   reason: Option<&str>,
 ) -> Result<Task> {
   advance(
@@ -143,26 +147,32 @@ pub fn dispatch(
         "transcript offset",
         current.transcript_offset(),
         transcript_offset,
-      )
+      )?;
+      same_fact(current, "base head", current.base_head(), base_head)
     },
     |transaction| {
       transaction.execute(
-        "update tasks set session_id=?, transcript_offset=? where id=?",
-        params![session_id, transcript_offset, id],
+        "update tasks set session_id=?, transcript_offset=?, base_head=? where id=?",
+        params![session_id, transcript_offset, base_head, id],
       )?;
       Ok(())
     },
   )
 }
 
-/// The dispatch `transcript_offset` stays as the measurement baseline. The
-/// context at dispatch is None when the session's agent cannot report one.
+/// The dispatch `transcript_offset` stays as the measurement baseline. A base
+/// head recorded at dispatch stays too; otherwise `base_head`, the revision
+/// now, becomes it. The context at dispatch is None when the session's agent
+/// cannot report one.
 pub fn take_flight(
   transaction: &Transaction<'_>,
   id: i64,
   base_head: &str,
   context_size_start: Option<i64>,
 ) -> Result<Task> {
+  let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
+  let base_head = current.base_head().unwrap_or(base_head).to_owned();
+  let base_head = base_head.as_str();
   advance(
     transaction,
     id,

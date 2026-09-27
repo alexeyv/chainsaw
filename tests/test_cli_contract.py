@@ -1734,6 +1734,67 @@ class CursorImplementerContractTests(SupervisorContractCase):
 
         self.assertEqual(result.stdout, "fixture reply\n")
 
+    def test_a_prompt_the_transcript_has_not_echoed_yet_is_waited_for_not_resent(self):
+        self.write_settings('prompt-timeout-seconds = 1\n\n[implementer]\nagent = "cursor"\n')
+        self.launch()
+        self.hold_transcript(True)
+
+        timer = self.release_transcript_after(1.5)
+        result = self.cli("prompt", "worker", "echoed late")
+        timer.join()
+
+        self.assert_success(result)
+        self.assertEqual(self.prompts_to("worker"), ["echoed late"])
+        self.assertNotIn("resending", result.stderr)
+
+    def test_a_prompt_is_seen_although_the_new_turn_drops_the_turn_ended_line(self):
+        self.launch()
+        self.update_runtime_state(reply_on_prompt="first reply")
+        self.assert_success(self.cli("prompt", "worker", "first prompt"))
+
+        result = self.cli("prompt", "worker", "second prompt")
+
+        self.assert_success(result)
+        self.assertEqual(self.prompts_to("worker"), ["first prompt", "second prompt"])
+        entries = [json.loads(line) for line in
+                   self.session_transcript("worker").read_text().splitlines()]
+        self.assertEqual(
+            [entry.get("type") for entry in entries if entry.get("type") == "turn_ended"],
+            ["turn_ended"],
+        )
+        self.assertEqual(entries[-1].get("type"), "turn_ended")
+
+    def test_a_commit_made_before_the_transcript_echoes_the_prompt_is_the_tasks(self):
+        task = self.new_task()
+        self.launch()
+        base = self.head()
+        # Opened by the `.` on the command line; the task's prompt comes after it.
+        offset_before = self.session_transcript("worker").stat().st_size
+        self.hold_transcript(True)
+
+        landed = []
+        timer = self.release_transcript_after(
+            1.5, first=lambda: landed.append(self.commit_file()),
+        )
+        dispatched = self.assert_success(self.dispatch(task))
+        timer.join()
+        sha = landed[0]
+        daemon = self.start_daemon()
+        state = self.wait_for_state(f"{task} committed_unverified")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+            base_head, offset = database.execute(
+                "select base_head, transcript_offset from tasks where id=?", (task,),
+            ).fetchone()
+        accepted = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"task {task} dispatched to worker", dispatched.stdout)
+        self.assertEqual(base_head, base)
+        self.assertEqual(offset, offset_before)
+        self.assertIn(sha[:10], state.stdout)
+        self.assertIn(f"task {task} accepted: checks passed at {sha}", accepted.stdout)
+
     def test_context_is_unknown_rather_than_zero(self):
         self.launch()
         self.append_entry("worker", {

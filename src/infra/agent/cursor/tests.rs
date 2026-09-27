@@ -226,6 +226,42 @@ mod prompt_state {
       PromptState::Unseen
     );
   }
+
+  #[test]
+  fn should_see_the_prompt_when_the_new_turn_dropped_the_turn_ended_line_before_it() {
+    let before = format!("{}\n{TURN_ENDED}\n", assistant_line("done"));
+    let offset = before.len() as u64;
+    let after = format!(
+      "{}\n{}\n",
+      assistant_line("done"),
+      prompt_line("deliver this prompt")
+    );
+    let transcript = Transcript::containing(&after);
+
+    assert_eq!(
+      Cursor.prompt_state(transcript.path(), offset, "deliver this"),
+      PromptState::Started
+    );
+  }
+
+  #[test]
+  fn should_tolerate_an_offset_past_the_end() {
+    let transcript = Transcript::containing(&format!("{}\n", prompt_line("deliver this prompt")));
+
+    assert_eq!(
+      Cursor.prompt_state(transcript.path(), 10_000, "deliver this"),
+      PromptState::Unseen
+    );
+  }
+}
+
+mod echoes_prompts_promptly {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert!(!Cursor.echoes_prompts_promptly());
+  }
 }
 
 mod latest_assistant_text {

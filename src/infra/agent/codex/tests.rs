@@ -253,6 +253,15 @@ mod prompt_state {
   }
 }
 
+mod echoes_prompts_promptly {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert!(Codex.echoes_prompts_promptly());
+  }
+}
+
 mod latest_assistant_text {
   use super::*;
 

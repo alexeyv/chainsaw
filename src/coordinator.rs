@@ -473,8 +473,15 @@ fn cmd_prompt(
     }
   };
   let agent = session.as_ref().map(agent::for_session);
+  // An agent whose transcript lags its prompts gets the same total budget in
+  // one attempt: resending would hand it the prompt again as a follow-up.
+  let (attempts, prompt_timeout_millis) = if agent.is_none_or(Agent::echoes_prompts_promptly) {
+    (PROMPT_ATTEMPTS, prompt_timeout_millis)
+  } else {
+    (1, prompt_timeout_millis * PROMPT_ATTEMPTS)
+  };
 
-  for attempt in 1..=PROMPT_ATTEMPTS {
+  for attempt in 1..=attempts {
     // Polling the runtime gives it a turn to deliver what a busy session has
     // queued; the state check below then reads what actually arrived.
     let _ = runtime.query(name);
@@ -517,13 +524,13 @@ fn cmd_prompt(
       }
       thread::sleep(Duration::from_secs(1));
     }
-    eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
+    if attempt < attempts {
+      eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
+    }
   }
   store.event("prompt-failed", name)?;
   FileExt::unlock(&lock)?;
-  bail!(
-    "supervisor: prompt to {name} never showed up in its transcript after {PROMPT_ATTEMPTS} attempts"
-  )
+  bail!("supervisor: prompt to {name} never showed up in its transcript after {attempts} attempts")
 }
 
 fn cmd_start_commentator(
@@ -721,6 +728,12 @@ fn cmd_dispatch(
     preamble,
     text = task.text().trim_end()
   );
+  // An agent whose transcript lags its prompts may be at work, even past its
+  // commit, before the prompt shows up: its task starts from where the
+  // transcript and the branch stood before the send.
+  let agent = agent::for_session(&session);
+  let offset_before = transcript_size(session_transcript(store, &session)?.as_deref());
+  let head_before = git_stdout(store, &["rev-parse", "HEAD"])?;
   // The task is only dispatched once the prompt is in the transcript, so a
   // send that never shows up there leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
@@ -730,13 +743,19 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
+  let (transcript_offset, base_head) = if agent.echoes_prompts_promptly() {
+    let offset = transcript_size(session_transcript(store, &session)?.as_deref());
+    (offset, None)
+  } else {
+    (offset_before, Some(head_before.as_str()))
+  };
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
     task_id,
     session.id(),
     transcript_offset as i64,
+    base_head,
     reason,
   )?;
   transaction.commit()?;

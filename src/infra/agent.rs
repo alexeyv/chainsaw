@@ -70,6 +70,15 @@ pub trait Agent {
   /// The state of a prompt opening with `prompt`, sent after `offset`.
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
 
+  /// Whether a prompt reaches the transcript as soon as the agent takes it.
+  /// An agent that writes it only with its first reply may work for a long
+  /// while, even commit, before its transcript says anything: such a prompt
+  /// is not lost and must not be resent, and the task it carries begins the
+  /// moment it is sent rather than when the transcript first grows.
+  fn echoes_prompts_promptly(&self) -> bool {
+    true
+  }
+
   /// The last text the agent said, if it has said anything.
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
 

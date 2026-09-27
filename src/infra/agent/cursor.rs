@@ -4,7 +4,8 @@
 //! `{"role":"assistant",…}` with `text` and `tool_use` blocks, and
 //! `{"type":"turn_ended",…}`: no token usage and no tool results, so the
 //! transcript cannot say how much context the session holds or what git
-//! printed (Cursor 2026.08.11).
+//! printed (Cursor 2026.08.11). The file is not append-only either: a new
+//! turn drops the trailing `turn_ended` line and writes it again at the end.
 
 use std::env;
 use std::fs;
@@ -14,7 +15,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{Agent, PromptState, entries, text_of};
+use super::{Agent, PromptState, entries, read_lossy, text_of};
 use crate::infra::session_runtime::SessionKind;
 
 pub struct Cursor;
@@ -80,9 +81,11 @@ impl Agent for Cursor {
 
   /// Cursor writes a prompt only when it takes it up, wrapped in a timestamp
   /// and a `user_query` element, so the prompt is matched by its text. One
-  /// waiting behind the current turn is unseen until then.
+  /// waiting behind the current turn is unseen until then. The turn that takes
+  /// it drops the `turn_ended` line the transcript ended with, so an offset
+  /// taken before the send may now fall inside the prompt's own line.
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState {
-    let started = entries(transcript, offset)
+    let started = entries_from_line_holding(transcript, offset)
       .iter()
       .any(|entry| is_from(entry, "user") && content_text(entry).contains(prompt));
     if started {
@@ -90,6 +93,13 @@ impl Agent for Cursor {
     } else {
       PromptState::Unseen
     }
+  }
+
+  /// Cursor writes the prompt together with its first reply, which in a real
+  /// run came 39 seconds after the prompt was sent, 16 seconds after the
+  /// commit it asked for had already landed.
+  fn echoes_prompts_promptly(&self) -> bool {
+    false
   }
 
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String> {
@@ -230,6 +240,27 @@ fn files_below(dir: &Path, depth: usize) -> Vec<PathBuf> {
     }
   }
   files
+}
+
+/// Every entry from the line holding byte `offset` on. When the transcript
+/// grew by appending, that line starts at `offset`; when a new turn dropped
+/// the `turn_ended` line before it, the content after `offset` has moved back
+/// by that line and the entry that now holds `offset` is the first new one.
+fn entries_from_line_holding(transcript: &Path, offset: u64) -> Vec<Value> {
+  let Ok(text) = read_lossy(transcript, 0, None) else {
+    return Vec::new();
+  };
+  let offset = usize::try_from(offset)
+    .unwrap_or(usize::MAX)
+    .min(text.len());
+  let start = text.as_bytes()[..offset]
+    .iter()
+    .rposition(|&byte| byte == b'\n')
+    .map_or(0, |newline| newline + 1);
+  text[start..]
+    .lines()
+    .filter_map(|line| serde_json::from_str(line).ok())
+    .collect()
 }
 
 fn is_from(entry: &Value, role: &str) -> bool {

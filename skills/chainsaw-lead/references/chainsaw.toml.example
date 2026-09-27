@@ -22,7 +22,10 @@ prompt-timeout-seconds = 15
 # which is what gives it a session id. Cursor's transcript records neither token
 # usage nor tool output, so its context reads as unknown and its commit is
 # taken from HEAD: any new commit on the branch descending from the task's base
-# counts as the implementer's, whoever made it.
+# counts as the implementer's, whoever made it. Cursor also writes a prompt to its
+# transcript only with its first reply, so a prompt to it is sent once and given
+# three times prompt-timeout-seconds to show up, and its task's base is the
+# revision at dispatch rather than at the first transcript growth.
 # Each role's args are split like a shell would and passed to the agent as written:
 # quote a value that contains spaces, e.g. --append-system-prompt 'be terse'.
 

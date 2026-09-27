@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -302,18 +303,42 @@ class SupervisorContractCase(unittest.TestCase):
         ]
 
     def set_agent_status(self, name, status):
-        """Mark a session busy or idle; a busy one queues prompts instead of answering.
-
-        The supervisor polls this file once a second, so take its lock and land the
-        new contents atomically rather than racing its read-modify-write.
-        """
+        """Mark a session busy or idle; a busy one queues prompts instead of answering."""
         handle = self.session_handle(name)
+
+        def mark(state):
+            state["agents"][handle]["status"] = status
+        self.edit_runtime_state_locked(mark)
+
+    def hold_transcript(self, held):
+        """Make every agent write its transcript late, as Cursor does: what a prompt
+        would write is held back until the hold is released."""
+        def hold(state):
+            state["hold_transcript"] = held
+        self.edit_runtime_state_locked(hold)
+
+    def release_transcript_after(self, seconds, first=None):
+        """Release a held transcript from another thread while a CLI call waits on it,
+        after doing `first` (what the agent did meanwhile, such as committing). The
+        returned timer is joined by the caller once the call has returned."""
+        def release():
+            if first is not None:
+                first()
+            self.hold_transcript(False)
+        timer = threading.Timer(seconds, release)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        return timer
+
+    def edit_runtime_state_locked(self, mutate):
+        """The supervisor polls this file once a second, so take its lock and land the
+        new contents atomically rather than racing its read-modify-write."""
         lock_path = self.runtime_state_path.with_suffix(".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state = self.runtime_state()
-            state["agents"][handle]["status"] = status
+            mutate(state)
             temporary = self.runtime_state_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(state, sort_keys=True))
             temporary.replace(self.runtime_state_path)

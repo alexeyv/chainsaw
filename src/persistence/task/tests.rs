@@ -18,7 +18,7 @@ fn draft(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
 /// A task dispatched to session 7, which the caller must have created.
 fn dispatched(transaction: &Transaction<'_>, text: &str) -> Result<Task> {
   let task = draft(transaction, text)?;
-  dispatch(transaction, task.id(), 7, 0, None)
+  dispatch(transaction, task.id(), 7, 0, None, None)
 }
 
 /// A task dispatched to session 7, flown, and committed as `landed123`.
@@ -405,7 +405,7 @@ mod tasks_for_session {
     let transaction = db.transaction()?;
     let first = dispatched(&transaction, "first target task")?;
     let other = draft(&transaction, "other session task")?;
-    dispatch(&transaction, other.id(), 8, 0, None)?;
+    dispatch(&transaction, other.id(), 8, 0, None, None)?;
     let second = dispatched(&transaction, "second target task")?;
 
     assert_eq!(
@@ -492,17 +492,34 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, 42, Some("a new area"))?;
+    let task = dispatch(&transaction, task.id(), 7, 42, None, Some("a new area"))?;
     transaction.commit()?;
 
     assert_eq!(task.state(), TaskState::Dispatched);
     assert_eq!(task.session_id(), Some(7));
     assert_eq!(task.transcript_offset(), 42);
+    assert_eq!(task.base_head(), None);
     assert_eq!(task.reason(), Some("a new area"));
     assert_eq!(
       states_of(&task),
       vec![TaskState::Drafted, TaskState::Dispatched]
     );
+    Ok(())
+  }
+
+  #[test]
+  fn should_record_the_base_head_when_the_agent_starts_before_its_transcript_says_so() -> Result<()>
+  {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = draft(&transaction, "dispatch me")?;
+
+    let task = dispatch(&transaction, task.id(), 7, 42, Some("sent123"), None)?;
+    transaction.commit()?;
+
+    assert_eq!(task.state(), TaskState::Dispatched);
+    assert_eq!(task.base_head(), Some("sent123"));
     Ok(())
   }
 
@@ -513,7 +530,7 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let task = dispatch(&transaction, task.id(), 7, 0, None)?;
+    let task = dispatch(&transaction, task.id(), 7, 0, None, None)?;
     transaction.commit()?;
 
     assert_eq!(task.reason(), None);
@@ -526,7 +543,7 @@ mod dispatch {
     let transaction = db.transaction()?;
     let task = draft(&transaction, "dispatch me")?;
 
-    let error = dispatch(&transaction, task.id(), 7, 0, None).unwrap_err();
+    let error = dispatch(&transaction, task.id(), 7, 0, None, None).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
@@ -543,7 +560,7 @@ mod take_flight {
     session_row(&db, 7)?;
     let transaction = db.transaction()?;
     let task = draft(&transaction, "fly")?;
-    let task = dispatch(&transaction, task.id(), 7, 42, None)?;
+    let task = dispatch(&transaction, task.id(), 7, 42, None, None)?;
 
     let task = take_flight(&transaction, task.id(), "base123", Some(900))?;
     transaction.commit()?;
@@ -553,6 +570,23 @@ mod take_flight {
     assert_eq!(task.base_head(), Some("base123"));
     assert_eq!(task.context_size_start(), Some(900));
     assert_eq!(task.reason(), None);
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_a_base_head_recorded_at_dispatch() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = draft(&transaction, "fly")?;
+    let task = dispatch(&transaction, task.id(), 7, 42, Some("sent123"), None)?;
+
+    let task = take_flight(&transaction, task.id(), "moved456", None)?;
+    transaction.commit()?;
+
+    assert_eq!(task.state(), TaskState::InFlight);
+    assert_eq!(task.base_head(), Some("sent123"));
+    assert_eq!(task.context_size_start(), None);
     Ok(())
   }
 
@@ -1079,7 +1113,7 @@ mod advance {
     let transaction = db.transaction()?;
     let task = dispatched(&transaction, "dispatched once")?;
 
-    let error = dispatch(&transaction, task.id(), 8, 0, None).unwrap_err();
+    let error = dispatch(&transaction, task.id(), 8, 0, None, None).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(
@@ -1098,7 +1132,7 @@ mod advance {
     transaction.commit()?;
 
     let transaction = db.transaction()?;
-    dispatch(&transaction, task.id(), 7, 0, None)?;
+    dispatch(&transaction, task.id(), 7, 0, None, None)?;
     transaction.rollback()?;
 
     let transaction = db.transaction()?;
