@@ -49,11 +49,11 @@ class ReviewPromptContractTests(unittest.TestCase):
         )
 
     def test_implementer_contract_runs_the_gate_once_in_both_copies(self):
-        coordinator = (PROJECT_ROOT / "src" / "coordinator.rs").read_text()
+        tasks = (PROJECT_ROOT / "src" / "coordinator" / "tasks.rs").read_text()
         phrase = "run the project's quality gate once, immediately before"
         self.assertIn(phrase, self.lead.replace("\n   ", " "))
-        self.assertIn(phrase, coordinator)
-        self.assertIn("gate failures you judged pre-existing", coordinator)
+        self.assertIn(phrase, tasks)
+        self.assertIn("gate failures you judged pre-existing", tasks)
         self.assertIn("known pre-existing gate failures", self.lead)
 
     def test_prompts_and_coordinator_do_not_name_legacy_review_files(self):
@@ -61,12 +61,12 @@ class ReviewPromptContractTests(unittest.TestCase):
             "chainsaw-" + "comments.md",
             "chainsaw-" + "dispositions.md",
         )
-        coordinator = (PROJECT_ROOT / "src" / "coordinator.rs").read_text()
-        for path, text in (
-            (self.lead_path, self.lead),
-            (self.commentator_path, self.commentator),
-            (PROJECT_ROOT / "src" / "coordinator.rs", coordinator),
-        ):
+        coordinator_sources = [PROJECT_ROOT / "src" / "coordinator.rs"] + sorted(
+            (PROJECT_ROOT / "src" / "coordinator").glob("*.rs")
+        )
+        sources = [(self.lead_path, self.lead), (self.commentator_path, self.commentator)]
+        sources += [(path, path.read_text()) for path in coordinator_sources]
+        for path, text in sources:
             for legacy_name in legacy_names:
                 self.assertNotIn(legacy_name, text, str(path))
 
