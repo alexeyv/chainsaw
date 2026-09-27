@@ -55,9 +55,9 @@ struct LaunchSettings {
 
 impl Settings {
   /// Reads the global file, then `chainsaw.toml` and `chainsaw.local.toml`
-  /// from `run_dir`, lays each over the previous (see `lay_over`), and applies
-  /// each `--set` over the result. A missing file lays nothing over; a
-  /// leftover `chainsaw.json` is an error
+  /// from `run_dir`, lays each over the previous (see `lay_over`), then lays
+  /// every `--set` over the result as one more layer. A missing file lays
+  /// nothing over; a leftover `chainsaw.json` is an error
   pub fn load(run_dir: &Path, sets: &[String]) -> Result<Self> {
     Self::load_from(global_file()?.as_deref(), run_dir, sets)
   }
@@ -79,18 +79,9 @@ impl Settings {
       .try_fold(Table::new(), |table, (path, name)| {
         read_layer(&path, &name).map(|layer| lay_over(table, layer))
       })?;
-    let base = Self::from_table(&table)
-      .map_err(|error| anyhow!("invalid settings: {}", error.to_string().trim_end()))?;
-    let (_, settings) =
-      sets
-        .iter()
-        .enumerate()
-        .try_fold((table, base), |(table, _), (index, set)| {
-          set_over(table, set, &sets[..index])
-            .and_then(|table| Self::from_table(&table).map(|settings| (table, settings)))
-            .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))
-        })?;
-    Ok(settings)
+    let table = lay_over(table, sets_layer(sets)?);
+    Self::from_table(&table)
+      .map_err(|error| anyhow!("invalid settings: {}", error.to_string().trim_end()))
   }
 
   fn from_table(table: &Table) -> Result<Self> {
@@ -198,10 +189,23 @@ fn read_layer(path: &Path, name: &str) -> Result<Table> {
   Ok(table)
 }
 
-/// Lays one `KEY=VALUE` over `table`, unless an `earlier` set named the same
-/// key. The value is a TOML literal when it parses as one (`20`, `"x"`),
-/// otherwise a string
-fn set_over(table: Table, set: &str, earlier: &[String]) -> Result<Table> {
+/// Builds one settings layer from every `--set`, as one file would be: the
+/// order of the sets does not matter, and two sets naming the same key are an
+/// error. Each error names the set it is about
+fn sets_layer(sets: &[String]) -> Result<Table> {
+  sets
+    .iter()
+    .enumerate()
+    .try_fold(Table::new(), |layer, (index, set)| {
+      set_into(layer, set, &sets[..index])
+        .map_err(|error| anyhow!("invalid --set {set}: {}", error.to_string().trim_end()))
+    })
+}
+
+/// Merges one validated `KEY=VALUE` into `layer`, unless an `earlier` set
+/// named the same key. The value is a TOML literal when it parses as one
+/// (`20`, `"x"`), otherwise a string
+fn set_into(layer: Table, set: &str, earlier: &[String]) -> Result<Table> {
   let Some((key, raw)) = set.split_once('=') else {
     bail!("expected KEY=VALUE");
   };
@@ -215,7 +219,9 @@ fn set_over(table: Table, set: &str, earlier: &[String]) -> Result<Table> {
     Ok(_) => raw.to_owned(),
     Err(_) => Value::String(raw.to_owned()).to_string(),
   };
-  Ok(lay_over(table, format!("{key} = {literal}").parse()?))
+  let table: Table = format!("{key} = {literal}").parse()?;
+  Settings::from_table(&table)?;
+  Ok(merge(layer, table))
 }
 
 /// Lays one settings layer over `table` key by key, except that a role naming

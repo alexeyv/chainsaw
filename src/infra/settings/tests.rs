@@ -353,6 +353,42 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
+  fn should_launch_codex_with_the_set_args_when_the_agent_is_set_first() {
+    let settings = load_sets(&[
+      "implementer.agent=codex",
+      "implementer.args=--model gpt-5.4",
+    ])
+    .unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--model", "gpt-5.4"]
+    );
+  }
+
+  #[test]
+  fn should_launch_codex_with_the_set_args_when_the_args_are_set_first() {
+    let settings = load_sets(&[
+      "implementer.args=--model gpt-5.4",
+      "implementer.agent=codex",
+    ])
+    .unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--model", "gpt-5.4"]
+    );
+  }
+
+  #[test]
   fn should_let_a_set_beat_the_local_file() {
     let dir = ScratchDir::new();
     dir.write_local("[implementer]\nargs = \"--local\"\n");
@@ -565,11 +601,69 @@ args = "--model sonnet --effort medium"
   }
 }
 
-mod set_over {
+mod sets_layer {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let layer = sets_layer(&sets(&[
+      "prompt-timeout-seconds=20",
+      "implementer.args=--chrome",
+    ]))
+    .unwrap();
+
+    assert_eq!(
+      layer.to_string(),
+      "prompt-timeout-seconds = 20\n\n[implementer]\nargs = \"--chrome\"\n"
+    );
+  }
+
+  #[test]
+  fn should_build_the_same_layer_whichever_order_the_sets_come_in() {
+    let agent_first =
+      sets_layer(&sets(&["implementer.agent=codex", "implementer.args=-a"])).unwrap();
+    let args_first =
+      sets_layer(&sets(&["implementer.args=-a", "implementer.agent=codex"])).unwrap();
+
+    assert_eq!(agent_first.to_string(), args_first.to_string());
+    assert_eq!(
+      agent_first.to_string(),
+      "[implementer]\nagent = \"codex\"\nargs = \"-a\"\n"
+    );
+  }
+
+  #[test]
+  fn should_build_an_empty_layer_when_nothing_is_set() {
+    assert_eq!(sets_layer(&[]).unwrap(), Table::new());
+  }
+
+  #[test]
+  fn should_fail_naming_the_set_and_the_cause_when_it_is_invalid() {
+    let error =
+      sets_layer(&sets(&["prompt-timeout-seconds=1", "implementer.model=x"])).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid --set implementer.model=x: unknown field `model`, expected `agent` or `args`\nin `implementer`"
+    );
+  }
+
+  #[test]
+  fn should_fail_naming_the_later_set_when_two_name_the_same_key() {
+    let error = sets_layer(&sets(&["implementer.args=a", "implementer.args=b"])).unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid --set implementer.args=b: implementer.args was already set by an earlier --set"
+    );
+  }
+}
+
+mod set_into {
   use super::*;
 
   fn apply(text: &str, set: &str) -> Result<Table> {
-    set_over(table(text), set, &[])
+    set_into(table(text), set, &[])
   }
 
   #[test]
@@ -604,7 +698,7 @@ mod set_over {
   }
 
   #[test]
-  fn should_keep_the_rest_of_the_file() {
+  fn should_keep_the_rest_of_the_layer() {
     let result = apply(
       "prompt-timeout-seconds = 3\n[implementer]\nargs = \"--chrome\"\n",
       "implementer.args=--effort medium",
@@ -616,6 +710,14 @@ mod set_over {
       result["implementer"]["args"].as_str(),
       Some("--effort medium")
     );
+  }
+
+  #[test]
+  fn should_keep_the_layers_args_when_the_set_names_the_agent() {
+    let result = apply("[implementer]\nargs = \"-a\"\n", "implementer.agent=codex").unwrap();
+
+    assert_eq!(result["implementer"]["agent"].as_str(), Some("codex"));
+    assert_eq!(result["implementer"]["args"].as_str(), Some("-a"));
   }
 
   #[test]
@@ -633,8 +735,18 @@ mod set_over {
   }
 
   #[test]
+  fn should_fail_naming_the_cause_when_the_set_is_invalid() {
+    let error = apply("", "implementer.model=x").unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "unknown field `model`, expected `agent` or `args`\nin `implementer`"
+    );
+  }
+
+  #[test]
   fn should_fail_when_an_earlier_set_named_the_key() {
-    let error = set_over(
+    let error = set_into(
       table(""),
       "implementer.args=b",
       &sets(&["implementer.args=a"]),

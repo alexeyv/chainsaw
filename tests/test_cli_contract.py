@@ -1441,6 +1441,18 @@ class SettingsContractTests(SupervisorContractCase):
 
         self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
 
+    def test_every_set_is_one_layer_whichever_order_they_come_in(self):
+        self.assert_success(
+            self.cli(
+                "--set", "implementer.args=--model gpt-5.4",
+                "--set", "implementer.agent=codex",
+                "launch", "worker",
+            )
+        )
+
+        self.assertEqual(self.session_agent("worker"), "codex")
+        self.assertEqual(self.launch_args("worker"), ["--model", "gpt-5.4"])
+
     def test_the_global_file_tunes_every_run_directory(self):
         self.write_global_settings('[implementer]\nargs = "--model sonnet"\n')
 
