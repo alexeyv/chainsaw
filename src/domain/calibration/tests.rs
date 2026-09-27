@@ -32,7 +32,7 @@ context_size_end: 900"#
 
   #[test]
   fn should_accept_zero_measurements_and_an_unchanged_context() {
-    let calibration = calibration_measuring(3, 7, Some(0.0), [0, 0, 0, 0, 500, 500]).unwrap();
+    let calibration = calibration_measuring(3, 7, Some(0.0), [0; 4], [500, 500]).unwrap();
 
     assert_eq!(
       format_calibration(&calibration),
@@ -91,13 +91,11 @@ context_size_end: none"#
       "predicted_lines",
       "actual_files",
       "actual_lines",
-      "context_size_start",
-      "context_size_end",
     ];
     for (index, field) in fields.into_iter().enumerate() {
-      let mut measurements = [0; 6];
-      measurements[index] = -1;
-      let error = calibration_measuring(3, 7, None, measurements).unwrap_err();
+      let mut counts = [0; 4];
+      counts[index] = -1;
+      let error = calibration_measuring(3, 7, None, counts, [0, 0]).unwrap_err();
       assert_eq!(error.to_string(), format!("{field} cannot be negative"));
     }
   }
@@ -115,7 +113,7 @@ context_size_end: none"#
 
   #[test]
   fn should_fail_when_the_context_ends_before_it_starts() {
-    let error = calibration_measuring(3, 7, None, [0, 0, 0, 0, 900, 899]).unwrap_err();
+    let error = calibration_measuring(3, 7, None, [0; 4], [900, 899]).unwrap_err();
     assert_eq!(
       error.to_string(),
       "context_size_end cannot precede context_size_start"

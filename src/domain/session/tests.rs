@@ -1,7 +1,7 @@
 use crate::domain::test_helpers::{
   SessionSpec, build_session, format_session, launched_implementer, timestamp, working_implementer,
 };
-use crate::domain::{AgentKind, Role};
+use crate::domain::{AgentKind, ContextSize, Role};
 
 mod role_try_from {
   use super::*;
@@ -155,8 +155,8 @@ can_latch_over_limit: false"#
       name: "lead",
       role: Role::Lead,
       launched_head: None,
-      context: Some(260_000),
-      context_max: Some(260_000),
+      context: ContextSize::tokens(260_000),
+      context_max: ContextSize::tokens(260_000),
       over_limit_at: Some(timestamp(1_700_000_900)),
       ..working_implementer()
     })
@@ -258,51 +258,34 @@ can_latch_over_limit: false"#
   fn should_accept_a_reading_whose_context_is_unknown() {
     let session = build_session(SessionSpec {
       agent: AgentKind::Cursor,
-      context: None,
-      context_max: None,
+      context: ContextSize::UNKNOWN,
+      context_max: ContextSize::UNKNOWN,
       ..working_implementer()
     })
     .unwrap();
 
     assert_eq!(session.agent(), AgentKind::Cursor);
-    assert_eq!(session.context(), None);
-    assert_eq!(session.context_max(), None);
+    assert_eq!(session.context(), ContextSize::UNKNOWN);
+    assert_eq!(session.context_max(), ContextSize::UNKNOWN);
   }
 
   #[test]
   fn should_accept_a_known_maximum_beside_an_unknown_context() {
     let session = build_session(SessionSpec {
-      context: None,
-      context_max: Some(5_000),
+      context: ContextSize::UNKNOWN,
+      context_max: ContextSize::tokens(5_000),
       ..working_implementer()
     })
     .unwrap();
 
-    assert_eq!(session.context(), None);
-    assert_eq!(session.context_max(), Some(5_000));
-  }
-
-  #[test]
-  fn should_fail_when_a_context_reading_is_negative() {
-    let context = build_session(SessionSpec {
-      context: Some(-1),
-      ..working_implementer()
-    })
-    .unwrap_err();
-    let context_max = build_session(SessionSpec {
-      context_max: Some(-1),
-      ..launched_implementer()
-    })
-    .unwrap_err();
-
-    assert_eq!(context.to_string(), "context cannot be negative");
-    assert_eq!(context_max.to_string(), "context_max cannot be negative");
+    assert_eq!(session.context(), ContextSize::UNKNOWN);
+    assert_eq!(session.context_max(), ContextSize::tokens(5_000));
   }
 
   #[test]
   fn should_fail_when_the_maximum_is_below_the_current_context() {
     let error = build_session(SessionSpec {
-      context: Some(5_001),
+      context: ContextSize::tokens(5_001),
       ..working_implementer()
     })
     .unwrap_err();

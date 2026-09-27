@@ -334,16 +334,6 @@ events:
   }
 
   #[test]
-  fn should_fail_when_the_starting_context_size_is_negative() {
-    let error = build(TaskSpec {
-      context_size_start: Some(-1),
-      ..drafted_task()
-    })
-    .unwrap_err();
-    assert_eq!(error.to_string(), "context_size_start cannot be negative");
-  }
-
-  #[test]
   fn should_fail_when_a_state_past_drafted_has_no_session() {
     for state in [
       TaskState::Dispatched,

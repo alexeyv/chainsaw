@@ -143,10 +143,12 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
     def test_dispatch_rests_until_the_daemon_observes_implementer_log_growth(self):
         task = self.new_task(text="Start only after dispatch returns.")
         self.launch()
+        base = self.head()
+        transcript = self.session_transcript("worker")
+        offset_before = transcript.stat().st_size if transcript.exists() else 0
 
         dispatched = self.assert_success(self.dispatch(task))
         dispatch_state = self.assert_success(self.cli("state"))
-        dispatch_offset = self.session_transcript("worker").stat().st_size
         observed_head = self.commit_file(
             "between.txt", "between dispatch and observation\n",
             "test: move head before observation",
@@ -166,8 +168,9 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         self.assertIn(f"{task} dispatched", dispatch_state.stdout)
         self.assertNotIn(f"{task} in_flight", dispatch_state.stdout)
         self.assertIn(f"{task} in_flight", flight_state.stdout)
-        self.assertEqual(recorded_offset, dispatch_offset)
-        self.assertEqual(base_head, observed_head)
+        self.assertEqual(recorded_offset, offset_before)
+        self.assertEqual(base_head, base)
+        self.assertNotEqual(base_head, observed_head)
 
     def test_dispatch_requires_an_existing_session(self):
         task = self.new_task()
@@ -481,7 +484,7 @@ class VerificationContractTests(SupervisorContractCase):
 
         result = self.cli("accept", str(task))
 
-        self.assert_failure(result, "no commit found in the implementer's transcript")
+        self.assert_failure(result, "no new commit since the task was dispatched")
 
     def test_accept_rejects_a_dirty_tree(self):
         task, _ = self.prepare_committed_task()
@@ -1837,7 +1840,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         result = self.cli("accept", str(task))
 
         self.assert_failure(result)
-        self.assertIn("no new commit at HEAD since the task was dispatched", result.stdout)
+        self.assertIn("no new commit since the task was dispatched", result.stdout)
 
     def test_calibrate_reports_an_unknown_context(self):
         task = self.new_task()
@@ -1877,4 +1880,4 @@ class ClaudeCommitDetectionContractTests(SupervisorContractCase):
 
         self.assertIn(f"{task} in_flight", state.stdout)
         self.assert_failure(result)
-        self.assertIn("no commit found in the implementer's transcript", result.stdout)
+        self.assertIn("no new commit since the task was dispatched", result.stdout)

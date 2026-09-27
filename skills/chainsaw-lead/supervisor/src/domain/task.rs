@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
 use super::{
-  require_nonblank, require_nonnegative, require_optional_nonblank, require_optional_nonnegative,
+  ContextSize, require_nonblank, require_nonnegative, require_optional_nonblank,
   require_optional_positive, require_positive, task_event::TaskEvent,
 };
 
@@ -88,7 +88,7 @@ pub struct Task {
   transcript_offset: i64,
   base_head: Option<String>,
   predicted_file_list: Option<Vec<String>>,
-  context_size_start: Option<i64>,
+  context_size_start: ContextSize,
   commentary_requested_at: Option<DateTime<Utc>>,
   commentary_delivered_at: Option<DateTime<Utc>>,
   events: Vec<TaskEvent>,
@@ -108,7 +108,7 @@ impl Task {
     transcript_offset: i64,
     base_head: Option<String>,
     predicted_file_list: Option<Vec<String>>,
-    context_size_start: Option<i64>,
+    context_size_start: ContextSize,
     commentary_requested_at: Option<DateTime<Utc>>,
     commentary_delivered_at: Option<DateTime<Utc>>,
     events: Vec<TaskEvent>,
@@ -125,7 +125,6 @@ impl Task {
     }
     require_nonnegative("transcript_offset", transcript_offset)?;
     require_optional_nonblank("base_head", base_head.as_deref())?;
-    require_optional_nonnegative("context_size_start", context_size_start)?;
     validate_events(&events)?;
     let state = events.last().expect("validated nonempty event log").state();
 
@@ -224,7 +223,9 @@ impl Task {
     self.predicted_file_list.as_deref()
   }
 
-  pub fn context_size_start(&self) -> Option<i64> {
+  /// The session's context when the task took flight: unknown until then, or
+  /// for good when the session's agent cannot report one.
+  pub fn context_size_start(&self) -> ContextSize {
     self.context_size_start
   }
 

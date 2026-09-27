@@ -17,16 +17,18 @@ use sha1::{Digest, Sha1};
 use strum::IntoEnumIterator;
 
 use crate::cli::{Command, HumanWaitAction, TaskCommand, Verdict};
-use crate::domain::{AgentKind, FindingVerdict, Role, Session, Task, TaskEvent, TaskState};
-use crate::infra::agent::{self, Agent, PromptState};
+use crate::domain::{
+  AgentKind, ContextSize, FindingVerdict, Role, Session, Task, TaskEvent, TaskState,
+};
+use crate::infra::agent::{self, Agent, PROMPT_ATTEMPTS, PromptState};
 use crate::infra::session_runtime::{SessionKind, SessionRuntime, StartSession};
 use crate::infra::settings::Settings;
 use crate::infra::store::{Store, now};
 use crate::infra::transcript_monitor::{TranscriptMonitor, transcript_size};
 use crate::persistence::{calibration, finding, observation, run, session, task};
 
-const LEAD_STOP_TOKENS: i64 = 250_000;
-const LEAD_WARN_TOKENS: i64 = 200_000;
+const LEAD_STOP_TOKENS: u64 = 250_000;
+const LEAD_WARN_TOKENS: u64 = 200_000;
 /// A commit the lead has not judged after this long is being missed.
 const COMMIT_UNATTENDED_SECONDS: i64 = 300;
 /// Task monitors read state every few seconds; this much silence while a task
@@ -36,10 +38,9 @@ const STATE_UNREAD_SECONDS: i64 = 120;
 /// this long means no daemon is running, whether it never started, was
 /// stopped, or died.
 const DAEMON_SILENT_SECONDS: i64 = 30;
-const COMMENTATOR_COMPACT_TOKENS: i64 = 150_000;
-const IMPLEMENTER_LIMIT_TOKENS: i64 = 100_000;
+const COMMENTATOR_COMPACT_TOKENS: u64 = 150_000;
+const IMPLEMENTER_LIMIT_TOKENS: u64 = 100_000;
 const STALE_SECONDS: f64 = 600.0;
-const PROMPT_ATTEMPTS: i64 = 3;
 const VERIFY_LOG_RETRY_SECONDS: u64 = 1;
 const COORDINATOR_REMEDY_ONLY: &str = "normally the coordinator records this on its own; use --force --reason only to remedy a coordinator failure";
 
@@ -81,18 +82,16 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
   let at = Utc::now();
   let timestamp = at.timestamp_millis();
-  // A lead whose context is unknown gets no warning: there is no reading to
-  // measure against the threshold.
   if let Some(lead) = session_snapshots(store)?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
-    && let Some(context) = lead.context()
   {
-    if context > LEAD_STOP_TOKENS {
+    let context = lead.context();
+    if context.exceeds(LEAD_STOP_TOKENS) {
       warnings.push(format!(
         "lead context {context} is past {LEAD_STOP_TOKENS}: stop the run per the skill's Stopping section"
       ));
-    } else if context > LEAD_WARN_TOKENS {
+    } else if context.exceeds(LEAD_WARN_TOKENS) {
       warnings.push(format!("lead context {context} of {LEAD_STOP_TOKENS}"));
     }
   }
@@ -260,8 +259,8 @@ fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
   })
 }
 
-/// Commit ids the task's session may have made since the task was dispatched:
-/// what its transcript recorded, or HEAD when its agent's transcript cannot say.
+/// Commit ids the task's session may have made since the task was dispatched;
+/// `new_commit_for` decides whether one is really new.
 fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
   let Some(session) = task_session(store, task)? else {
     return Ok(Vec::new());
@@ -269,49 +268,12 @@ fn task_commits(store: &Store, task: &Task) -> Result<Vec<String>> {
   let Some(transcript) = session_transcript(store, &session)? else {
     return Ok(Vec::new());
   };
-  commit_candidates(
-    store,
-    agent::for_session(&session),
+  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  Ok(agent::for_session(&session).commit_candidates(
     &transcript,
     task.transcript_offset() as u64,
-  )
-}
-
-/// The commits an implementer may have made from `offset` on: the shas its
-/// transcript shows, or HEAD alone when the agent's transcript keeps no tool
-/// output. Either way `new_commit_for` decides whether one is really new.
-fn commit_candidates(
-  store: &Store,
-  agent: &dyn Agent,
-  transcript: &Path,
-  offset: u64,
-) -> Result<Vec<String>> {
-  match agent.commits_in_transcript(transcript, offset) {
-    Some(shas) => Ok(shas),
-    None => Ok(vec![git_stdout(store, &["rev-parse", "HEAD"])?]),
-  }
-}
-
-/// Whether the task's implementer is one whose commit is read from git rather
-/// than from its transcript.
-fn commits_are_read_from_git(store: &Store, task: &Task) -> Result<bool> {
-  let Some(session) = task_session(store, task)? else {
-    return Ok(false);
-  };
-  let Some(transcript) = session_transcript(store, &session)? else {
-    return Ok(false);
-  };
-  Ok(
-    agent::for_session(&session)
-      .commits_in_transcript(&transcript, task.transcript_offset() as u64)
-      .is_none(),
-  )
-}
-
-/// A context reading for a printout: the number, or `unknown` when the
-/// session's agent cannot report one.
-fn context_text(context: Option<i64>) -> String {
-  context.map_or_else(|| "unknown".to_owned(), |context| context.to_string())
+    &head,
+  ))
 }
 
 /// Where the session's transcript is, or None until its agent has written
@@ -473,13 +435,10 @@ fn cmd_prompt(
     }
   };
   let agent = session.as_ref().map(agent::for_session);
-  // An agent whose transcript lags its prompts gets the same total budget in
-  // one attempt: resending would hand it the prompt again as a follow-up.
-  let (attempts, prompt_timeout_millis) = if agent.is_none_or(Agent::echoes_prompts_promptly) {
-    (PROMPT_ATTEMPTS, prompt_timeout_millis)
-  } else {
-    (1, prompt_timeout_millis * PROMPT_ATTEMPTS)
-  };
+  // Every prompt has the same time to show up, spread over as many sends as
+  // its agent allows.
+  let attempts = agent.map_or(PROMPT_ATTEMPTS, Agent::prompt_attempts);
+  let window_millis = prompt_timeout_millis * PROMPT_ATTEMPTS / attempts;
 
   for attempt in 1..=attempts {
     // Polling the runtime gives it a turn to deliver what a busy session has
@@ -492,7 +451,7 @@ fn cmd_prompt(
       [prompt_id],
     )?;
     let _ = runtime.prompt(name, text);
-    let deadline = now() + prompt_timeout_millis;
+    let deadline = now() + window_millis;
     while now() < deadline {
       let _ = runtime.query(name);
       let path = transcript()?;
@@ -728,12 +687,11 @@ fn cmd_dispatch(
     preamble,
     text = task.text().trim_end()
   );
-  // An agent whose transcript lags its prompts may be at work, even past its
-  // commit, before the prompt shows up: its task starts from where the
-  // transcript and the branch stood before the send.
-  let agent = agent::for_session(&session);
-  let offset_before = transcript_size(session_transcript(store, &session)?.as_deref());
-  let head_before = git_stdout(store, &["rev-parse", "HEAD"])?;
+  // The task is measured from where the transcript and the branch stood
+  // before the send: an agent may be at work, even past its commit, before
+  // its transcript shows the prompt.
+  let transcript_offset = transcript_size(session_transcript(store, &session)?.as_deref());
+  let base_head = git_stdout(store, &["rev-parse", "HEAD"])?;
   // The task is only dispatched once the prompt is in the transcript, so a
   // send that never shows up there leaves it drafted and dispatchable again.
   if let Err(error) = cmd_prompt(store, runtime, settings, implementer, &prompt, false, 300) {
@@ -743,19 +701,13 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let (transcript_offset, base_head) = if agent.echoes_prompts_promptly() {
-    let offset = transcript_size(session_transcript(store, &session)?.as_deref());
-    (offset, None)
-  } else {
-    (offset_before, Some(head_before.as_str()))
-  };
   let transaction = store.write_transaction()?;
   task::dispatch(
     &transaction,
     task_id,
     session.id(),
     transcript_offset as i64,
-    base_head,
+    &base_head,
     reason,
   )?;
   transaction.commit()?;
@@ -993,10 +945,8 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     if show.status.success() && !head.starts_with(full_sha) {
       problems.push("commit is not HEAD".to_owned());
     }
-  } else if commits_are_read_from_git(store, &task)? {
-    problems.push("no new commit at HEAD since the task was dispatched".to_owned());
   } else {
-    problems.push("no commit found in the implementer's transcript".to_owned());
+    problems.push("no new commit since the task was dispatched".to_owned());
   }
   if !git_stdout(store, &["status", "--porcelain"])?.is_empty() {
     problems.push("tree is dirty".to_owned());
@@ -1158,24 +1108,27 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   };
   let peak = match &session {
     Some(session) => match session_transcript(store, session)? {
-      Some(transcript) => agent::for_session(session)
-        .context_peak(&transcript, task.transcript_offset() as u64, next_offset)
-        .map(|peak| peak as i64),
-      None => None,
+      Some(transcript) => agent::for_session(session).context_peak(
+        &transcript,
+        task.transcript_offset() as u64,
+        next_offset,
+      ),
+      None => ContextSize::UNKNOWN,
     },
-    None => None,
+    None => ContextSize::UNKNOWN,
   };
   // No usage within the task's slice of the transcript falls back to the
-  // session's recorded maximum; an agent that reports no usage at all leaves
-  // the context unknown.
-  let recorded_max = session.as_ref().and_then(Session::context_max);
-  let end = match peak {
-    Some(peak) if peak > 0 => Some(peak),
-    Some(_) => recorded_max.or(Some(0)),
-    None => recorded_max,
+  // session's recorded maximum.
+  let recorded_max = session
+    .as_ref()
+    .map_or(ContextSize::UNKNOWN, Session::context_max);
+  let end = if peak.exceeds(0) {
+    peak
+  } else {
+    recorded_max.or(peak)
   };
   let base = task.context_size_start();
-  let context = end.zip(base).map(|(end, base)| (end - base).max(0));
+  let context = end.since(base);
   let transaction = store.write_transaction()?;
   calibration::create(
     &transaction,
@@ -1191,12 +1144,9 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   transaction.commit()?;
   let wall_text = wall.map_or_else(|| "None".to_owned(), |wall| (wall as i64).to_string());
   println!(
-    "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {} (session {}, base {})",
+    "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {context} (session {end}, base {base})",
     task.predicted_files(),
     task.predicted_lines(),
-    context_text(context),
-    context_text(end),
-    context_text(base)
   );
   Ok(())
 }
@@ -1362,11 +1312,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
   for session in session_snapshots(store)? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
-    if implementer
-      && session
-        .context()
-        .is_some_and(|context| context > IMPLEMENTER_LIMIT_TOKENS)
-    {
+    if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
@@ -1375,8 +1321,8 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
         session.role(),
-        context_text(session.context()),
-        context_text(session.context_max())
+        session.context(),
+        session.context_max()
       );
     } else {
       let danger = if session.role() == Role::Lead {
@@ -1532,11 +1478,7 @@ fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
       println!(
         "{}\t{}",
         session.name(),
-        context_text(
-          agent::for_session(&session)
-            .context_size(&transcript)
-            .map(|context| context as i64)
-        )
+        agent::for_session(&session).context_size(&transcript)
       );
     } else {
       println!("{}\tUNAVAILABLE (transcript not found)", session.name());
@@ -1650,9 +1592,7 @@ fn daemon(
         )?;
       }
       let size = transcript_size(Some(&transcript));
-      let context = agent::for_session(&session)
-        .context_size(&transcript)
-        .map(|context| context as i64);
+      let context = agent::for_session(&session).context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       let transaction = store.write_transaction()?;
@@ -1761,16 +1701,14 @@ fn observe_implementer(
     if transcript_size(Some(transcript)) <= dispatch_offset {
       return Ok(());
     }
-    let head = git_stdout(store, &["rev-parse", "HEAD"])?;
-    let context = agent
-      .context_before(transcript, dispatch_offset)
-      .map(|context| context as i64);
+    let context = agent.context_before(transcript, dispatch_offset);
     let transaction = store.write_transaction()?;
-    task::take_flight(&transaction, task.id(), &head, context)?;
+    task::take_flight(&transaction, task.id(), context)?;
     transaction.commit()?;
     return Ok(());
   }
-  let shas = commit_candidates(store, agent, transcript, task.transcript_offset() as u64)?;
+  let head = git_stdout(store, &["rev-parse", "HEAD"])?;
+  let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
     let transaction = store.write_transaction()?;
     task::record_commit(&transaction, task.id(), &sha, None)?;
@@ -1782,11 +1720,10 @@ fn observe_implementer(
   Ok(())
 }
 
-/// What one daemon poll saw of a session's transcript. The context is None
-/// when the session's agent cannot report one.
+/// What one daemon poll saw of a session's transcript.
 struct Reading<'a> {
   transcript: &'a Path,
-  context: Option<i64>,
+  context: ContextSize,
   quiet: f64,
 }
 
@@ -1840,22 +1777,19 @@ fn observe_commentator(
       }
     }
   }
-  // An unknown context can neither call for compaction nor confirm one.
-  if let Some(context) = context {
-    if context > COMMENTATOR_COMPACT_TOKENS && !*compacting {
-      if daemon_prompt(
-        store,
-        runtime,
-        settings,
-        session.name(),
-        agent.compact_prompt(),
-      ) {
-        *compacting = true;
-        store.event("compact", &format!("{} at {context}", session.name()))?;
-      }
-    } else if context < COMMENTATOR_COMPACT_TOKENS {
-      *compacting = false;
+  if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
+    if daemon_prompt(
+      store,
+      runtime,
+      settings,
+      session.name(),
+      agent.compact_prompt(),
+    ) {
+      *compacting = true;
+      store.event("compact", &format!("{} at {context}", session.name()))?;
     }
+  } else if context.is_under(COMMENTATOR_COMPACT_TOKENS) {
+    *compacting = false;
   }
   kick_if_stalled(store, runtime, settings, session, quiet)
 }
@@ -1864,11 +1798,8 @@ fn observe_commentator(
 /// is pushed at the lead: an unsolicited prompt mid-thought is a context switch
 /// it did not choose. The warning printed after every lead-facing command
 /// carries the same fact at the moment the lead is already reading output.
-fn observe_lead(store: &Store, session: &Session, context: Option<i64>) -> Result<()> {
-  if let Some(context) = context
-    && context > LEAD_STOP_TOKENS
-    && session.can_latch_over_limit()
-  {
+fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Result<()> {
+  if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
     let transaction = store.write_transaction()?;
     session::record_over_limit(&transaction, session.id())?;
     transaction.commit()?;

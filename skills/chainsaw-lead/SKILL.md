@@ -117,15 +117,15 @@ It can also become aborted from any of these states.
 Nothing has been sent to an implementer yet. If you decide to reshape the task, you abort it,
 and draft another.
 
-**dispatched** — implementer session received the task prompt, but has not yet produced
-new transcript output after it. You trigger this: `$SUP dispatch <task-id> --to
-implementer-<n> [--reason "..."]`. The supervisor records the transcript offset
-here so it can tell the prompt showing up from the implementer starting work.
+**dispatched** — implementer session received the task prompt, but its transcript has
+not grown since. You trigger this: `$SUP dispatch <task-id> --to implementer-<n>
+[--reason "..."]`. The supervisor records where the transcript and the git revision
+stood when the prompt was sent: the task's work is measured from there, so a commit
+that lands before the transcript shows the prompt is still the task's.
 
-**in_flight** — implementer started working on the task. The daemon detects the first
-transcript growth past the dispatch offset and records this automatically, along with the
-measurement baseline: that dispatch offset, the current git revision, and the context
-size at the offset.
+**in_flight** — the implementer's transcript grew past the dispatch offset. The daemon
+detects this automatically and records the context size at that offset, the last of
+the measurement baseline.
 
 **committed_unverified** — implementer has committed its work to Git. The supervisor detects and
 records this automatically. As soon as you see this state, dispatching the next task to the next

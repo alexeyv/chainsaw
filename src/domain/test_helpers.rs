@@ -5,8 +5,8 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  AgentKind, Calibration, Finding, FindingVerdict, Observation, Role, Run, Session, Task,
-  TaskEvent, TaskState,
+  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, Observation, Role, Run, Session,
+  Task, TaskEvent, TaskState,
 };
 
 pub fn created_at() -> DateTime<Utc> {
@@ -102,25 +102,20 @@ fn format_option_text(value: Option<&str>) -> String {
 
 /// A calibration for task 7 with every measurement filled in.
 pub fn calibration(id: i64, task_id: i64, wall_seconds: Option<f64>) -> Result<Calibration> {
-  calibration_measuring(id, task_id, wall_seconds, [2, 20, 4, 35, 100, 900])
+  calibration_measuring(id, task_id, wall_seconds, [2, 20, 4, 35], [100, 900])
 }
 
-/// `measurements` are predicted files, predicted lines, actual files, actual
-/// lines, context size start, context size end.
+/// `counts` are predicted files, predicted lines, actual files, actual lines;
+/// `context` is the context size at the start and at the end.
 pub fn calibration_measuring(
   id: i64,
   task_id: i64,
   wall_seconds: Option<f64>,
-  measurements: [i64; 6],
+  counts: [i64; 4],
+  context: [u64; 2],
 ) -> Result<Calibration> {
-  let [
-    predicted_files,
-    predicted_lines,
-    actual_files,
-    actual_lines,
-    start,
-    end,
-  ] = measurements;
+  let [predicted_files, predicted_lines, actual_files, actual_lines] = counts;
+  let [start, end] = context;
   Calibration::new(
     id,
     task_id,
@@ -130,8 +125,8 @@ pub fn calibration_measuring(
     actual_lines,
     wall_seconds,
     created_at(),
-    Some(start),
-    Some(end),
+    ContextSize::tokens(start),
+    ContextSize::tokens(end),
   )
 }
 
@@ -146,8 +141,8 @@ pub fn calibration_without_context(id: i64, task_id: i64) -> Result<Calibration>
     35,
     Some(12.5),
     created_at(),
-    None,
-    None,
+    ContextSize::UNKNOWN,
+    ContextSize::UNKNOWN,
   )
 }
 
@@ -162,8 +157,8 @@ pub fn format_calibration(calibration: &Calibration) -> String {
     calibration.actual_lines(),
     format_option(calibration.wall_seconds()),
     format_time(calibration.created_at()),
-    format_option(calibration.context_size_start()),
-    format_option(calibration.context_size_end()),
+    format_option(calibration.context_size_start().known()),
+    format_option(calibration.context_size_end().known()),
   )
 }
 
@@ -253,7 +248,7 @@ pub struct TaskSpec {
   pub transcript_offset: i64,
   pub base_head: Option<&'static str>,
   pub predicted_file_list: Option<Vec<&'static str>>,
-  pub context_size_start: Option<i64>,
+  pub context_size_start: ContextSize,
   pub commentary_requested_at: Option<DateTime<Utc>>,
   pub commentary_delivered_at: Option<DateTime<Utc>>,
   pub events: Vec<TaskEvent>,
@@ -273,7 +268,7 @@ pub fn drafted_task() -> TaskSpec {
     transcript_offset: 0,
     base_head: None,
     predicted_file_list: None,
-    context_size_start: None,
+    context_size_start: ContextSize::UNKNOWN,
     commentary_requested_at: None,
     commentary_delivered_at: None,
     events: events_through(TaskState::Drafted, None),
@@ -288,7 +283,7 @@ pub fn task_in(state: TaskState, reason: Option<&str>) -> TaskSpec {
     commit_sha: Some("abc123"),
     transcript_offset: 100,
     base_head: Some("base123"),
-    context_size_start: Some(900),
+    context_size_start: ContextSize::tokens(900),
     events: events_through(state, reason),
     ..drafted_task()
   }
@@ -349,7 +344,7 @@ pub fn format_task(task: &Task) -> String {
     task.transcript_offset(),
     format_option_text(task.base_head()),
     file_list,
-    format_option(task.context_size_start()),
+    format_option(task.context_size_start().known()),
     format_option(task.commentary_requested_at().map(format_time)),
     format_option(task.commentary_delivered_at().map(format_time)),
     events,
@@ -374,8 +369,8 @@ pub struct SessionSpec {
   pub launched_head: Option<&'static str>,
   pub started_at: DateTime<Utc>,
   pub stopped_at: Option<DateTime<Utc>>,
-  pub context: Option<i64>,
-  pub context_max: Option<i64>,
+  pub context: ContextSize,
+  pub context_max: ContextSize,
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
   pub over_limit_at: Option<DateTime<Utc>>,
@@ -393,8 +388,8 @@ pub fn launched_implementer() -> SessionSpec {
     launched_head: Some("base123"),
     started_at: created_at(),
     stopped_at: None,
-    context: None,
-    context_max: None,
+    context: ContextSize::UNKNOWN,
+    context_max: ContextSize::UNKNOWN,
     last_growth: created_at(),
     kicked_at: None,
     over_limit_at: None,
@@ -406,8 +401,8 @@ pub fn launched_implementer() -> SessionSpec {
 /// grown, and its context read.
 pub fn working_implementer() -> SessionSpec {
   SessionSpec {
-    context: Some(4_000),
-    context_max: Some(5_000),
+    context: ContextSize::tokens(4_000),
+    context_max: ContextSize::tokens(5_000),
     last_growth: timestamp(1_700_000_600),
     transcript: Some("/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"),
     ..launched_implementer()
@@ -444,8 +439,8 @@ pub fn format_session(session: &Session) -> String {
     format_option_text(session.launched_head()),
     format_time(session.started_at()),
     format_option(session.stopped_at().map(format_time)),
-    format_option(session.context()),
-    format_option(session.context_max()),
+    format_option(session.context().known()),
+    format_option(session.context_max().known()),
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),

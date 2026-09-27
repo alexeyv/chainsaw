@@ -5,9 +5,7 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
-use super::{
-  require_nonblank, require_optional_nonblank, require_optional_nonnegative, require_positive,
-};
+use super::{ContextSize, require_nonblank, require_optional_nonblank, require_positive};
 
 /// What a session is for. The lead runs the process, implementers take tasks,
 /// and the commentator reviews commits; only implementers are ever dispatched to.
@@ -98,8 +96,8 @@ pub struct Session {
   launched_head: Option<String>,
   started_at: DateTime<Utc>,
   stopped_at: Option<DateTime<Utc>>,
-  context: Option<i64>,
-  context_max: Option<i64>,
+  context: ContextSize,
+  context_max: ContextSize,
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
@@ -117,8 +115,8 @@ impl Session {
     launched_head: Option<String>,
     started_at: DateTime<Utc>,
     stopped_at: Option<DateTime<Utc>>,
-    context: Option<i64>,
-    context_max: Option<i64>,
+    context: ContextSize,
+    context_max: ContextSize,
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
     over_limit_at: Option<DateTime<Utc>>,
@@ -134,9 +132,7 @@ impl Session {
     {
       bail!("transcript cannot be blank");
     }
-    require_optional_nonnegative("context", context)?;
-    require_optional_nonnegative("context_max", context_max)?;
-    if let (Some(context), Some(context_max)) = (context, context_max)
+    if let (Some(context), Some(context_max)) = (context.known(), context_max.known())
       && context_max < context
     {
       bail!("context_max cannot be below context");
@@ -204,15 +200,15 @@ impl Session {
     self.stopped_at
   }
 
-  /// Context the session held at its latest reading, or None while nothing
+  /// Context the session held at its latest reading: unknown while nothing
   /// has been read or the agent's transcript cannot say.
-  pub fn context(&self) -> Option<i64> {
+  pub fn context(&self) -> ContextSize {
     self.context
   }
 
-  /// The largest context ever read for the session, or None while no reading
+  /// The largest context ever read for the session: unknown while no reading
   /// has said.
-  pub fn context_max(&self) -> Option<i64> {
+  pub fn context_max(&self) -> ContextSize {
     self.context_max
   }
 

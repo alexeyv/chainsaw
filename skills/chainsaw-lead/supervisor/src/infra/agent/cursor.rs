@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{Agent, PromptState, entries, read_lossy, text_of};
+use crate::domain::ContextSize;
 use crate::infra::session_runtime::SessionKind;
 
 pub struct Cursor;
@@ -67,16 +68,16 @@ impl Agent for Cursor {
 
   /// Cursor's transcript records no usage, so the context is unknown rather
   /// than zero.
-  fn context_size(&self, _transcript: &Path) -> Option<u64> {
-    None
+  fn context_size(&self, _transcript: &Path) -> ContextSize {
+    ContextSize::UNKNOWN
   }
 
-  fn context_before(&self, _transcript: &Path, _offset: u64) -> Option<u64> {
-    None
+  fn context_before(&self, _transcript: &Path, _offset: u64) -> ContextSize {
+    ContextSize::UNKNOWN
   }
 
-  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> Option<u64> {
-    None
+  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> ContextSize {
+    ContextSize::UNKNOWN
   }
 
   /// Cursor writes a prompt only when it takes it up, wrapped in a timestamp
@@ -95,11 +96,12 @@ impl Agent for Cursor {
     }
   }
 
-  /// Cursor writes the prompt together with its first reply, which in a real
-  /// run came 39 seconds after the prompt was sent, 16 seconds after the
-  /// commit it asked for had already landed.
-  fn echoes_prompts_promptly(&self) -> bool {
-    false
+  /// Once: Cursor writes the prompt together with its first reply, which in a
+  /// real run came 39 seconds after the prompt was sent, 16 seconds after the
+  /// commit it asked for had already landed. A second send would be a second
+  /// prompt.
+  fn prompt_attempts(&self) -> i64 {
+    1
   }
 
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String> {
@@ -131,9 +133,9 @@ impl Agent for Cursor {
   }
 
   /// The transcript keeps no tool output, so git's commit line never reaches
-  /// it: the coordinator asks git for HEAD instead.
-  fn commits_in_transcript(&self, _transcript: &Path, _offset: u64) -> Option<Vec<String>> {
-    None
+  /// it: HEAD is the only candidate.
+  fn commit_candidates(&self, _transcript: &Path, _offset: u64, head: &str) -> Vec<String> {
+    vec![head.to_owned()]
   }
 }
 

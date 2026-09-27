@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use super::*;
+use crate::domain::ContextSize;
+use crate::infra::agent::PROMPT_ATTEMPTS;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -157,7 +159,10 @@ mod context_size {
       usage_line(40, 8, 50)
     ));
 
-    assert_eq!(Codex.context_size(transcript.path()), Some(40));
+    assert_eq!(
+      Codex.context_size(transcript.path()),
+      ContextSize::tokens(40)
+    );
   }
 
   #[test]
@@ -168,14 +173,20 @@ mod context_size {
       usage_line(65_537, 60_000, 2_052_395)
     ));
 
-    assert_eq!(Codex.context_size(transcript.path()), Some(65_537));
+    assert_eq!(
+      Codex.context_size(transcript.path()),
+      ContextSize::tokens(65_537)
+    );
   }
 
   #[test]
   fn should_read_zero_when_no_response_reports_usage() {
     let transcript = Transcript::containing(&user_line("hi"));
 
-    assert_eq!(Codex.context_size(transcript.path()), Some(0));
+    assert_eq!(
+      Codex.context_size(transcript.path()),
+      ContextSize::tokens(0)
+    );
   }
 }
 
@@ -189,7 +200,7 @@ mod context_before {
 
     assert_eq!(
       Codex.context_before(transcript.path(), first.len() as u64 + 1),
-      Some(10)
+      ContextSize::tokens(10)
     );
   }
 }
@@ -208,7 +219,7 @@ mod context_peak {
 
     assert_eq!(
       Codex.context_peak(transcript.path(), first.len() as u64 + 1, None),
-      Some(40)
+      ContextSize::tokens(40)
     );
   }
 }
@@ -253,12 +264,12 @@ mod prompt_state {
   }
 }
 
-mod echoes_prompts_promptly {
+mod prompt_attempts {
   use super::*;
 
   #[test]
   fn should_work() {
-    assert!(Codex.echoes_prompts_promptly());
+    assert_eq!(Codex.prompt_attempts(), PROMPT_ATTEMPTS);
   }
 }
 
@@ -333,7 +344,7 @@ mod output_mentions {
   }
 }
 
-mod commits_in_transcript {
+mod commit_candidates {
   use super::*;
 
   #[test]
@@ -341,8 +352,8 @@ mod commits_in_transcript {
     let transcript = Transcript::containing(&tool_output_line("[chainsaw 0123abc] fix: thing"));
 
     assert_eq!(
-      Codex.commits_in_transcript(transcript.path(), 0),
-      Some(vec!["0123abc".to_owned()])
+      Codex.commit_candidates(transcript.path(), 0, "head123"),
+      vec!["0123abc".to_owned()]
     );
   }
 
@@ -355,8 +366,8 @@ mod commits_in_transcript {
     ));
 
     assert_eq!(
-      Codex.commits_in_transcript(transcript.path(), old.len() as u64 + 1),
-      Some(vec!["4567def".to_owned()])
+      Codex.commit_candidates(transcript.path(), old.len() as u64 + 1, "head123"),
+      vec!["4567def".to_owned()]
     );
   }
 }

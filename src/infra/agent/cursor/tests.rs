@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use super::*;
+use crate::domain::ContextSize;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -150,7 +151,7 @@ mod context_size {
       assistant_line("done")
     ));
 
-    assert_eq!(Cursor.context_size(transcript.path()), None);
+    assert_eq!(Cursor.context_size(transcript.path()), ContextSize::UNKNOWN);
   }
 }
 
@@ -164,7 +165,7 @@ mod context_before {
 
     assert_eq!(
       Cursor.context_before(transcript.path(), first.len() as u64 + 1),
-      None
+      ContextSize::UNKNOWN
     );
   }
 }
@@ -180,7 +181,10 @@ mod context_peak {
       assistant_line("done")
     ));
 
-    assert_eq!(Cursor.context_peak(transcript.path(), 0, None), None);
+    assert_eq!(
+      Cursor.context_peak(transcript.path(), 0, None),
+      ContextSize::UNKNOWN
+    );
   }
 }
 
@@ -255,12 +259,12 @@ mod prompt_state {
   }
 }
 
-mod echoes_prompts_promptly {
+mod prompt_attempts {
   use super::*;
 
   #[test]
   fn should_work() {
-    assert!(!Cursor.echoes_prompts_promptly());
+    assert_eq!(Cursor.prompt_attempts(), 1);
   }
 }
 
@@ -343,14 +347,17 @@ mod output_mentions {
   }
 }
 
-mod commits_in_transcript {
+mod commit_candidates {
   use super::*;
 
   #[test]
   fn should_work() {
     let transcript = Transcript::containing(&assistant_line("[chainsaw 0123abc] fix: thing"));
 
-    assert_eq!(Cursor.commits_in_transcript(transcript.path(), 0), None);
+    assert_eq!(
+      Cursor.commit_candidates(transcript.path(), 0, "head123"),
+      vec!["head123".to_owned()]
+    );
   }
 }
 

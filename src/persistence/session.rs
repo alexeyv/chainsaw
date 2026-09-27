@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{AgentKind, Role, Session};
+use crate::domain::{AgentKind, ContextSize, Role, Session};
 
 struct SessionRow {
   id: i64,
@@ -111,7 +111,7 @@ pub fn record_transcript(transaction: &Transaction<'_>, id: i64, path: &Path) ->
 pub fn record_reading(
   transaction: &Transaction<'_>,
   id: i64,
-  context: Option<i64>,
+  context: ContextSize,
   grew: bool,
   at: DateTime<Utc>,
 ) -> Result<Session> {
@@ -125,7 +125,7 @@ pub fn record_reading(
         kicked_at=case when ?2 then null else kicked_at end
       where id=?4
       ",
-    params![context, grew, at.timestamp_millis(), id],
+    params![context.stored(), grew, at.timestamp_millis(), id],
   )?;
   get(transaction, id)?.with_context(|| format!("session {id} is missing"))
 }
@@ -185,8 +185,8 @@ fn materialize(row: SessionRow) -> Result<Session> {
       .stopped_at
       .map(|at| time(at, "stopped_at"))
       .transpose()?,
-    row.context,
-    row.context_max,
+    ContextSize::from_stored(row.context)?,
+    ContextSize::from_stored(row.context_max)?,
     time(row.last_growth, "last_growth")?,
     row.kicked_at.map(|at| time(at, "kicked_at")).transpose()?,
     row

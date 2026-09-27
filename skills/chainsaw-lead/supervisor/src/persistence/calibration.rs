@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{Transaction, params};
 
-use crate::domain::Calibration;
+use crate::domain::{Calibration, ContextSize};
 
 #[allow(clippy::too_many_arguments)]
 pub fn create(
@@ -13,8 +13,8 @@ pub fn create(
   actual_files: i64,
   actual_lines: i64,
   wall_seconds: Option<f64>,
-  context_size_start: Option<i64>,
-  context_size_end: Option<i64>,
+  context_size_start: ContextSize,
+  context_size_end: ContextSize,
 ) -> Result<Calibration> {
   let created_at = Utc::now();
   let id = transaction.query_row(
@@ -33,8 +33,8 @@ pub fn create(
       actual_lines,
       wall_seconds,
       created_at.timestamp_millis(),
-      context_size_start,
-      context_size_end,
+      context_size_start.stored(),
+      context_size_end.stored(),
     ],
     |row| row.get(0),
   )?;

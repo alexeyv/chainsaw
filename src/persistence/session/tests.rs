@@ -11,7 +11,7 @@ use super::{
 use crate::domain::test_helpers::{
   format_session, format_sessions, format_time, timestamp, within,
 };
-use crate::domain::{AgentKind, Role, Session};
+use crate::domain::{AgentKind, ContextSize, Role, Session};
 use crate::persistence::test_fixture::database;
 
 fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Result<Session> {
@@ -370,7 +370,13 @@ mod record_reading {
     let started = session.started_at();
     let polled = started + chrono::Duration::seconds(30);
 
-    let read = record_reading(&transaction, session.id(), Some(4_000), true, polled)?;
+    let read = record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(4_000),
+      true,
+      polled,
+    )?;
 
     assert_eq!(
       format_session(&read),
@@ -406,13 +412,19 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let grown = session.started_at() + chrono::Duration::seconds(30);
-    record_reading(&transaction, session.id(), Some(4_000), true, grown)?;
+    record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(4_000),
+      true,
+      grown,
+    )?;
     let kicked = record_kick(&transaction, session.id())?;
 
     let read = record_reading(
       &transaction,
       session.id(),
-      Some(4_000),
+      ContextSize::tokens(4_000),
       false,
       grown + chrono::Duration::seconds(700),
     )?;
@@ -431,7 +443,13 @@ can_latch_over_limit: true"#,
     record_kick(&transaction, session.id())?;
     let grown = session.started_at() + chrono::Duration::seconds(900);
 
-    let read = record_reading(&transaction, session.id(), Some(100), true, grown)?;
+    let read = record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(100),
+      true,
+      grown,
+    )?;
 
     assert_eq!(read.kicked_at(), None);
     assert_eq!(read.last_growth(), grown);
@@ -445,12 +463,24 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let at = session.started_at() + chrono::Duration::seconds(30);
-    record_reading(&transaction, session.id(), Some(9_000), true, at)?;
+    record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(9_000),
+      true,
+      at,
+    )?;
 
-    let read = record_reading(&transaction, session.id(), Some(2_000), true, at)?;
+    let read = record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(2_000),
+      true,
+      at,
+    )?;
 
-    assert_eq!(read.context(), Some(2_000));
-    assert_eq!(read.context_max(), Some(9_000));
+    assert_eq!(read.context(), ContextSize::tokens(2_000));
+    assert_eq!(read.context_max(), ContextSize::tokens(9_000));
     Ok(())
   }
 
@@ -461,10 +491,10 @@ can_latch_over_limit: true"#,
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let at = session.started_at() + chrono::Duration::seconds(30);
 
-    let read = record_reading(&transaction, session.id(), None, true, at)?;
+    let read = record_reading(&transaction, session.id(), ContextSize::UNKNOWN, true, at)?;
 
-    assert_eq!(read.context(), None);
-    assert_eq!(read.context_max(), None);
+    assert_eq!(read.context(), ContextSize::UNKNOWN);
+    assert_eq!(read.context_max(), ContextSize::UNKNOWN);
     assert_eq!(read.last_growth(), at);
     Ok(())
   }
@@ -475,12 +505,18 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let at = session.started_at() + chrono::Duration::seconds(30);
-    record_reading(&transaction, session.id(), Some(9_000), true, at)?;
+    record_reading(
+      &transaction,
+      session.id(),
+      ContextSize::tokens(9_000),
+      true,
+      at,
+    )?;
 
-    let read = record_reading(&transaction, session.id(), None, true, at)?;
+    let read = record_reading(&transaction, session.id(), ContextSize::UNKNOWN, true, at)?;
 
-    assert_eq!(read.context(), None);
-    assert_eq!(read.context_max(), Some(9_000));
+    assert_eq!(read.context(), ContextSize::UNKNOWN);
+    assert_eq!(read.context_max(), ContextSize::tokens(9_000));
     Ok(())
   }
 
@@ -489,8 +525,14 @@ can_latch_over_limit: true"#,
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error =
-      record_reading(&transaction, 42, Some(1), true, timestamp(1_700_000_000)).unwrap_err();
+    let error = record_reading(
+      &transaction,
+      42,
+      ContextSize::tokens(1),
+      true,
+      timestamp(1_700_000_000),
+    )
+    .unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())
@@ -571,7 +613,13 @@ mod record_over_limit {
     let latched = record_over_limit(&transaction, lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
 
-    let read = record_reading(&transaction, lead.id(), Some(260_000), true, grown)?;
+    let read = record_reading(
+      &transaction,
+      lead.id(),
+      ContextSize::tokens(260_000),
+      true,
+      grown,
+    )?;
 
     assert_eq!(read.over_limit_at(), latched.over_limit_at());
     assert!(!read.can_latch_over_limit());

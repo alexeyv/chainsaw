@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{Agent, PromptState, entries, read_lossy, text_of};
+use crate::domain::ContextSize;
 use crate::infra::session_runtime::SessionKind;
 
 pub struct Codex;
@@ -55,11 +56,11 @@ impl Agent for Codex {
 
   /// Zero until a response reports usage: the transcript records usage, so
   /// none yet means none used.
-  fn context_size(&self, transcript: &Path) -> Option<u64> {
+  fn context_size(&self, transcript: &Path) -> ContextSize {
     let Ok(text) = read_lossy(transcript, 0, None) else {
-      return Some(0);
+      return ContextSize::tokens(0);
     };
-    Some(
+    ContextSize::tokens(
       text
         .lines()
         .rev()
@@ -69,8 +70,8 @@ impl Agent for Codex {
     )
   }
 
-  fn context_before(&self, transcript: &Path, offset: u64) -> Option<u64> {
-    Some(
+  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize {
+    ContextSize::tokens(
       read_lossy(transcript, 0, Some(offset))
         .map(|text| {
           text
@@ -83,8 +84,8 @@ impl Agent for Codex {
     )
   }
 
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> Option<u64> {
-    Some(
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize {
+    ContextSize::tokens(
       read_lossy(transcript, start, end)
         .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
         .unwrap_or_default(),

@@ -10,7 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::session_runtime::SessionKind;
-use crate::domain::{AgentKind, Session};
+use crate::domain::{AgentKind, ContextSize, Session};
 
 mod claude;
 mod codex;
@@ -30,6 +30,11 @@ pub enum PromptState {
   /// Waiting in the session's queue behind the current turn.
   Queued,
 }
+
+/// How many times an agent that echoes its prompts promptly is sent one that
+/// has not shown up, and so how many prompt timeouts every prompt has to show
+/// up, however many sends they are spread over.
+pub const PROMPT_ATTEMPTS: i64 = 3;
 
 pub trait Agent {
   /// The executable a session of this kind runs, as the agent's CLI is
@@ -54,29 +59,25 @@ pub trait Agent {
   /// The transcript of a session started in `run_dir`, or None until it exists.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;
 
-  /// Context the session held at its latest turn, or None when the agent's
-  /// transcript records no usage at all.
-  fn context_size(&self, transcript: &Path) -> Option<u64>;
+  /// Context the session held at its latest turn.
+  fn context_size(&self, transcript: &Path) -> ContextSize;
 
-  /// Context the session held at its last turn before `offset`, or None when
-  /// the agent's transcript records no usage at all.
-  fn context_before(&self, transcript: &Path, offset: u64) -> Option<u64>;
+  /// Context the session held at its last turn before `offset`.
+  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
 
   /// The largest context the session held between `start` and `end`, or to
-  /// the end of the transcript; None when the agent's transcript records no
-  /// usage at all.
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> Option<u64>;
+  /// the end of the transcript.
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
 
   /// The state of a prompt opening with `prompt`, sent after `offset`.
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
 
-  /// Whether a prompt reaches the transcript as soon as the agent takes it.
-  /// An agent that writes it only with its first reply may work for a long
-  /// while, even commit, before its transcript says anything: such a prompt
-  /// is not lost and must not be resent, and the task it carries begins the
-  /// moment it is sent rather than when the transcript first grows.
-  fn echoes_prompts_promptly(&self) -> bool {
-    true
+  /// How many times a prompt still unseen in the transcript is sent before
+  /// the send is given up. An agent that echoes a prompt as it takes it can be
+  /// sent it again; one that writes it only with its first reply may be at
+  /// work on it, and a second send would be a second prompt.
+  fn prompt_attempts(&self) -> i64 {
+    PROMPT_ATTEMPTS
   }
 
   /// The last text the agent said, if it has said anything.
@@ -85,21 +86,19 @@ pub trait Agent {
   /// Whether anything the agent said or did mentions `text`.
   fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
 
-  /// Commit ids recorded from `offset` on, as `[branch sha]` in git's own
-  /// commit output. An agent that shows the shell what git printed reads the
-  /// transcript as text; one whose transcript keeps no tool output at all
-  /// returns None, and the coordinator asks git instead.
-  fn commits_in_transcript(&self, transcript: &Path, offset: u64) -> Option<Vec<String>> {
+  /// Commit ids the session may have made from `offset` on, given `head`,
+  /// where the branch stands now. An agent whose transcript shows what git
+  /// printed reads them from it, as `[branch sha]` in git's own commit output;
+  /// one whose transcript keeps no tool output can only name HEAD.
+  fn commit_candidates(&self, transcript: &Path, offset: u64, _head: &str) -> Vec<String> {
     let Ok(text) = read_lossy(transcript, offset, None) else {
-      return Some(Vec::new());
+      return Vec::new();
     };
     let pattern = Regex::new(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]").expect("valid commit regex");
-    Some(
-      pattern
-        .captures_iter(&text)
-        .map(|capture| capture[1].to_owned())
-        .collect(),
-    )
+    pattern
+      .captures_iter(&text)
+      .map(|capture| capture[1].to_owned())
+      .collect()
   }
 }
 

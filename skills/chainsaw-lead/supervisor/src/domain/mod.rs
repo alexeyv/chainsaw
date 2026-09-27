@@ -1,4 +1,5 @@
 mod calibration;
+mod context_size;
 mod finding;
 mod observation;
 mod run;
@@ -12,6 +13,7 @@ pub(crate) mod test_helpers;
 use anyhow::{Result, bail};
 
 pub use calibration::Calibration;
+pub use context_size::ContextSize;
 pub use finding::{Finding, FindingVerdict};
 pub use observation::Observation;
 pub use run::Run;
@@ -43,13 +45,6 @@ fn require_nonblank(field: &'static str, value: &str) -> Result<()> {
 fn require_optional_positive(field: &'static str, value: Option<i64>) -> Result<()> {
   match value {
     Some(value) => require_positive(field, value),
-    None => Ok(()),
-  }
-}
-
-fn require_optional_nonnegative(field: &'static str, value: Option<i64>) -> Result<()> {
-  match value {
-    Some(value) => require_nonnegative(field, value),
     None => Ok(()),
   }
 }

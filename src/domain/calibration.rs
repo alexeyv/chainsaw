@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
-use super::{require_nonnegative, require_optional_nonnegative, require_positive};
+use super::{ContextSize, require_nonnegative, require_positive};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
@@ -13,8 +13,8 @@ pub struct Calibration {
   actual_lines: i64,
   wall_seconds: Option<f64>,
   created_at: DateTime<Utc>,
-  context_size_start: Option<i64>,
-  context_size_end: Option<i64>,
+  context_size_start: ContextSize,
+  context_size_end: ContextSize,
 }
 
 impl Calibration {
@@ -28,8 +28,8 @@ impl Calibration {
     actual_lines: i64,
     wall_seconds: Option<f64>,
     created_at: DateTime<Utc>,
-    context_size_start: Option<i64>,
-    context_size_end: Option<i64>,
+    context_size_start: ContextSize,
+    context_size_end: ContextSize,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_positive("task_id", task_id)?;
@@ -40,9 +40,7 @@ impl Calibration {
     if wall_seconds.is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0) {
       bail!("wall_seconds must be finite and nonnegative");
     }
-    require_optional_nonnegative("context_size_start", context_size_start)?;
-    require_optional_nonnegative("context_size_end", context_size_end)?;
-    if let (Some(start), Some(end)) = (context_size_start, context_size_end)
+    if let (Some(start), Some(end)) = (context_size_start.known(), context_size_end.known())
       && end < start
     {
       bail!("context_size_end cannot precede context_size_start");
@@ -96,13 +94,13 @@ impl Calibration {
 
   /// The session's context when the task was dispatched, or None when its
   /// agent's transcript cannot say.
-  pub fn context_size_start(&self) -> Option<i64> {
+  pub fn context_size_start(&self) -> ContextSize {
     self.context_size_start
   }
 
   /// The session's peak context over the task, or None when its agent's
   /// transcript cannot say.
-  pub fn context_size_end(&self) -> Option<i64> {
+  pub fn context_size_end(&self) -> ContextSize {
     self.context_size_end
   }
 }

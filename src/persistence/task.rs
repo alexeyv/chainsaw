@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{Task, TaskEvent, TaskState};
+use crate::domain::{ContextSize, Task, TaskEvent, TaskState};
 
 struct TaskRow {
   id: i64,
@@ -124,15 +124,16 @@ pub fn predecessor(transaction: &Transaction<'_>, id: i64) -> Result<Option<Task
   row.map(|row| materialize(transaction, row)).transpose()
 }
 
-/// `base_head` is given at dispatch only for an agent whose transcript lags
-/// its prompts, whose work may start before the transcript shows it; every
-/// other task takes its base when the daemon sees it in flight.
+/// The task's work is measured from where the transcript and the branch
+/// stood when its prompt was sent: `transcript_offset` and `base_head`. An
+/// agent may be at work, even past its commit, before its transcript shows
+/// the prompt.
 pub fn dispatch(
   transaction: &Transaction<'_>,
   id: i64,
   session_id: i64,
   transcript_offset: i64,
-  base_head: Option<&str>,
+  base_head: &str,
   reason: Option<&str>,
 ) -> Result<Task> {
   advance(
@@ -148,7 +149,7 @@ pub fn dispatch(
         current.transcript_offset(),
         transcript_offset,
       )?;
-      same_fact(current, "base head", current.base_head(), base_head)
+      same_fact(current, "base head", current.base_head(), Some(base_head))
     },
     |transaction| {
       transaction.execute(
@@ -160,26 +161,19 @@ pub fn dispatch(
   )
 }
 
-/// The dispatch `transcript_offset` stays as the measurement baseline. A base
-/// head recorded at dispatch stays too; otherwise `base_head`, the revision
-/// now, becomes it. The context at dispatch is None when the session's agent
-/// cannot report one.
+/// The dispatch offset and base stay as the measurement baseline; the flight
+/// adds `context_size_start`, the session's context at that offset.
 pub fn take_flight(
   transaction: &Transaction<'_>,
   id: i64,
-  base_head: &str,
-  context_size_start: Option<i64>,
+  context_size_start: ContextSize,
 ) -> Result<Task> {
-  let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
-  let base_head = current.base_head().unwrap_or(base_head).to_owned();
-  let base_head = base_head.as_str();
   advance(
     transaction,
     id,
     TaskState::InFlight,
     None,
     |current| {
-      same_fact(current, "base head", current.base_head(), Some(base_head))?;
       same_fact(
         current,
         "context size start",
@@ -189,8 +183,8 @@ pub fn take_flight(
     },
     |transaction| {
       transaction.execute(
-        "update tasks set base_head=?, context_size_start=? where id=?",
-        params![base_head, context_size_start, id],
+        "update tasks set context_size_start=? where id=?",
+        params![context_size_start.stored(), id],
       )?;
       Ok(())
     },
@@ -361,7 +355,7 @@ fn materialize(transaction: &Transaction<'_>, row: TaskRow) -> Result<Task> {
     row.transcript_offset,
     row.base_head,
     row.predicted_file_list,
-    row.context_size_start,
+    ContextSize::from_stored(row.context_size_start)?,
     row
       .commentary_requested_at
       .map(|millis| time(millis, "commentary_requested_at"))
