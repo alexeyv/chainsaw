@@ -90,6 +90,23 @@ impl Store {
       TransactionBehavior::Immediate,
     )?)
   }
+
+  /// Runs `work` in one read transaction: a consistent snapshot of the store.
+  pub fn read<T>(&self, work: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+    let transaction = self.db.unchecked_transaction()?;
+    let value = work(&transaction)?;
+    transaction.commit()?;
+    Ok(value)
+  }
+
+  /// Runs `work` in one write transaction, committed when it returns Ok and
+  /// rolled back when it returns Err.
+  pub fn write<T>(&self, work: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+    let transaction = self.write_transaction()?;
+    let value = work(&transaction)?;
+    transaction.commit()?;
+    Ok(value)
+  }
 }
 
 /// Milliseconds since the epoch: the unit of every stored timestamp.

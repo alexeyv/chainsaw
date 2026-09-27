@@ -88,7 +88,8 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
   let at = Utc::now();
   let timestamp = at.timestamp_millis();
-  if let Some(lead) = session_snapshots(store)?
+  if let Some(lead) = store
+    .read(session::all)?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
   {
@@ -101,10 +102,7 @@ fn standing_warnings(store: &Store) -> Result<Vec<String>> {
       warnings.push(format!("lead context {context} of {LEAD_STOP_TOKENS}"));
     }
   }
-  let transaction = store.db.unchecked_transaction()?;
-  let tasks = task::all(&transaction)?;
-  let run = run::get(&transaction)?;
-  transaction.commit()?;
+  let (tasks, run) = store.read(|tx| Ok((task::all(tx)?, run::get(tx)?)))?;
   for task in &tasks {
     if task.state() != TaskState::CommittedUnverified {
       continue;
@@ -260,7 +258,7 @@ fn run(
 
 fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
   Ok(match task.session_id() {
-    Some(session_id) => session_snapshot(store, session_id)?,
+    Some(session_id) => store.read(|tx| session::get(tx, session_id))?,
     None => None,
   })
 }
@@ -300,37 +298,15 @@ fn session_transcript(store: &Store, session: &Session) -> Result<Option<PathBuf
   }
   let found = agent::for_session(session).transcript(&store.run_dir, session.external_session_id());
   if let Some(path) = &found {
-    let transaction = store.write_transaction()?;
-    session::record_transcript(&transaction, session.id(), path)?;
-    transaction.commit()?;
+    store.write(|tx| session::record_transcript(tx, session.id(), path))?;
   }
   Ok(found)
 }
 
-fn session_snapshot(store: &Store, id: i64) -> Result<Option<Session>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let found = session::get(&transaction, id)?;
-  transaction.commit()?;
-  Ok(found)
-}
-
-fn latest_session_named(store: &Store, name: &str) -> Result<Option<Session>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let found = session::latest_named(&transaction, name)?;
-  transaction.commit()?;
-  Ok(found)
-}
-
-fn session_snapshots(store: &Store) -> Result<Vec<Session>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let sessions = session::all(&transaction)?;
-  transaction.commit()?;
-  Ok(sessions)
-}
-
 fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
   Ok(match id {
-    Some(id) => session_snapshot(store, id)?
+    Some(id) => store
+      .read(|tx| session::get(tx, id))?
       .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
     None => "-".to_owned(),
   })
@@ -355,7 +331,8 @@ fn git_stdout(store: &Store, args: &[&str]) -> Result<String> {
 
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
   Ok(
-    task_snapshots_for_session(store, session_id)?
+    store
+      .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .rev()
       .find(|task| task.state() != TaskState::Drafted),
@@ -389,18 +366,19 @@ fn cmd_launch(
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
   let launched_head = git_stdout(store, &["rev-parse", "HEAD"]).ok();
-  let transaction = store.write_transaction()?;
-  session::stop_named(&transaction, name)?;
-  session::create(
-    &transaction,
-    name,
-    kind.role(),
-    agent,
-    &external_session_id,
-    launched_head.as_deref(),
-  )?;
-  run_event::create(&transaction, RunEventKind::Launch, name)?;
-  transaction.commit()?;
+  store.write(|tx| {
+    session::stop_named(tx, name)?;
+    session::create(
+      tx,
+      name,
+      kind.role(),
+      agent,
+      &external_session_id,
+      launched_head.as_deref(),
+    )?;
+    run_event::create(tx, RunEventKind::Launch, name)?;
+    Ok(())
+  })?;
   println!(
     "{}",
     json!({"name": name, "pane_id": pane_id, "tab_id": tab_id, "session_id": external_session_id})
@@ -433,7 +411,7 @@ fn cmd_prompt(
   let prompt_id = store.db.last_insert_rowid();
   let prompt_timeout_millis = i64::try_from(settings.prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
-  let session = latest_session_named(store, name)?;
+  let session = store.read(|tx| session::latest_named(tx, name))?;
   let transcript = || -> Result<Option<PathBuf>> {
     match &session {
       Some(session) => session_transcript(store, session),
@@ -591,20 +569,6 @@ fn commentator_agent_name(run_dir: &Path) -> String {
   format!("commentator-{}", &hex[..8])
 }
 
-fn task_snapshot(store: &Store, task_id: i64) -> Result<Option<Task>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let task = task::get(&transaction, task_id)?;
-  transaction.commit()?;
-  Ok(task)
-}
-
-fn task_snapshots_for_session(store: &Store, session_id: i64) -> Result<Vec<Task>> {
-  let transaction = store.db.unchecked_transaction()?;
-  let tasks = task::tasks_for_session(&transaction, session_id)?;
-  transaction.commit()?;
-  Ok(tasks)
-}
-
 struct NewTaskOptions<'a> {
   predicted_files: Option<i64>,
   predicted_lines: i64,
@@ -633,11 +597,13 @@ fn cmd_task_new(
   }
   let active_retry = match retry_of_task_id {
     Some(retry_of_task_id) => {
-      let predecessor = task_snapshot(store, retry_of_task_id)?.with_context(|| {
-        format!(
-          "supervisor: --retry-of {retry_of_task_id} is not aborted, dispatched, or in flight"
-        )
-      })?;
+      let predecessor = store
+        .read(|tx| task::get(tx, retry_of_task_id))?
+        .with_context(|| {
+          format!(
+            "supervisor: --retry-of {retry_of_task_id} is not aborted, dispatched, or in flight"
+          )
+        })?;
       match predecessor.state() {
         TaskState::Aborted => None,
         TaskState::Dispatched | TaskState::InFlight => {
@@ -680,16 +646,16 @@ fn cmd_task_new(
   if let Some((retry_of_task_id, reason)) = active_retry {
     abort_task(store, runtime, settings, retry_of_task_id, reason)?;
   }
-  let transaction = store.write_transaction()?;
-  let task = task::create(
-    &transaction,
-    &text,
-    predicted_files,
-    predicted_lines,
-    retry_of_task_id,
-    predicted_file_list,
-  )?;
-  transaction.commit()?;
+  let task = store.write(|tx| {
+    task::create(
+      tx,
+      &text,
+      predicted_files,
+      predicted_lines,
+      retry_of_task_id,
+      predicted_file_list,
+    )
+  })?;
   println!("{}", task.id());
   Ok(())
 }
@@ -702,17 +668,16 @@ fn cmd_dispatch(
   implementer: &str,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} is not in state drafted");
   };
   if task.state() != TaskState::Drafted {
     bail!("supervisor: task {task_id} is not in state drafted");
   }
-  let transaction = store.db.unchecked_transaction()?;
-  let flying = task::all(&transaction)?
+  let flying = store
+    .read(task::all)?
     .into_iter()
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
-  transaction.commit()?;
   if let Some(flying) = flying {
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
@@ -720,7 +685,7 @@ fn cmd_dispatch(
       flying.id()
     );
   }
-  let Some(session) = latest_session_named(store, implementer)? else {
+  let Some(session) = store.read(|tx| session::latest_named(tx, implementer))? else {
     bail!("supervisor: no session {implementer}; launch it first");
   };
   if !session.can_take_task() {
@@ -762,21 +727,22 @@ fn cmd_dispatch(
     )?;
     return Err(error);
   }
-  let transaction = store.write_transaction()?;
-  task::dispatch(
-    &transaction,
-    task_id,
-    session.id(),
-    transcript_offset as i64,
-    &base_head,
-    reason,
-  )?;
-  run_event::create(
-    &transaction,
-    RunEventKind::Dispatch,
-    &format!("task {task_id} -> {implementer}"),
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    task::dispatch(
+      tx,
+      task_id,
+      session.id(),
+      transcript_offset as i64,
+      &base_head,
+      reason,
+    )?;
+    run_event::create(
+      tx,
+      RunEventKind::Dispatch,
+      &format!("task {task_id} -> {implementer}"),
+    )?;
+    Ok(())
+  })?;
   println!(
     "task {task_id} dispatched to {implementer}; watch `state --task {task_id}` — it prints `{task_id} committed_unverified` when the commit lands"
   );
@@ -869,7 +835,7 @@ fn cmd_task_record_commit(
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commit", force, reason)?;
@@ -882,41 +848,42 @@ fn cmd_task_record_commit(
   let Some(commit_sha) = canonical_commit(store, sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
-  let transaction = store.write_transaction()?;
-  for other in task::all(&transaction)? {
-    if other.id() != task_id
-      && other
-        .commit_sha()
-        .is_some_and(|recorded| commit_sha.starts_with(recorded))
+  store.write(|tx| {
+    for other in task::all(tx)? {
+      if other.id() != task_id
+        && other
+          .commit_sha()
+          .is_some_and(|recorded| commit_sha.starts_with(recorded))
+      {
+        bail!(
+          "supervisor: commit {sha} is already recorded for task {}",
+          other.id()
+        );
+      }
+    }
+    let base_head = task.base_head().with_context(|| {
+      format!("supervisor: task {task_id} has no base_head to validate the commit against")
+    })?;
+    if commit_sha == canonical_commit(store, base_head)?.unwrap_or_default()
+      || !git(
+        store,
+        &["merge-base", "--is-ancestor", base_head, &commit_sha],
+      )?
+      .status
+      .success()
     {
       bail!(
-        "supervisor: commit {sha} is already recorded for task {}",
-        other.id()
+        "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
       );
     }
-  }
-  let base_head = task.base_head().with_context(|| {
-    format!("supervisor: task {task_id} has no base_head to validate the commit against")
+    task::record_commit(tx, task_id, sha, Some(reason))?;
+    run_event::create(
+      tx,
+      RunEventKind::ForcedCommit,
+      &format!("task {task_id} {sha}: {reason}"),
+    )?;
+    Ok(())
   })?;
-  if commit_sha == canonical_commit(store, base_head)?.unwrap_or_default()
-    || !git(
-      store,
-      &["merge-base", "--is-ancestor", base_head, &commit_sha],
-    )?
-    .status
-    .success()
-  {
-    bail!(
-      "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
-    );
-  }
-  task::record_commit(&transaction, task_id, sha, Some(reason))?;
-  run_event::create(
-    &transaction,
-    RunEventKind::ForcedCommit,
-    &format!("task {task_id} {sha}: {reason}"),
-  )?;
-  transaction.commit()?;
   println!("task {task_id} commit recorded by force: {sha}");
   Ok(())
 }
@@ -927,7 +894,7 @@ fn cmd_task_record_commentary(
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commentary", force, reason)?;
@@ -941,16 +908,16 @@ fn cmd_task_record_commentary(
       task.state()
     );
   }
-  let transaction = store.write_transaction()?;
-  if !task::record_commentary_delivery(&transaction, task_id)? {
-    bail!("supervisor: commentary delivery is already recorded for task {task_id}");
-  }
-  run_event::create(
-    &transaction,
-    RunEventKind::ForcedCommentary,
-    &format!("task {task_id}: {reason}"),
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    if !task::record_commentary_delivery(tx, task_id)? {
+      bail!("supervisor: commentary delivery is already recorded for task {task_id}");
+    }
+    run_event::create(
+      tx,
+      RunEventKind::ForcedCommentary,
+      &format!("task {task_id}: {reason}"),
+    )
+  })?;
   println!("task {task_id} commentary delivery recorded by force");
   Ok(())
 }
@@ -958,7 +925,7 @@ fn cmd_task_record_commentary(
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
 fn cmd_accept(store: &Store, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
-  if task_snapshot(store, task_id)?.is_none() {
+  if store.read(|tx| task::get(tx, task_id))?.is_none() {
     bail!("supervisor: no task {task_id}");
   }
   match (force, reason) {
@@ -972,7 +939,7 @@ fn cmd_accept(store: &Store, task_id: i64, force: bool, reason: Option<&str>) ->
 }
 
 fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -984,20 +951,21 @@ fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<
       task.state()
     );
   }
-  let transaction = store.write_transaction()?;
-  task::accept(&transaction, task_id, reason)?;
-  run_event::create(
-    &transaction,
-    RunEventKind::Accepted,
-    &format!("task {task_id}: {reason}"),
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    task::accept(tx, task_id, reason)?;
+    run_event::create(
+      tx,
+      RunEventKind::Accepted,
+      &format!("task {task_id}: {reason}"),
+    )?;
+    Ok(())
+  })?;
   println!("task {task_id} accepted without the gate: {reason}");
   Ok(())
 }
 
 fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut sha = match task.commit_sha() {
@@ -1034,10 +1002,11 @@ fn accept_through_the_gate(store: &Store, task_id: i64) -> Result<()> {
     let sha = sha
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
-    let transaction = store.write_transaction()?;
-    task::record_commit(&transaction, task_id, sha, None)?;
-    task::accept(&transaction, task_id, &format!("checks passed at {sha}"))?;
-    transaction.commit()?;
+    store.write(|tx| {
+      task::record_commit(tx, task_id, sha, None)?;
+      task::accept(tx, task_id, &format!("checks passed at {sha}"))?;
+      Ok(())
+    })?;
     println!("task {task_id} accepted: checks passed at {sha}");
     return Ok(());
   }
@@ -1074,13 +1043,13 @@ fn has_attribution_trailer(message: &str) -> bool {
 
 fn failures_in_lineage(store: &Store, task_id: i64) -> Result<i64> {
   let mut failures = 0;
-  let mut current = task_snapshot(store, task_id)?;
+  let mut current = store.read(|tx| task::get(tx, task_id))?;
   while let Some(task) = current {
     if task.state() == TaskState::Aborted {
       failures += 1;
     }
     current = match task.retry_of_task_id() {
-      Some(retry_of_task_id) => task_snapshot(store, retry_of_task_id)?,
+      Some(retry_of_task_id) => store.read(|tx| task::get(tx, retry_of_task_id))?,
       None => None,
     };
   }
@@ -1094,7 +1063,7 @@ fn abort_task(
   task_id: i64,
   reason: &str,
 ) -> Result<(i64, String)> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -1104,16 +1073,17 @@ fn abort_task(
     bail!("supervisor: task {task_id} is already {}", task.state());
   }
   let dirty = git_stdout(store, &["status", "--porcelain"])?;
-  let transaction = store.write_transaction()?;
-  task::abort(&transaction, task_id, reason)?;
-  run_event::create(
-    &transaction,
-    RunEventKind::Aborted,
-    &format!("task {task_id}: {reason}"),
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    task::abort(tx, task_id, reason)?;
+    run_event::create(
+      tx,
+      RunEventKind::Aborted,
+      &format!("task {task_id}: {reason}"),
+    )?;
+    Ok(())
+  })?;
   if let Some(session_id) = task.session_id()
-    && let Some(session) = session_snapshot(store, session_id)?
+    && let Some(session) = store.read(|tx| session::get(tx, session_id))?
     && session.is_live()
   {
     let detail = format!("task {task_id} -> {}", session.name());
@@ -1167,7 +1137,7 @@ fn cmd_abort(
 }
 
 fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
-  let Some(task) = task_snapshot(store, task_id)? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
   let Some(commit_sha) = task.commit_sha() else {
@@ -1185,7 +1155,8 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
     .map(|(start, end)| (end - start) as f64 / 1000.0);
   let session = task_session(store, &task)?;
   let next_offset = match task.session_id() {
-    Some(session_id) => task_snapshots_for_session(store, session_id)?
+    Some(session_id) => store
+      .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .find(|candidate| candidate.id() > task_id && candidate.transcript_offset() > 0)
       .map(|candidate| candidate.transcript_offset() as u64),
@@ -1214,19 +1185,19 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
   };
   let base = task.context_size_start();
   let context = end.since(base);
-  let transaction = store.write_transaction()?;
-  calibration::create(
-    &transaction,
-    task_id,
-    task.predicted_files(),
-    task.predicted_lines(),
-    actual_files,
-    actual_lines,
-    wall,
-    base,
-    end,
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    calibration::create(
+      tx,
+      task_id,
+      task.predicted_files(),
+      task.predicted_lines(),
+      actual_files,
+      actual_lines,
+      wall,
+      base,
+      end,
+    )
+  })?;
   let wall_text = wall.map_or_else(|| "None".to_owned(), |wall| (wall as i64).to_string());
   println!(
     "task {task_id}: predicted {} files/{} lines, actual {actual_files} files/{actual_lines} lines, wall {wall_text}s, context {context} (session {end}, base {base})",
@@ -1237,21 +1208,21 @@ fn cmd_calibrate(store: &Store, task_id: i64) -> Result<()> {
 }
 
 fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  if let Some(task_id) = task_id {
-    require_task(&transaction, task_id)?;
-  }
-  let observation = observation::create(&transaction, task_id, text)?;
-  transaction.commit()?;
+  let observation = store.write(|tx| {
+    if let Some(task_id) = task_id {
+      require_task(tx, task_id)?;
+    }
+    observation::create(tx, task_id, text)
+  })?;
   println!("{}", observation.id());
   Ok(())
 }
 
 fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  require_task(&transaction, task_id)?;
-  let finding = finding::register(&transaction, task_id, description)?;
-  transaction.commit()?;
+  let finding = store.write(|tx| {
+    require_task(tx, task_id)?;
+    finding::register(tx, task_id, description)
+  })?;
   println!("{}", finding.id());
   Ok(())
 }
@@ -1260,11 +1231,15 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
   if after_observation < 0 {
     bail!("supervisor: --after-observation must be nonnegative");
   }
-  let transaction = store.db.unchecked_transaction()?;
-  if let Some(task_id) = task_id {
-    require_task(&transaction, task_id)?;
-  }
-  let observations = observation::after(&transaction, after_observation, task_id)?;
+  let (observations, findings) = store.read(|tx| {
+    if let Some(task_id) = task_id {
+      require_task(tx, task_id)?;
+    }
+    Ok((
+      observation::after(tx, after_observation, task_id)?,
+      finding::unresolved(tx, task_id)?,
+    ))
+  })?;
   let observation_cursor = observations
     .last()
     .map_or(after_observation, |observation| observation.id());
@@ -1279,7 +1254,7 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
-  let findings = finding::unresolved(&transaction, task_id)?
+  let findings = findings
     .into_iter()
     .map(|finding| {
       json!({
@@ -1290,7 +1265,6 @@ fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i64>) -> Resu
       })
     })
     .collect::<Vec<_>>();
-  transaction.commit()?;
   println!(
     "{}",
     json!({
@@ -1313,22 +1287,23 @@ fn cmd_resolve(
     Verdict::Task => FindingVerdict::Task,
     Verdict::Dropped => FindingVerdict::Dropped,
   };
-  let transaction = store.write_transaction()?;
-  let finding = finding::get(&transaction, finding_id)?
-    .with_context(|| format!("supervisor: no finding {finding_id}"))?;
-  if let Some(fix_task_id) = fix_task_id {
-    require_task(&transaction, fix_task_id)?;
-  }
-  finding::resolve(&transaction, &finding, verdict, reason, fix_task_id)
-    .map_err(|error| anyhow!("supervisor: {error}"))?;
-  transaction.commit()?;
+  store.write(|tx| {
+    let finding = finding::get(tx, finding_id)?
+      .with_context(|| format!("supervisor: no finding {finding_id}"))?;
+    if let Some(fix_task_id) = fix_task_id {
+      require_task(tx, fix_task_id)?;
+    }
+    finding::resolve(tx, &finding, verdict, reason, fix_task_id)
+      .map_err(|error| anyhow!("supervisor: {error}"))?;
+    Ok(())
+  })?;
   println!("finding {finding_id} resolved");
   Ok(())
 }
 
 fn cmd_resolutions(store: &Store) -> Result<()> {
-  let transaction = store.db.unchecked_transaction()?;
-  let resolutions = finding::resolved(&transaction)?
+  let resolutions = store
+    .read(finding::resolved)?
     .into_iter()
     .map(|finding| {
       json!({
@@ -1342,7 +1317,6 @@ fn cmd_resolutions(store: &Store) -> Result<()> {
       })
     })
     .collect::<Vec<_>>();
-  transaction.commit()?;
   println!("{}", json!({"resolutions": resolutions}));
   Ok(())
 }
@@ -1352,19 +1326,16 @@ fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result
 }
 
 fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  run::record_state_read(&transaction)?;
-  transaction.commit()?;
+  store.write(run::record_state_read)?;
   if let Some(task_id) = only_task {
-    let task =
-      task_snapshot(store, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))?;
+    let task = store
+      .read(|tx| task::get(tx, task_id))?
+      .with_context(|| format!("supervisor: no task {task_id}"))?;
     println!("{task_id} {}", task.state());
     return Ok(());
   }
   println!("tasks");
-  let transaction = store.db.unchecked_transaction()?;
-  let tasks = task::all(&transaction)?;
-  transaction.commit()?;
+  let tasks = store.read(task::all)?;
   for task in tasks {
     let mut timeline = TaskState::iter()
       .filter_map(|state| {
@@ -1394,7 +1365,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
     );
   }
   println!("sessions");
-  for session in session_snapshots(store)? {
+  for session in store.read(session::all)? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
@@ -1432,9 +1403,7 @@ fn cmd_state(store: &Store, only_task: Option<i64>) -> Result<()> {
   if open_wait.is_some() {
     println!("  (a human wait is open)");
   }
-  let transaction = store.db.unchecked_transaction()?;
-  let events = run_event::recent(&transaction, STATE_EVENT_KINDS, 5)?;
-  transaction.commit()?;
+  let events = store.read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
   for event in events {
     println!(
       "  {} {} {}",
@@ -1467,9 +1436,7 @@ const STATE_EVENT_KINDS: &[RunEventKind] = &[
 
 /// Journals one supervisor action that belongs to no other write.
 fn record_run_event(store: &Store, kind: RunEventKind, detail: &str) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  run_event::create(&transaction, kind, detail)?;
-  transaction.commit()?;
+  store.write(|tx| run_event::create(tx, kind, detail))?;
   Ok(())
 }
 
@@ -1491,9 +1458,7 @@ fn clock_time(millis: i64) -> String {
 }
 
 fn print_time_summary(store: &Store) -> Result<()> {
-  let transaction = store.db.unchecked_transaction()?;
-  let tasks = task::all(&transaction)?;
-  transaction.commit()?;
+  let tasks = store.read(task::all)?;
   let first = tasks
     .iter()
     .flat_map(|task| task.events())
@@ -1567,7 +1532,8 @@ fn cmd_watch_transcripts(store: &Store, interval_ms: u64) -> Result<()> {
 /// The transcripts of the live implementers that have one, by session id.
 fn implementer_transcripts(store: &Store) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
-  for session in session_snapshots(store)?
+  for session in store
+    .read(session::all)?
     .into_iter()
     .filter(Session::can_take_task)
   {
@@ -1579,7 +1545,8 @@ fn implementer_transcripts(store: &Store) -> Result<Vec<(String, PathBuf)>> {
 }
 
 fn cmd_context(store: &Store, name: Option<&str>) -> Result<()> {
-  for session in session_snapshots(store)?
+  for session in store
+    .read(session::all)?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
@@ -1622,10 +1589,11 @@ fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
 }
 
 fn cmd_stop(store: &Store) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  run::request_stop(&transaction)?;
-  run_event::create(&transaction, RunEventKind::Stop, "run ended by the lead")?;
-  transaction.commit()?;
+  store.write(|tx| {
+    run::request_stop(tx)?;
+    run_event::create(tx, RunEventKind::Stop, "run ended by the lead")?;
+    Ok(())
+  })?;
   println!("supervisor: stopped; the daemon will exit on its next poll");
   Ok(())
 }
@@ -1659,28 +1627,33 @@ fn daemon(
   poll_interval: Duration,
 ) -> Result<()> {
   register_lead(store, lead, lead_session_id)?;
-  let transaction = store.write_transaction()?;
-  run::clear_stop_request(&transaction)?;
-  run_event::create(
-    &transaction,
-    RunEventKind::DaemonStart,
-    &format!("pid {}", std::process::id()),
-  )?;
-  transaction.commit()?;
+  store.write(|tx| {
+    run::clear_stop_request(tx)?;
+    run_event::create(
+      tx,
+      RunEventKind::DaemonStart,
+      &format!("pid {}", std::process::id()),
+    )?;
+    Ok(())
+  })?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut missing_transcripts = HashSet::new();
   let mut compacting = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
-    let transaction = store.write_transaction()?;
-    if run::get(&transaction)?.is_stopping() {
-      transaction.commit()?;
+    let stopping = store.write(|tx| {
+      let stopping = run::get(tx)?.is_stopping();
+      if !stopping {
+        run::record_daemon_seen(tx)?;
+      }
+      Ok(stopping)
+    })?;
+    if stopping {
       break;
     }
-    run::record_daemon_seen(&transaction)?;
-    transaction.commit()?;
     let timestamp = Utc::now();
-    for session in session_snapshots(store)?
+    for session in store
+      .read(session::all)?
       .into_iter()
       .filter(Session::is_live)
     {
@@ -1713,9 +1686,7 @@ fn daemon(
       let context = agent::for_session(&session).context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
-      let transaction = store.write_transaction()?;
-      session::record_reading(&transaction, session.id(), context, grew, timestamp)?;
-      transaction.commit()?;
+      store.write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
       let quiet = session.quiet_seconds(timestamp) as f64;
 
       match session.role() {
@@ -1753,24 +1724,25 @@ fn daemon(
 /// across daemon restarts; a different one is a new incarnation and stops the
 /// old row.
 fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
-  let transaction = store.write_transaction()?;
-  let current = session::latest_named(&transaction, lead)?;
-  if !current.is_some_and(|session| {
-    session.is_live()
-      && session.role() == Role::Lead
-      && session.external_session_id() == lead_session_id
-  }) {
-    session::stop_named(&transaction, lead)?;
-    session::create(
-      &transaction,
-      lead,
-      Role::Lead,
-      AgentKind::Claude,
-      lead_session_id,
-      None,
-    )?;
-  }
-  transaction.commit()?;
+  store.write(|tx| {
+    let current = session::latest_named(tx, lead)?;
+    if !current.is_some_and(|session| {
+      session.is_live()
+        && session.role() == Role::Lead
+        && session.external_session_id() == lead_session_id
+    }) {
+      session::stop_named(tx, lead)?;
+      session::create(
+        tx,
+        lead,
+        Role::Lead,
+        AgentKind::Claude,
+        lead_session_id,
+        None,
+      )?;
+    }
+    Ok(())
+  })?;
   Ok(())
 }
 
@@ -1788,10 +1760,11 @@ fn kick_if_stalled(
     && status_of(runtime, session.name()) == Some(SessionStatus::Idle)
     && daemon_prompt(store, runtime, settings, session.name(), "continue")
   {
-    let transaction = store.write_transaction()?;
-    session::record_kick(&transaction, session.id())?;
-    run_event::create(&transaction, RunEventKind::Kick, session.name())?;
-    transaction.commit()?;
+    store.write(|tx| {
+      session::record_kick(tx, session.id())?;
+      run_event::create(tx, RunEventKind::Kick, session.name())?;
+      Ok(())
+    })?;
   }
   Ok(())
 }
@@ -1805,7 +1778,8 @@ fn observe_implementer(
   quiet: f64,
 ) -> Result<()> {
   let agent = agent::for_session(session);
-  let task = task_snapshots_for_session(store, session.id())?
+  let task = store
+    .read(|tx| task::tasks_for_session(tx, session.id()))?
     .into_iter()
     .rev()
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
@@ -1818,22 +1792,21 @@ fn observe_implementer(
       return Ok(());
     }
     let context = agent.context_before(transcript, dispatch_offset);
-    let transaction = store.write_transaction()?;
-    task::take_flight(&transaction, task.id(), context)?;
-    transaction.commit()?;
+    store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
   let head = git_stdout(store, &["rev-parse", "HEAD"])?;
   let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
   if let Some(sha) = new_commit_for(store, &shas, task.base_head())? {
-    let transaction = store.write_transaction()?;
-    task::record_commit(&transaction, task.id(), &sha, None)?;
-    run_event::create(
-      &transaction,
-      RunEventKind::Committed,
-      &format!("task {} {sha}", task.id()),
-    )?;
-    transaction.commit()?;
+    store.write(|tx| {
+      task::record_commit(tx, task.id(), &sha, None)?;
+      run_event::create(
+        tx,
+        RunEventKind::Committed,
+        &format!("task {} {sha}", task.id()),
+      )?;
+      Ok(())
+    })?;
   } else {
     kick_if_stalled(store, runtime, settings, session, quiet)?;
   }
@@ -1860,26 +1833,26 @@ fn observe_commentator(
     context,
     quiet,
   } = reading;
-  let transaction = store.db.unchecked_transaction()?;
-  let pending = task::all(&transaction)?
+  let pending = store
+    .read(task::all)?
     .into_iter()
     .filter(Task::awaits_commentary)
     .collect::<Vec<_>>();
-  transaction.commit()?;
   let agent = agent::for_session(session);
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
     if agent.output_mentions(transcript, abbreviation) {
-      let transaction = store.write_transaction()?;
-      if task::record_commentary_delivery(&transaction, task.id())? {
-        run_event::create(
-          &transaction,
-          RunEventKind::CommentaryDelivered,
-          &format!("task {}", task.id()),
-        )?;
-      }
-      transaction.commit()?;
+      store.write(|tx| {
+        if task::record_commentary_delivery(tx, task.id())? {
+          run_event::create(
+            tx,
+            RunEventKind::CommentaryDelivered,
+            &format!("task {}", task.id()),
+          )?;
+        }
+        Ok(())
+      })?;
     } else if task.commentary_requested_at().is_none()
       && daemon_prompt(
         store,
@@ -1892,15 +1865,16 @@ fn observe_commentator(
         ),
       )
     {
-      let transaction = store.write_transaction()?;
-      if task::record_commentary_request(&transaction, task.id())? {
-        run_event::create(
-          &transaction,
-          RunEventKind::CommentaryWake,
-          &format!("task {} {sha}", task.id()),
-        )?;
-      }
-      transaction.commit()?;
+      store.write(|tx| {
+        if task::record_commentary_request(tx, task.id())? {
+          run_event::create(
+            tx,
+            RunEventKind::CommentaryWake,
+            &format!("task {} {sha}", task.id()),
+          )?;
+        }
+        Ok(())
+      })?;
     }
   }
   if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
@@ -1930,14 +1904,11 @@ fn observe_commentator(
 /// carries the same fact at the moment the lead is already reading output.
 fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Result<()> {
   if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
-    let transaction = store.write_transaction()?;
-    session::record_over_limit(&transaction, session.id())?;
-    run_event::create(
-      &transaction,
-      RunEventKind::StopLead,
-      &format!("context {context}"),
-    )?;
-    transaction.commit()?;
+    store.write(|tx| {
+      session::record_over_limit(tx, session.id())?;
+      run_event::create(tx, RunEventKind::StopLead, &format!("context {context}"))?;
+      Ok(())
+    })?;
   }
   Ok(())
 }

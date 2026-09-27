@@ -61,6 +61,96 @@ mod write_transaction {
   }
 }
 
+fn counter_store(name: &str) -> Result<Store> {
+  let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
+  let path = std::env::temp_dir().join(format!(
+    "chainsaw-{name}-{}-{suffix}.db",
+    std::process::id()
+  ));
+  let db = Connection::open(&path)?;
+  db.execute_batch("create table counter(value int); insert into counter values(0);")?;
+  Ok(Store {
+    run_dir: PathBuf::new(),
+    transcripts_dir: PathBuf::new(),
+    path,
+    db,
+  })
+}
+
+fn counter(store: &Store) -> Result<i64> {
+  Ok(
+    store
+      .db
+      .query_row("select value from counter", [], |row| row.get(0))?,
+  )
+}
+
+mod read {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let store = counter_store("read")?;
+
+    let value = store.read(|transaction| {
+      Ok(transaction.query_row("select value from counter", [], |row| row.get::<_, i64>(0))?)
+    })?;
+
+    assert_eq!(value, 0);
+    let _ = fs::remove_file(&store.path);
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_with_the_work_error_when_the_work_fails() -> Result<()> {
+    let store = counter_store("read-fails")?;
+
+    let error = store
+      .read(|_| -> Result<()> { anyhow::bail!("no such row") })
+      .unwrap_err();
+
+    assert_eq!(error.to_string(), "no such row");
+    let _ = fs::remove_file(&store.path);
+    Ok(())
+  }
+}
+
+mod write {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let store = counter_store("write")?;
+
+    let value = store.write(|transaction| {
+      transaction.execute("update counter set value=value+1", [])?;
+      Ok(transaction.query_row("select value from counter", [], |row| row.get::<_, i64>(0))?)
+    })?;
+
+    assert_eq!(value, 1);
+    assert_eq!(counter(&store)?, 1);
+    let _ = fs::remove_file(&store.path);
+    Ok(())
+  }
+
+  #[test]
+  fn should_roll_back_when_the_work_fails() -> Result<()> {
+    let store = counter_store("write-fails")?;
+
+    let error = store
+      .write(|transaction| -> Result<()> {
+        transaction.execute("update counter set value=value+1", [])?;
+        anyhow::bail!("changed my mind")
+      })
+      .unwrap_err();
+
+    assert_eq!(error.to_string(), "changed my mind");
+    assert_eq!(counter(&store)?, 0);
+    let _ = fs::remove_file(&store.path);
+    Ok(())
+  }
+}
+
 #[test]
 fn creates_communication_storage_with_foreign_keys() -> Result<()> {
   let db = Connection::open_in_memory()?;
