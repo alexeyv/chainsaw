@@ -36,7 +36,9 @@ the commentator's findings — not implementation detail.
    empty means none), then `chainsaw.toml` in the run directory (checked in),
    then `chainsaw.local.toml` beside it (gitignored, personal overrides). `<role>.args` is the whole flag list, split like a shell would and
    passed to the agent as written; quote a value with spaces
-   (`references/chainsaw.toml.example` shows the defaults). `--set KEY=VALUE`
+   (`references/chainsaw.toml.example` shows the defaults). A file that names
+   `<role>.agent` without `<role>.args` drops the args of the files below it,
+   so the role gets that agent's defaults. `--set KEY=VALUE`
    before the subcommand overrides the files for one process. Every process
    reads the files once, at start: the daemon keeps what it started with, and
    the next command sees an edit. The lead runs on whatever model the human

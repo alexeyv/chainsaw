@@ -8,7 +8,10 @@
 #   chainsaw.local.toml                in the run directory, gitignored
 # `--set KEY=VALUE` before the subcommand overrides a key for one process.
 # A key overrides as a whole: a file that sets a role's args replaces the
-# entire flag list of the layer below, not just the flags it mentions.
+# entire flag list of the layer below, not just the flags it mentions. A file
+# that sets a role's agent without its args also drops the args of the layer
+# below, so the role gets the new agent's defaults rather than another agent's
+# flags.
 
 # Seconds a sent prompt gets to reach the transcript before it is resent.
 prompt-timeout-seconds = 15

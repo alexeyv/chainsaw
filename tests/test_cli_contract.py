@@ -1489,6 +1489,17 @@ class SettingsContractTests(SupervisorContractCase):
         self.assertEqual(self.launch_args("worker"), ["--local"])
         self.assertEqual(self.launch_args(commentator), ["--global"])
 
+    def test_a_project_naming_the_agent_drops_the_global_args_for_that_role(self):
+        self.write_global_settings('[implementer]\nargs = "--model sonnet --effort medium"\n')
+        self.write_settings('[implementer]\nagent = "codex"\n')
+
+        self.launch()
+
+        self.assertEqual(self.session_agent("worker"), "codex")
+        self.assertEqual(
+            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox", "."],
+        )
+
     def test_an_invalid_global_file_fails_naming_its_full_path(self):
         self.write_global_settings('[implementer]\nmodel = "x"\n')
 

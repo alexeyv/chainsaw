@@ -1,8 +1,9 @@
 //! User-editable settings, layered from optional TOML files: the global
 //! `~/.config/chainsaw/chainsaw.toml` (or whatever `CHAINSAW_CONFIG` names),
 //! then `chainsaw.toml` and `chainsaw.local.toml` in the run directory, each
-//! laid over the previous key by key. Loaded at the beginning of each
-//! coordinator process.
+//! laid over the previous key by key, except that a file naming a role's agent
+//! also drops the args an earlier file gave that role. Loaded at the beginning
+//! of each coordinator process.
 //! Can be overridden with CLI args a la `--set prompt-timeout-seconds=20`
 
 use std::env;
@@ -54,9 +55,9 @@ struct LaunchSettings {
 
 impl Settings {
   /// Reads the global file, then `chainsaw.toml` and `chainsaw.local.toml`
-  /// from `run_dir`, lays each over the previous key by key, and applies each
-  /// `--set` over the result. A missing file lays nothing over; a leftover
-  /// `chainsaw.json` is an error
+  /// from `run_dir`, lays each over the previous (see `lay_over`), and applies
+  /// each `--set` over the result. A missing file lays nothing over; a
+  /// leftover `chainsaw.json` is an error
   pub fn load(run_dir: &Path, sets: &[String]) -> Result<Self> {
     Self::load_from(global_file()?.as_deref(), run_dir, sets)
   }
@@ -76,7 +77,7 @@ impl Settings {
         (run_dir.join(LOCAL_FILE_NAME), LOCAL_FILE_NAME.to_owned()),
       ])
       .try_fold(Table::new(), |table, (path, name)| {
-        read_layer(&path, &name).map(|layer| merge(table, layer))
+        read_layer(&path, &name).map(|layer| lay_over(table, layer))
       })?;
     let base = Self::from_table(&table)
       .map_err(|error| anyhow!("invalid settings: {}", error.to_string().trim_end()))?;
@@ -214,7 +215,24 @@ fn set_over(table: Table, set: &str, earlier: &[String]) -> Result<Table> {
     Ok(_) => raw.to_owned(),
     Err(_) => Value::String(raw.to_owned()).to_string(),
   };
-  Ok(merge(table, format!("{key} = {literal}").parse()?))
+  Ok(lay_over(table, format!("{key} = {literal}").parse()?))
+}
+
+/// Lays one settings layer over `table` key by key, except that a role naming
+/// its `agent` without its `args` also drops the `args` earlier layers gave
+/// that role: the role then gets the named agent's defaults instead of flags
+/// written for another agent
+fn lay_over(mut table: Table, layer: Table) -> Table {
+  for (key, value) in &layer {
+    if let Value::Table(role) = value
+      && role.contains_key("agent")
+      && !role.contains_key("args")
+      && let Some(Value::Table(current)) = table.get_mut(key)
+    {
+      current.remove("args");
+    }
+  }
+  merge(table, layer)
 }
 
 /// Lays `source` over `target`, descending into tables both sides have

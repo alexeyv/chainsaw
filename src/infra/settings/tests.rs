@@ -261,9 +261,10 @@ args = "--model sonnet --effort medium"
   fn should_lay_local_over_project_over_global_key_by_key() {
     let dir = ScratchDir::new();
     dir.write_global(
-      "prompt-timeout-seconds = 4\n[implementer]\nargs = \"--global\"\n[commentator]\nargs = \"--global\"\n",
+      "prompt-timeout-seconds = 4\n[implementer]\nargs = \"--global\"\n[commentator]\nagent = \"codex\"\nargs = \"--global\"\n",
     );
-    dir.write_settings("[implementer]\nargs = \"--project\"\n[commentator]\nagent = \"codex\"\n");
+    dir
+      .write_settings("[implementer]\nargs = \"--project\"\n[commentator]\nargs = \"--project\"\n");
     dir.write_local("[implementer]\nargs = \"--local\"\n");
 
     let settings = dir.load(&[]).unwrap();
@@ -274,7 +275,81 @@ args = "--model sonnet --effort medium"
       settings.launch_agent(SessionKind::Commentator),
       AgentKind::Codex
     );
-    assert_eq!(settings.launch_args(SessionKind::Commentator), ["--global"]);
+    assert_eq!(
+      settings.launch_args(SessionKind::Commentator),
+      ["--project"]
+    );
+  }
+
+  #[test]
+  fn should_drop_inherited_args_when_a_later_file_names_the_agent() {
+    let dir = ScratchDir::new();
+    dir.write_global("[implementer]\nargs = \"--model sonnet --effort medium\"\n");
+    dir.write_settings("[implementer]\nagent = \"codex\"\n");
+
+    let settings = dir.load(&[]).unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--dangerously-bypass-approvals-and-sandbox", "."]
+    );
+  }
+
+  #[test]
+  fn should_keep_the_later_args_when_a_later_file_names_the_agent_and_its_args() {
+    let dir = ScratchDir::new();
+    dir.write_global("[implementer]\nargs = \"--global\"\n");
+    dir.write_settings("[implementer]\nagent = \"codex\"\nargs = \"--project\"\n");
+
+    let settings = dir.load(&[]).unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--project"]
+    );
+  }
+
+  #[test]
+  fn should_keep_inherited_args_when_an_earlier_file_names_the_agent() {
+    let dir = ScratchDir::new();
+    dir.write_global("[implementer]\nagent = \"codex\"\n");
+    dir.write_settings("[implementer]\nargs = \"--project\"\n");
+
+    let settings = dir.load(&[]).unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--project"]
+    );
+  }
+
+  #[test]
+  fn should_drop_the_files_args_when_a_set_names_the_agent() {
+    let dir = ScratchDir::new();
+    dir.write_settings("[implementer]\nargs = \"--model sonnet\"\n");
+
+    let settings = dir.load(&["implementer.agent=codex"]).unwrap();
+
+    assert_eq!(
+      settings.launch_agent(SessionKind::Implementer),
+      AgentKind::Codex
+    );
+    assert_eq!(
+      settings.launch_args(SessionKind::Implementer),
+      ["--dangerously-bypass-approvals-and-sandbox", "."]
+    );
   }
 
   #[test]
@@ -569,6 +644,72 @@ mod set_over {
     assert_eq!(
       message(&error),
       "implementer.args was already set by an earlier --set"
+    );
+  }
+}
+
+mod lay_over {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let laid = lay_over(
+      table("prompt-timeout-seconds = 4\n[implementer]\nargs = \"--global\"\n"),
+      table("[implementer]\nargs = \"--project\"\n"),
+    );
+
+    assert_eq!(
+      laid.to_string(),
+      table("prompt-timeout-seconds = 4\n[implementer]\nargs = \"--project\"\n").to_string()
+    );
+  }
+
+  #[test]
+  fn should_drop_the_args_below_when_the_layer_names_the_agent_without_args() {
+    let laid = lay_over(
+      table("[implementer]\nargs = \"--global\"\n[commentator]\nargs = \"--global\"\n"),
+      table("[implementer]\nagent = \"codex\"\n"),
+    );
+
+    assert_eq!(
+      laid.to_string(),
+      table("[implementer]\nagent = \"codex\"\n[commentator]\nargs = \"--global\"\n").to_string()
+    );
+  }
+
+  #[test]
+  fn should_keep_the_args_below_when_the_layer_names_neither_agent_nor_args() {
+    let laid = lay_over(
+      table("[implementer]\nargs = \"--global\"\n"),
+      table("[implementer]\n"),
+    );
+
+    assert_eq!(
+      laid.to_string(),
+      table("[implementer]\nargs = \"--global\"\n").to_string()
+    );
+  }
+
+  #[test]
+  fn should_take_the_layers_args_when_it_names_both_agent_and_args() {
+    let laid = lay_over(
+      table("[implementer]\nargs = \"--global\"\n"),
+      table("[implementer]\nagent = \"codex\"\nargs = \"--project\"\n"),
+    );
+
+    assert_eq!(
+      laid.to_string(),
+      table("[implementer]\nagent = \"codex\"\nargs = \"--project\"\n").to_string()
+    );
+  }
+
+  #[test]
+  fn should_lay_a_role_over_nothing_when_the_table_lacks_it() {
+    let laid = lay_over(table(""), table("[implementer]\nagent = \"codex\"\n"));
+
+    assert_eq!(
+      laid.to_string(),
+      table("[implementer]\nagent = \"codex\"\n").to_string()
     );
   }
 }
