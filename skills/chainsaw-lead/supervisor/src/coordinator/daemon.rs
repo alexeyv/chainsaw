@@ -18,6 +18,7 @@ use crate::domain::{AgentKind, ContextSize, Role, RunEventKind, Session, Task, T
 use crate::infra::agent;
 use crate::infra::session_runtime::SessionStatus;
 use crate::infra::transcript_monitor::transcript_size;
+use crate::persistence::store::Store;
 use crate::persistence::{run as run_record, run_event, session, task};
 use crate::run::Run;
 
@@ -29,12 +30,13 @@ const STALE_SECONDS: f64 = 600.0;
 
 pub(super) fn start(
   run: &Run,
+  store: &Store,
   lead: &str,
   lead_session_id: &str,
   poll_interval: Duration,
 ) -> Result<()> {
-  register_lead(run, lead, lead_session_id)?;
-  run.store().write(|tx| {
+  register_lead(store, lead, lead_session_id)?;
+  store.write(|tx| {
     run_record::clear_stop_request(tx)?;
     run_event::create(
       tx,
@@ -48,7 +50,7 @@ pub(super) fn start(
   let mut compacting = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
-    let stopping = run.store().write(|tx| {
+    let stopping = store.write(|tx| {
       let stopping = run_record::get(tx)?.is_stopping();
       if !stopping {
         run_record::record_daemon_seen(tx)?;
@@ -59,14 +61,13 @@ pub(super) fn start(
       break;
     }
     let timestamp = Utc::now();
-    for session in run
-      .store()
+    for session in store
       .read(session::all)?
       .into_iter()
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(transcript) = session_transcript(run, &session)? else {
+      let Some(transcript) = session_transcript(run, store, &session)? else {
         if missing_transcripts.insert(name.to_owned()) {
           let danger = if session.role() == Role::Lead {
             "; the lead context stop threshold cannot fire"
@@ -75,7 +76,7 @@ pub(super) fn start(
           };
           let detail = format!("{name} ({}): transcript not found{danger}", session.role());
           eprintln!("WARNING: {detail}");
-          record_run_event(run, RunEventKind::TranscriptMissing, &detail)?;
+          record_run_event(store, RunEventKind::TranscriptMissing, &detail)?;
         }
         continue;
       };
@@ -85,7 +86,7 @@ pub(super) fn start(
           transcript.display()
         );
         record_run_event(
-          run,
+          store,
           RunEventKind::TranscriptFound,
           &format!("{name}: {}", transcript.display()),
         )?;
@@ -94,18 +95,17 @@ pub(super) fn start(
       let context = agent::for_session(&session).context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
-      run
-        .store()
-        .write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
+      store.write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
       let quiet = session.quiet_seconds(timestamp) as f64;
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(run, &session, &transcript, quiet)?;
+          observe_implementer(run, store, &session, &transcript, quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
             run,
+            store,
             &session,
             Reading {
               transcript: &transcript,
@@ -115,13 +115,13 @@ pub(super) fn start(
             &mut compacting,
           )?;
         }
-        Role::Lead => observe_lead(run, &session, context)?,
+        Role::Lead => observe_lead(store, &session, context)?,
       }
     }
     thread::sleep(poll_interval);
   }
   record_run_event(
-    run,
+    store,
     RunEventKind::DaemonExit,
     &format!("pid {}", std::process::id()),
   )
@@ -131,8 +131,8 @@ pub(super) fn start(
 /// it from what the lead says about itself. The same session id keeps its row
 /// across daemon restarts; a different one is a new incarnation and stops the
 /// old row.
-fn register_lead(run: &Run, lead: &str, lead_session_id: &str) -> Result<()> {
-  run.store().write(|tx| {
+fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
+  store.write(|tx| {
     let current = session::latest_named(tx, lead)?;
     if !current.is_some_and(|session| {
       session.is_live()
@@ -156,13 +156,13 @@ fn register_lead(run: &Run, lead: &str, lead_session_id: &str) -> Result<()> {
 
 /// Nudge a session that has gone quiet while its runtime reports it idle. The
 /// kick is latched on the session so it happens once per stall.
-fn kick_if_stalled(run: &Run, session: &Session, quiet: f64) -> Result<()> {
+fn kick_if_stalled(run: &Run, store: &Store, session: &Session, quiet: f64) -> Result<()> {
   if quiet > STALE_SECONDS
     && session.can_be_kicked()
     && status_of(run.runtime(), session.name()) == Some(SessionStatus::Idle)
-    && daemon_prompt(run, session.name(), "continue")
+    && daemon_prompt(run, store, session.name(), "continue")
   {
-    run.store().write(|tx| {
+    store.write(|tx| {
       session::record_kick(tx, session.id())?;
       run_event::create(tx, RunEventKind::Kick, session.name())?;
       Ok(())
@@ -171,10 +171,15 @@ fn kick_if_stalled(run: &Run, session: &Session, quiet: f64) -> Result<()> {
   Ok(())
 }
 
-fn observe_implementer(run: &Run, session: &Session, transcript: &Path, quiet: f64) -> Result<()> {
+fn observe_implementer(
+  run: &Run,
+  store: &Store,
+  session: &Session,
+  transcript: &Path,
+  quiet: f64,
+) -> Result<()> {
   let agent = agent::for_session(session);
-  let task = run
-    .store()
+  let task = store
     .read(|tx| task::tasks_for_session(tx, session.id()))?
     .into_iter()
     .rev()
@@ -188,15 +193,13 @@ fn observe_implementer(run: &Run, session: &Session, transcript: &Path, quiet: f
       return Ok(());
     }
     let context = agent.context_before(transcript, dispatch_offset);
-    run
-      .store()
-      .write(|tx| task::take_flight(tx, task.id(), context))?;
+    store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
   let head = run.repo().head()?;
   let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
   if let Some(sha) = new_commit_for(run, &shas, task.base_head())? {
-    run.store().write(|tx| {
+    store.write(|tx| {
       task::record_commit(tx, task.id(), &sha, None)?;
       run_event::create(
         tx,
@@ -206,7 +209,7 @@ fn observe_implementer(run: &Run, session: &Session, transcript: &Path, quiet: f
       Ok(())
     })?;
   } else {
-    kick_if_stalled(run, session, quiet)?;
+    kick_if_stalled(run, store, session, quiet)?;
   }
   Ok(())
 }
@@ -220,6 +223,7 @@ struct Reading<'a> {
 
 fn observe_commentator(
   run: &Run,
+  store: &Store,
   session: &Session,
   reading: Reading<'_>,
   compacting: &mut bool,
@@ -229,8 +233,7 @@ fn observe_commentator(
     context,
     quiet,
   } = reading;
-  let pending = run
-    .store()
+  let pending = store
     .read(task::all)?
     .into_iter()
     .filter(Task::awaits_commentary)
@@ -240,7 +243,7 @@ fn observe_commentator(
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
     if agent.output_mentions(transcript, abbreviation) {
-      run.store().write(|tx| {
+      store.write(|tx| {
         if task::record_commentary_delivery(tx, task.id())? {
           run_event::create(
             tx,
@@ -253,6 +256,7 @@ fn observe_commentator(
     } else if task.commentary_requested_at().is_none()
       && daemon_prompt(
         run,
+        store,
         session.name(),
         &format!(
           "supervisor: commit {sha} landed for task {}; review it from git",
@@ -260,7 +264,7 @@ fn observe_commentator(
         ),
       )
     {
-      run.store().write(|tx| {
+      store.write(|tx| {
         if task::record_commentary_request(tx, task.id())? {
           run_event::create(
             tx,
@@ -273,10 +277,10 @@ fn observe_commentator(
     }
   }
   if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
-    if daemon_prompt(run, session.name(), agent.compact_prompt()) {
+    if daemon_prompt(run, store, session.name(), agent.compact_prompt()) {
       *compacting = true;
       record_run_event(
-        run,
+        store,
         RunEventKind::Compact,
         &format!("{} at {context}", session.name()),
       )?;
@@ -284,16 +288,16 @@ fn observe_commentator(
   } else if context.is_under(COMMENTATOR_COMPACT_TOKENS) {
     *compacting = false;
   }
-  kick_if_stalled(run, session, quiet)
+  kick_if_stalled(run, store, session, quiet)
 }
 
 /// Records the lead crossing its stop threshold once per lead session. Nothing
 /// is pushed at the lead: an unsolicited prompt mid-thought is a context switch
 /// it did not choose. The warning printed after every lead-facing command
 /// carries the same fact at the moment the lead is already reading output.
-fn observe_lead(run: &Run, session: &Session, context: ContextSize) -> Result<()> {
+fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Result<()> {
   if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
-    run.store().write(|tx| {
+    store.write(|tx| {
       session::record_over_limit(tx, session.id())?;
       run_event::create(tx, RunEventKind::StopLead, &format!("context {context}"))?;
       Ok(())

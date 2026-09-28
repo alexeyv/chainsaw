@@ -9,6 +9,7 @@ use strum::IntoEnumIterator;
 use super::{last_event_at, session_name, session_transcript};
 use crate::cli::HumanWaitAction;
 use crate::domain::{Role, RunEventKind, TaskState};
+use crate::persistence::store::Store;
 use crate::persistence::{human_wait, run as run_record, run_event, session, task};
 use crate::run::Run;
 
@@ -19,18 +20,17 @@ fn short_sha(sha: &str) -> &str {
   sha.get(..10).unwrap_or(sha)
 }
 
-pub(super) fn cmd_state(run: &Run, only_task: Option<i64>) -> Result<()> {
-  run.store().write(run_record::record_state_read)?;
+pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Result<()> {
+  store.write(run_record::record_state_read)?;
   if let Some(task_id) = only_task {
-    let task = run
-      .store()
+    let task = store
       .read(|tx| task::get(tx, task_id))?
       .with_context(|| format!("supervisor: no task {task_id}"))?;
     println!("{task_id} {}", task.state());
     return Ok(());
   }
   println!("tasks");
-  let tasks = run.store().read(task::all)?;
+  let tasks = store.read(task::all)?;
   for task in tasks {
     let mut timeline = TaskState::iter()
       .filter_map(|state| {
@@ -55,19 +55,19 @@ pub(super) fn cmd_state(run: &Run, only_task: Option<i64>) -> Result<()> {
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
       task.id(),
       task.state(),
-      session_name(run, task.session_id())?,
+      session_name(store, task.session_id())?,
       task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
-  for session in run.store().read(session::all)? {
+  for session in store.read(session::all)? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_transcript(run, &session)?.is_some() {
+    if session_transcript(run, store, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -88,13 +88,11 @@ pub(super) fn cmd_state(run: &Run, only_task: Option<i64>) -> Result<()> {
       );
     }
   }
-  print_time_summary(run)?;
-  if run.store().read(human_wait::open)?.is_some() {
+  print_time_summary(store)?;
+  if store.read(human_wait::open)?.is_some() {
     println!("  (a human wait is open)");
   }
-  let events = run
-    .store()
-    .read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
+  let events = store.read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
   for event in events {
     println!(
       "  {} {} {}",
@@ -132,8 +130,8 @@ fn clock_time(millis: i64) -> String {
   )
 }
 
-fn print_time_summary(run: &Run) -> Result<()> {
-  let tasks = run.store().read(task::all)?;
+fn print_time_summary(store: &Store) -> Result<()> {
+  let tasks = store.read(task::all)?;
   let first = tasks
     .iter()
     .flat_map(|task| task.events())
@@ -157,8 +155,7 @@ fn print_time_summary(run: &Run) -> Result<()> {
     }
   }
   let at = Utc::now();
-  let human: i64 = run
-    .store()
+  let human: i64 = store
     .read(human_wait::all)?
     .iter()
     .map(|wait| wait.duration(at).num_milliseconds())
@@ -180,20 +177,20 @@ fn print_time_summary(run: &Run) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn cmd_human_wait(run: &Run, action: HumanWaitAction) -> Result<()> {
+pub(super) fn cmd_human_wait(store: &Store, action: HumanWaitAction) -> Result<()> {
   match action {
     HumanWaitAction::Start => {
-      run.store().write(human_wait::start)?;
+      store.write(human_wait::start)?;
     }
     HumanWaitAction::End => {
-      run.store().write(human_wait::end)?;
+      store.write(human_wait::end)?;
     }
   }
   Ok(())
 }
 
-pub(super) fn cmd_stop(run: &Run) -> Result<()> {
-  run.store().write(|tx| {
+pub(super) fn cmd_stop(store: &Store) -> Result<()> {
+  store.write(|tx| {
     run_record::request_stop(tx)?;
     run_event::create(tx, RunEventKind::Stop, "run ended by the lead")?;
     Ok(())

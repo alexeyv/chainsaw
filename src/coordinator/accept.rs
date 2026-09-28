@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::{new_commit_for, task_commits};
 use crate::domain::{RunEventKind, TaskState};
+use crate::persistence::store::Store;
 use crate::persistence::{run_event, task};
 use crate::run::Run;
 
@@ -34,12 +35,13 @@ fn forced_remedy_reason<'a>(
 
 pub(super) fn cmd_task_record_commit(
   run: &Run,
+  store: &Store,
   task_id: i64,
   sha: &str,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commit", force, reason)?;
@@ -52,7 +54,7 @@ pub(super) fn cmd_task_record_commit(
   let Some(commit_sha) = run.repo().canonical_commit(sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
-  run.store().write(|tx| {
+  store.write(|tx| {
     for other in task::all(tx)? {
       if other.id() != task_id
         && other
@@ -88,12 +90,12 @@ pub(super) fn cmd_task_record_commit(
 }
 
 pub(super) fn cmd_task_record_commentary(
-  run: &Run,
+  store: &Store,
   task_id: i64,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commentary", force, reason)?;
@@ -107,7 +109,7 @@ pub(super) fn cmd_task_record_commentary(
       task.state()
     );
   }
-  run.store().write(|tx| {
+  store.write(|tx| {
     if !task::record_commentary_delivery(tx, task_id)? {
       bail!("supervisor: commentary delivery is already recorded for task {task_id}");
     }
@@ -123,22 +125,28 @@ pub(super) fn cmd_task_record_commentary(
 
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
-pub(super) fn cmd_accept(run: &Run, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
-  if run.store().read(|tx| task::get(tx, task_id))?.is_none() {
+pub(super) fn cmd_accept(
+  run: &Run,
+  store: &Store,
+  task_id: i64,
+  force: bool,
+  reason: Option<&str>,
+) -> Result<()> {
+  if store.read(|tx| task::get(tx, task_id))?.is_none() {
     bail!("supervisor: no task {task_id}");
   }
   match (force, reason) {
-    (true, Some(reason)) => accept_without_the_gate(run, task_id, reason),
+    (true, Some(reason)) => accept_without_the_gate(store, task_id, reason),
     (true, None) => bail!("supervisor: accept --force requires a non-empty --reason"),
     (false, Some(_)) => {
       bail!("supervisor: --reason only applies with --force; accept without it runs the checks")
     }
-    (false, None) => accept_through_the_gate(run, task_id),
+    (false, None) => accept_through_the_gate(run, store, task_id),
   }
 }
 
-fn accept_without_the_gate(run: &Run, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
+fn accept_without_the_gate(store: &Store, task_id: i64, reason: &str) -> Result<()> {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -150,7 +158,7 @@ fn accept_without_the_gate(run: &Run, task_id: i64, reason: &str) -> Result<()> 
       task.state()
     );
   }
-  run.store().write(|tx| {
+  store.write(|tx| {
     task::accept(tx, task_id, reason)?;
     run_event::create(
       tx,
@@ -163,17 +171,17 @@ fn accept_without_the_gate(run: &Run, task_id: i64, reason: &str) -> Result<()> 
   Ok(())
 }
 
-fn accept_through_the_gate(run: &Run, task_id: i64) -> Result<()> {
-  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
+fn accept_through_the_gate(run: &Run, store: &Store, task_id: i64) -> Result<()> {
+  let Some(task) = store.read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut sha = match task.commit_sha() {
     Some(sha) => Some(sha.to_owned()),
-    None => new_commit_for(run, &task_commits(run, &task)?, task.base_head())?,
+    None => new_commit_for(run, &task_commits(run, store, &task)?, task.base_head())?,
   };
   if sha.is_none() && head_advanced_cleanly(run, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
-    sha = new_commit_for(run, &task_commits(run, &task)?, task.base_head())?;
+    sha = new_commit_for(run, &task_commits(run, store, &task)?, task.base_head())?;
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
@@ -200,7 +208,7 @@ fn accept_through_the_gate(run: &Run, task_id: i64) -> Result<()> {
     let sha = sha
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
-    run.store().write(|tx| {
+    store.write(|tx| {
       task::record_commit(tx, task_id, sha, None)?;
       task::accept(tx, task_id, &format!("checks passed at {sha}"))?;
       Ok(())

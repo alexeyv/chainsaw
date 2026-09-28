@@ -6,6 +6,7 @@ pub mod prompt;
 pub mod run;
 pub mod run_event;
 pub mod session;
+pub mod store;
 pub mod task;
 pub mod task_event;
 

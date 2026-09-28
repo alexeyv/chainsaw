@@ -15,12 +15,13 @@ use crate::domain::{RunEventKind, Session, SessionKind, Task};
 use crate::infra::agent;
 use crate::infra::session_runtime::StartSession;
 use crate::infra::transcript_monitor::TranscriptMonitor;
+use crate::persistence::store::Store;
 use crate::persistence::{run_event, session};
 use crate::run::Run;
 
-pub(super) fn task_session(run: &Run, task: &Task) -> Result<Option<Session>> {
+pub(super) fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
   Ok(match task.session_id() {
-    Some(session_id) => run.store().read(|tx| session::get(tx, session_id))?,
+    Some(session_id) => store.read(|tx| session::get(tx, session_id))?,
     None => None,
   })
 }
@@ -30,7 +31,11 @@ pub(super) fn task_session(run: &Run, task: &Task) -> Result<Option<Session>> {
 /// on the session row and never looked for again. Nothing in a run deletes a
 /// transcript, so a remembered one that is gone means something outside the
 /// run removed it, and that is an error rather than a session reading zero.
-pub(super) fn session_transcript(run: &Run, session: &Session) -> Result<Option<PathBuf>> {
+pub(super) fn session_transcript(
+  run: &Run,
+  store: &Store,
+  session: &Session,
+) -> Result<Option<PathBuf>> {
   if let Some(path) = session.transcript() {
     if !path.is_file() {
       bail!(
@@ -43,24 +48,21 @@ pub(super) fn session_transcript(run: &Run, session: &Session) -> Result<Option<
   }
   let found = agent::for_session(session).transcript(run.dir(), session.external_session_id());
   if let Some(path) = &found {
-    run
-      .store()
-      .write(|tx| session::record_transcript(tx, session.id(), path))?;
+    store.write(|tx| session::record_transcript(tx, session.id(), path))?;
   }
   Ok(found)
 }
 
-pub(super) fn session_name(run: &Run, id: Option<i64>) -> Result<String> {
+pub(super) fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
   Ok(match id {
-    Some(id) => run
-      .store()
+    Some(id) => store
       .read(|tx| session::get(tx, id))?
       .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
     None => "-".to_owned(),
   })
 }
 
-pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()> {
+pub(super) fn cmd_launch(run: &Run, store: &Store, name: &str, kind: SessionKind) -> Result<()> {
   let agent = run.settings().launch_agent(kind);
   let started = run.runtime().start(StartSession {
     id: name,
@@ -73,7 +75,7 @@ pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()>
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
   let launched_head = run.repo().head().ok();
-  run.store().write(|tx| {
+  store.write(|tx| {
     session::stop_named(tx, name)?;
     session::create(
       tx,
@@ -93,12 +95,13 @@ pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()>
   Ok(())
 }
 
-pub(super) fn cmd_start_commentator(run: &Run, role_prompt: &Path) -> Result<()> {
+pub(super) fn cmd_start_commentator(run: &Run, store: &Store, role_prompt: &Path) -> Result<()> {
   let name = commentator_agent_name(run.dir());
-  cmd_launch(run, &name, SessionKind::Commentator)?;
+  cmd_launch(run, store, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
     run,
+    store,
     &name,
     &format!(
       "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
@@ -134,13 +137,13 @@ fn commentator_agent_name(run_dir: &Path) -> String {
 /// on every wake, so watching it would wake the commentator for the sole
 /// reason that it was just woken; the lead's transcript is not its material
 /// either.
-pub(super) fn cmd_watch_transcripts(run: &Run, interval_ms: u64) -> Result<()> {
+pub(super) fn cmd_watch_transcripts(run: &Run, store: &Store, interval_ms: u64) -> Result<()> {
   use std::io::Write;
 
-  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(run)?);
+  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(run, store)?);
   loop {
     std::thread::sleep(Duration::from_millis(interval_ms));
-    if let Some(line) = monitor.poll(&implementer_transcripts(run)?) {
+    if let Some(line) = monitor.poll(&implementer_transcripts(run, store)?) {
       println!("{line}");
       std::io::stdout().flush()?;
     }
@@ -148,29 +151,27 @@ pub(super) fn cmd_watch_transcripts(run: &Run, interval_ms: u64) -> Result<()> {
 }
 
 /// The transcripts of the live implementers that have one, by session id.
-fn implementer_transcripts(run: &Run) -> Result<Vec<(String, PathBuf)>> {
+fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
-  for session in run
-    .store()
+  for session in store
     .read(session::all)?
     .into_iter()
     .filter(Session::can_take_task)
   {
-    if let Some(path) = session_transcript(run, &session)? {
+    if let Some(path) = session_transcript(run, store, &session)? {
       transcripts.push((session.external_session_id().to_owned(), path));
     }
   }
   Ok(transcripts)
 }
 
-pub(super) fn cmd_context(run: &Run, name: Option<&str>) -> Result<()> {
-  for session in run
-    .store()
+pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Result<()> {
+  for session in store
     .read(session::all)?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(transcript) = session_transcript(run, &session)? {
+    if let Some(transcript) = session_transcript(run, store, &session)? {
       println!(
         "{}\t{}",
         session.name(),
