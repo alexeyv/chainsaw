@@ -5,10 +5,11 @@
 use anyhow::{Result, bail};
 use regex::Regex;
 
-use super::{Coordinator, last_event_at, session_transcript, task_session};
+use super::{last_event_at, session_transcript, task_session};
 use crate::domain::{ContextSize, Session, TaskState};
 use crate::infra::agent;
 use crate::persistence::{calibration, task};
+use crate::run::Run;
 
 fn stat_number(text: &str, noun: &str) -> i64 {
   Regex::new(&format!(r"(\d+) {noun}s?"))
@@ -18,14 +19,14 @@ fn stat_number(text: &str, noun: &str) -> i64 {
     .unwrap_or_default()
 }
 
-pub(super) fn cmd_calibrate(coordinator: &Coordinator, task_id: i64) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+pub(super) fn cmd_calibrate(run: &Run, task_id: i64) -> Result<()> {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
   let Some(commit_sha) = task.commit_sha() else {
     bail!("supervisor: task {task_id} has no commit yet");
   };
-  let stat = coordinator.repo.shortstat(commit_sha)?;
+  let stat = run.repo().shortstat(commit_sha)?;
   let actual_files = stat_number(&stat, "file");
   let actual_lines = stat_number(&stat, "insertion") + stat_number(&stat, "deletion");
   let dispatched_at = last_event_at(&task, |event| event.state() == TaskState::Dispatched);
@@ -35,10 +36,10 @@ pub(super) fn cmd_calibrate(coordinator: &Coordinator, task_id: i64) -> Result<(
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| (end - start) as f64 / 1000.0);
-  let session = task_session(coordinator, &task)?;
+  let session = task_session(run, &task)?;
   let next_offset = match task.session_id() {
-    Some(session_id) => coordinator
-      .store
+    Some(session_id) => run
+      .store()
       .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .find(|candidate| candidate.id() > task_id && candidate.transcript_offset() > 0)
@@ -46,7 +47,7 @@ pub(super) fn cmd_calibrate(coordinator: &Coordinator, task_id: i64) -> Result<(
     None => None,
   };
   let peak = match &session {
-    Some(session) => match session_transcript(coordinator, session)? {
+    Some(session) => match session_transcript(run, session)? {
       Some(transcript) => agent::for_session(session).context_peak(
         &transcript,
         task.transcript_offset() as u64,
@@ -68,7 +69,7 @@ pub(super) fn cmd_calibrate(coordinator: &Coordinator, task_id: i64) -> Result<(
   };
   let base = task.context_size_start();
   let context = end.since(base);
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     calibration::create(
       tx,
       task_id,

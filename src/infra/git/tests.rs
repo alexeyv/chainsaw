@@ -23,7 +23,7 @@ impl Fixture {
     Self { dir }
   }
 
-  fn repo(&self) -> Repo<'_> {
+  fn repo(&self) -> Repo {
     Repo::new(&self.dir)
   }
 

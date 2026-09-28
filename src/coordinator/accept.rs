@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{Coordinator, new_commit_for, task_commits};
+use super::{new_commit_for, task_commits};
 use crate::domain::{RunEventKind, TaskState};
 use crate::persistence::{run_event, task};
+use crate::run::Run;
 
 /// How long to wait for the agent to log a commit HEAD already shows before
 /// looking for it in the transcript again.
@@ -32,13 +33,13 @@ fn forced_remedy_reason<'a>(
 }
 
 pub(super) fn cmd_task_record_commit(
-  coordinator: &Coordinator,
+  run: &Run,
   task_id: i64,
   sha: &str,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commit", force, reason)?;
@@ -48,10 +49,10 @@ pub(super) fn cmd_task_record_commit(
       task.state()
     );
   }
-  let Some(commit_sha) = coordinator.repo.canonical_commit(sha)? else {
+  let Some(commit_sha) = run.repo().canonical_commit(sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     for other in task::all(tx)? {
       if other.id() != task_id
         && other
@@ -67,12 +68,8 @@ pub(super) fn cmd_task_record_commit(
     let base_head = task.base_head().with_context(|| {
       format!("supervisor: task {task_id} has no base_head to validate the commit against")
     })?;
-    if commit_sha
-      == coordinator
-        .repo
-        .canonical_commit(base_head)?
-        .unwrap_or_default()
-      || !coordinator.repo.is_ancestor(base_head, &commit_sha)?
+    if commit_sha == run.repo().canonical_commit(base_head)?.unwrap_or_default()
+      || !run.repo().is_ancestor(base_head, &commit_sha)?
     {
       bail!(
         "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
@@ -91,12 +88,12 @@ pub(super) fn cmd_task_record_commit(
 }
 
 pub(super) fn cmd_task_record_commentary(
-  coordinator: &Coordinator,
+  run: &Run,
   task_id: i64,
   force: bool,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commentary", force, reason)?;
@@ -110,7 +107,7 @@ pub(super) fn cmd_task_record_commentary(
       task.state()
     );
   }
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     if !task::record_commentary_delivery(tx, task_id)? {
       bail!("supervisor: commentary delivery is already recorded for task {task_id}");
     }
@@ -126,31 +123,22 @@ pub(super) fn cmd_task_record_commentary(
 
 /// Accept a task. Without `--force` this runs the mechanical gate and accepts
 /// only if it passes; with it the caller's reason stands in for the gate.
-pub(super) fn cmd_accept(
-  coordinator: &Coordinator,
-  task_id: i64,
-  force: bool,
-  reason: Option<&str>,
-) -> Result<()> {
-  if coordinator
-    .store
-    .read(|tx| task::get(tx, task_id))?
-    .is_none()
-  {
+pub(super) fn cmd_accept(run: &Run, task_id: i64, force: bool, reason: Option<&str>) -> Result<()> {
+  if run.store().read(|tx| task::get(tx, task_id))?.is_none() {
     bail!("supervisor: no task {task_id}");
   }
   match (force, reason) {
-    (true, Some(reason)) => accept_without_the_gate(coordinator, task_id, reason),
+    (true, Some(reason)) => accept_without_the_gate(run, task_id, reason),
     (true, None) => bail!("supervisor: accept --force requires a non-empty --reason"),
     (false, Some(_)) => {
       bail!("supervisor: --reason only applies with --force; accept without it runs the checks")
     }
-    (false, None) => accept_through_the_gate(coordinator, task_id),
+    (false, None) => accept_through_the_gate(run, task_id),
   }
 }
 
-fn accept_without_the_gate(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+fn accept_without_the_gate(run: &Run, task_id: i64, reason: &str) -> Result<()> {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -162,7 +150,7 @@ fn accept_without_the_gate(coordinator: &Coordinator, task_id: i64, reason: &str
       task.state()
     );
   }
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     task::accept(tx, task_id, reason)?;
     run_event::create(
       tx,
@@ -175,35 +163,27 @@ fn accept_without_the_gate(coordinator: &Coordinator, task_id: i64, reason: &str
   Ok(())
 }
 
-fn accept_through_the_gate(coordinator: &Coordinator, task_id: i64) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+fn accept_through_the_gate(run: &Run, task_id: i64) -> Result<()> {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   let mut sha = match task.commit_sha() {
     Some(sha) => Some(sha.to_owned()),
-    None => new_commit_for(
-      coordinator,
-      &task_commits(coordinator, &task)?,
-      task.base_head(),
-    )?,
+    None => new_commit_for(run, &task_commits(run, &task)?, task.base_head())?,
   };
-  if sha.is_none() && head_advanced_cleanly(coordinator, task.base_head())? {
+  if sha.is_none() && head_advanced_cleanly(run, task.base_head())? {
     thread::sleep(Duration::from_secs(VERIFY_LOG_RETRY_SECONDS));
-    sha = new_commit_for(
-      coordinator,
-      &task_commits(coordinator, &task)?,
-      task.base_head(),
-    )?;
+    sha = new_commit_for(run, &task_commits(run, &task)?, task.base_head())?;
   }
   let mut problems = Vec::new();
   if let Some(sha) = &sha {
-    match coordinator.repo.commit(sha)? {
+    match run.repo().commit(sha)? {
       None => problems.push(format!("commit {sha} not in git")),
       Some(commit) => {
         if has_attribution_trailer(&commit.message) {
           problems.push("commit carries an attribution trailer".to_owned());
         }
-        if !coordinator.repo.head()?.starts_with(&commit.sha) {
+        if !run.repo().head()?.starts_with(&commit.sha) {
           problems.push("commit is not HEAD".to_owned());
         }
       }
@@ -211,7 +191,7 @@ fn accept_through_the_gate(coordinator: &Coordinator, task_id: i64) -> Result<()
   } else {
     problems.push("no new commit since the task was dispatched".to_owned());
   }
-  if !coordinator.repo.is_clean()? {
+  if !run.repo().is_clean()? {
     problems.push("tree is dirty".to_owned());
   }
   // The implementer runs the quality gate before it commits; that is its
@@ -220,7 +200,7 @@ fn accept_through_the_gate(coordinator: &Coordinator, task_id: i64) -> Result<()
     let sha = sha
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
-    coordinator.store.write(|tx| {
+    run.store().write(|tx| {
       task::record_commit(tx, task_id, sha, None)?;
       task::accept(tx, task_id, &format!("checks passed at {sha}"))?;
       Ok(())
@@ -235,9 +215,9 @@ fn accept_through_the_gate(coordinator: &Coordinator, task_id: i64) -> Result<()
   Err(anyhow!(""))
 }
 
-fn head_advanced_cleanly(coordinator: &Coordinator, base_head: Option<&str>) -> Result<bool> {
+fn head_advanced_cleanly(run: &Run, base_head: Option<&str>) -> Result<bool> {
   match base_head {
-    Some(base_head) => coordinator.repo.head_advanced_cleanly_from(base_head),
+    Some(base_head) => run.repo().head_advanced_cleanly_from(base_head),
     None => Ok(false),
   }
 }

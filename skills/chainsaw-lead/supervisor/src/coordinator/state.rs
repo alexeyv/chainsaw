@@ -6,11 +6,12 @@ use anyhow::{Context, Result};
 use chrono::{Local, TimeZone, Utc};
 use strum::IntoEnumIterator;
 
-use super::{Coordinator, last_event_at, session_name, session_transcript};
+use super::{last_event_at, session_name, session_transcript};
 use crate::cli::HumanWaitAction;
 use crate::domain::{Role, RunEventKind, TaskState};
 use crate::infra::store::now;
-use crate::persistence::{human_wait, run, run_event, session, task};
+use crate::persistence::{human_wait, run as run_record, run_event, session, task};
+use crate::run::Run;
 
 /// An implementer past this much context is flagged in the report.
 const IMPLEMENTER_LIMIT_TOKENS: u64 = 100_000;
@@ -19,18 +20,18 @@ fn short_sha(sha: &str) -> &str {
   sha.get(..10).unwrap_or(sha)
 }
 
-pub(super) fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Result<()> {
-  coordinator.store.write(run::record_state_read)?;
+pub(super) fn cmd_state(run: &Run, only_task: Option<i64>) -> Result<()> {
+  run.store().write(run_record::record_state_read)?;
   if let Some(task_id) = only_task {
-    let task = coordinator
-      .store
+    let task = run
+      .store()
       .read(|tx| task::get(tx, task_id))?
       .with_context(|| format!("supervisor: no task {task_id}"))?;
     println!("{task_id} {}", task.state());
     return Ok(());
   }
   println!("tasks");
-  let tasks = coordinator.store.read(task::all)?;
+  let tasks = run.store().read(task::all)?;
   for task in tasks {
     let mut timeline = TaskState::iter()
       .filter_map(|state| {
@@ -55,19 +56,19 @@ pub(super) fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Re
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
       task.id(),
       task.state(),
-      session_name(coordinator, task.session_id())?,
+      session_name(run, task.session_id())?,
       task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
-  for session in coordinator.store.read(session::all)? {
+  for session in run.store().read(session::all)? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_transcript(coordinator, &session)?.is_some() {
+    if session_transcript(run, &session)?.is_some() {
       println!(
         "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
         session.name(),
@@ -88,12 +89,12 @@ pub(super) fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Re
       );
     }
   }
-  print_time_summary(coordinator)?;
-  if coordinator.store.read(human_wait::open)?.is_some() {
+  print_time_summary(run)?;
+  if run.store().read(human_wait::open)?.is_some() {
     println!("  (a human wait is open)");
   }
-  let events = coordinator
-    .store
+  let events = run
+    .store()
     .read(|tx| run_event::recent(tx, STATE_EVENT_KINDS, 5))?;
   for event in events {
     println!(
@@ -132,8 +133,8 @@ fn clock_time(millis: i64) -> String {
   )
 }
 
-fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
-  let tasks = coordinator.store.read(task::all)?;
+fn print_time_summary(run: &Run) -> Result<()> {
+  let tasks = run.store().read(task::all)?;
   let first = tasks
     .iter()
     .flat_map(|task| task.events())
@@ -157,8 +158,8 @@ fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
     }
   }
   let at = Utc::now();
-  let human: i64 = coordinator
-    .store
+  let human: i64 = run
+    .store()
     .read(human_wait::all)?
     .iter()
     .map(|wait| wait.duration(at).num_milliseconds())
@@ -180,21 +181,21 @@ fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
   Ok(())
 }
 
-pub(super) fn cmd_human_wait(coordinator: &Coordinator, action: HumanWaitAction) -> Result<()> {
+pub(super) fn cmd_human_wait(run: &Run, action: HumanWaitAction) -> Result<()> {
   match action {
     HumanWaitAction::Start => {
-      coordinator.store.write(human_wait::start)?;
+      run.store().write(human_wait::start)?;
     }
     HumanWaitAction::End => {
-      coordinator.store.write(human_wait::end)?;
+      run.store().write(human_wait::end)?;
     }
   }
   Ok(())
 }
 
-pub(super) fn cmd_stop(coordinator: &Coordinator) -> Result<()> {
-  coordinator.store.write(|tx| {
-    run::request_stop(tx)?;
+pub(super) fn cmd_stop(run: &Run) -> Result<()> {
+  run.store().write(|tx| {
+    run_record::request_stop(tx)?;
     run_event::create(tx, RunEventKind::Stop, "run ended by the lead")?;
     Ok(())
   })?;

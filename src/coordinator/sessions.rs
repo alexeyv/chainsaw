@@ -10,16 +10,17 @@ use anyhow::{Result, bail};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 
-use super::{Coordinator, cmd_prompt};
+use super::cmd_prompt;
 use crate::domain::{RunEventKind, Session, SessionKind, Task};
 use crate::infra::agent;
 use crate::infra::session_runtime::StartSession;
 use crate::infra::transcript_monitor::TranscriptMonitor;
 use crate::persistence::{run_event, session};
+use crate::run::Run;
 
-pub(super) fn task_session(coordinator: &Coordinator, task: &Task) -> Result<Option<Session>> {
+pub(super) fn task_session(run: &Run, task: &Task) -> Result<Option<Session>> {
   Ok(match task.session_id() {
-    Some(session_id) => coordinator.store.read(|tx| session::get(tx, session_id))?,
+    Some(session_id) => run.store().read(|tx| session::get(tx, session_id))?,
     None => None,
   })
 }
@@ -29,10 +30,7 @@ pub(super) fn task_session(coordinator: &Coordinator, task: &Task) -> Result<Opt
 /// on the session row and never looked for again. Nothing in a run deletes a
 /// transcript, so a remembered one that is gone means something outside the
 /// run removed it, and that is an error rather than a session reading zero.
-pub(super) fn session_transcript(
-  coordinator: &Coordinator,
-  session: &Session,
-) -> Result<Option<PathBuf>> {
+pub(super) fn session_transcript(run: &Run, session: &Session) -> Result<Option<PathBuf>> {
   if let Some(path) = session.transcript() {
     if !path.is_file() {
       bail!(
@@ -43,40 +41,40 @@ pub(super) fn session_transcript(
     }
     return Ok(Some(path.to_owned()));
   }
-  let found = agent::for_session(session)
-    .transcript(&coordinator.store.run_dir, session.external_session_id());
+  let found =
+    agent::for_session(session).transcript(&run.store().run_dir, session.external_session_id());
   if let Some(path) = &found {
-    coordinator
-      .store
+    run
+      .store()
       .write(|tx| session::record_transcript(tx, session.id(), path))?;
   }
   Ok(found)
 }
 
-pub(super) fn session_name(coordinator: &Coordinator, id: Option<i64>) -> Result<String> {
+pub(super) fn session_name(run: &Run, id: Option<i64>) -> Result<String> {
   Ok(match id {
-    Some(id) => coordinator
-      .store
+    Some(id) => run
+      .store()
       .read(|tx| session::get(tx, id))?
       .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
     None => "-".to_owned(),
   })
 }
 
-pub(super) fn cmd_launch(coordinator: &Coordinator, name: &str, kind: SessionKind) -> Result<()> {
-  let agent = coordinator.settings.launch_agent(kind);
-  let started = coordinator.runtime.start(StartSession {
+pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()> {
+  let agent = run.settings().launch_agent(kind);
+  let started = run.runtime().start(StartSession {
     id: name,
-    run_dir: &coordinator.store.run_dir,
+    run_dir: &run.store().run_dir,
     kind,
     agent,
-    args: coordinator.settings.launch_args(kind),
+    args: run.settings().launch_args(kind),
   })?;
   let external_session_id = started.external_id;
   let pane_id = started.pane_id;
   let tab_id = started.tab_id;
-  let launched_head = coordinator.repo.head().ok();
-  coordinator.store.write(|tx| {
+  let launched_head = run.repo().head().ok();
+  run.store().write(|tx| {
     session::stop_named(tx, name)?;
     session::create(
       tx,
@@ -96,18 +94,18 @@ pub(super) fn cmd_launch(coordinator: &Coordinator, name: &str, kind: SessionKin
   Ok(())
 }
 
-pub(super) fn cmd_start_commentator(coordinator: &Coordinator, role_prompt: &Path) -> Result<()> {
-  let name = commentator_agent_name(&coordinator.store.run_dir);
-  cmd_launch(coordinator, &name, SessionKind::Commentator)?;
+pub(super) fn cmd_start_commentator(run: &Run, role_prompt: &Path) -> Result<()> {
+  let name = commentator_agent_name(&run.store().run_dir);
+  cmd_launch(run, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
-    coordinator,
+    run,
     &name,
     &format!(
       "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
       role_prompt.display(),
-      coordinator.store.transcripts_dir.display(),
-      coordinator.store.run_dir.display()
+      run.store().transcripts_dir.display(),
+      run.store().run_dir.display()
     ),
     false,
     300,
@@ -137,13 +135,13 @@ fn commentator_agent_name(run_dir: &Path) -> String {
 /// on every wake, so watching it would wake the commentator for the sole
 /// reason that it was just woken; the lead's transcript is not its material
 /// either.
-pub(super) fn cmd_watch_transcripts(coordinator: &Coordinator, interval_ms: u64) -> Result<()> {
+pub(super) fn cmd_watch_transcripts(run: &Run, interval_ms: u64) -> Result<()> {
   use std::io::Write;
 
-  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(coordinator)?);
+  let mut monitor = TranscriptMonitor::new(&implementer_transcripts(run)?);
   loop {
     std::thread::sleep(Duration::from_millis(interval_ms));
-    if let Some(line) = monitor.poll(&implementer_transcripts(coordinator)?) {
+    if let Some(line) = monitor.poll(&implementer_transcripts(run)?) {
       println!("{line}");
       std::io::stdout().flush()?;
     }
@@ -151,29 +149,29 @@ pub(super) fn cmd_watch_transcripts(coordinator: &Coordinator, interval_ms: u64)
 }
 
 /// The transcripts of the live implementers that have one, by session id.
-fn implementer_transcripts(coordinator: &Coordinator) -> Result<Vec<(String, PathBuf)>> {
+fn implementer_transcripts(run: &Run) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
-  for session in coordinator
-    .store
+  for session in run
+    .store()
     .read(session::all)?
     .into_iter()
     .filter(Session::can_take_task)
   {
-    if let Some(path) = session_transcript(coordinator, &session)? {
+    if let Some(path) = session_transcript(run, &session)? {
       transcripts.push((session.external_session_id().to_owned(), path));
     }
   }
   Ok(transcripts)
 }
 
-pub(super) fn cmd_context(coordinator: &Coordinator, name: Option<&str>) -> Result<()> {
-  for session in coordinator
-    .store
+pub(super) fn cmd_context(run: &Run, name: Option<&str>) -> Result<()> {
+  for session in run
+    .store()
     .read(session::all)?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(transcript) = session_transcript(coordinator, &session)? {
+    if let Some(transcript) = session_transcript(run, &session)? {
       println!(
         "{}\t{}",
         session.name(),

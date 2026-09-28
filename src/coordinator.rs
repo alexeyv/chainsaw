@@ -5,11 +5,8 @@ use chrono::Utc;
 
 use crate::cli::{Command, TaskCommand};
 use crate::domain::{Role, RunEventKind, SessionKind, Task, TaskEvent, TaskState};
-use crate::infra::git::Repo;
-use crate::infra::session_runtime::SessionRuntime;
-use crate::infra::settings::Settings;
-use crate::infra::store::Store;
-use crate::persistence::{run, run_event, session, task};
+use crate::persistence::{run as run_record, run_event, session, task};
+use crate::run::Run;
 
 mod accept;
 mod calibrate;
@@ -43,38 +40,11 @@ const STATE_UNREAD_SECONDS: i64 = 120;
 /// stopped, or died.
 const DAEMON_SILENT_SECONDS: i64 = 30;
 
-/// What every command and the daemon act through: the run's store and
-/// repository, the runtime its sessions live in, and the run's settings. It
-/// carries no behavior of its own; commands are functions over it.
-pub struct Coordinator<'a> {
-  store: &'a Store,
-  repo: Repo<'a>,
-  runtime: &'a dyn SessionRuntime,
-  settings: &'a Settings,
-}
-
-impl<'a> Coordinator<'a> {
-  pub fn new(store: &'a Store, runtime: &'a dyn SessionRuntime, settings: &'a Settings) -> Self {
-    Self {
-      store,
-      repo: Repo::new(&store.run_dir),
-      runtime,
-      settings,
-    }
-  }
-}
-
-pub fn execute(
-  store: &Store,
-  runtime: &dyn SessionRuntime,
-  settings: &Settings,
-  command: Command,
-) -> Result<()> {
-  let coordinator = Coordinator::new(store, runtime, settings);
+pub fn execute(run: &Run, command: Command) -> Result<()> {
   let lead_facing = is_lead_facing(&command);
-  run(&coordinator, command)?;
+  dispatch(run, command)?;
   if lead_facing {
-    for warning in standing_warnings(&coordinator)? {
+    for warning in standing_warnings(run)? {
       eprintln!("WARNING: {warning}");
     }
   }
@@ -97,12 +67,12 @@ fn is_lead_facing(command: &Command) -> bool {
 /// Facts the lead must act on, printed after every lead-facing command so
 /// they do not depend on the lead remembering the skill. Each one is measured
 /// from the store, never inferred from what the lead said.
-fn standing_warnings(coordinator: &Coordinator) -> Result<Vec<String>> {
+fn standing_warnings(run: &Run) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
   let at = Utc::now();
   let timestamp = at.timestamp_millis();
-  if let Some(lead) = coordinator
-    .store
+  if let Some(lead) = run
+    .store()
     .read(session::all)?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
@@ -116,9 +86,9 @@ fn standing_warnings(coordinator: &Coordinator) -> Result<Vec<String>> {
       warnings.push(format!("lead context {context} of {LEAD_STOP_TOKENS}"));
     }
   }
-  let (tasks, run) = coordinator
-    .store
-    .read(|tx| Ok((task::all(tx)?, run::get(tx)?)))?;
+  let (tasks, record) = run
+    .store()
+    .read(|tx| Ok((task::all(tx)?, run_record::get(tx)?)))?;
   for task in &tasks {
     if task.state() != TaskState::CommittedUnverified {
       continue;
@@ -143,7 +113,7 @@ fn standing_warnings(coordinator: &Coordinator) -> Result<Vec<String>> {
     .map(Task::id)
     .collect();
   if let Some(task_id) = out.first() {
-    let unread = match run.seconds_since_state_read(at) {
+    let unread = match record.seconds_since_state_read(at) {
       Some(age) if age <= STATE_UNREAD_SECONDS => None,
       Some(age) => Some(format!("no state read for {}", duration_text(age))),
       None => Some("state has never been read".to_owned()),
@@ -154,7 +124,7 @@ fn standing_warnings(coordinator: &Coordinator) -> Result<Vec<String>> {
       ));
     }
   }
-  let absent = match run.seconds_since_daemon_seen(at) {
+  let absent = match record.seconds_since_daemon_seen(at) {
     Some(age) if age <= DAEMON_SILENT_SECONDS => None,
     Some(age) => Some(format!("no daemon has polled for {}", duration_text(age))),
     None => Some("no daemon has run for this run".to_owned()),
@@ -175,26 +145,26 @@ fn duration_text(seconds: i64) -> String {
   }
 }
 
-fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
+fn dispatch(run: &Run, command: Command) -> Result<()> {
   match command {
     Command::Daemon {
       lead,
       session_id,
       poll_interval_ms,
-    } => daemon::run(
-      coordinator,
+    } => daemon::start(
+      run,
       &lead,
       &session_id,
       Duration::from_millis(poll_interval_ms),
     ),
-    Command::StartCommentator { role_prompt } => cmd_start_commentator(coordinator, &role_prompt),
-    Command::Launch { name } => cmd_launch(coordinator, &name, SessionKind::Implementer),
+    Command::StartCommentator { role_prompt } => cmd_start_commentator(run, &role_prompt),
+    Command::Launch { name } => cmd_launch(run, &name, SessionKind::Implementer),
     Command::Prompt {
       name,
       text,
       wait,
       timeout,
-    } => cmd_prompt(coordinator, &name, &text, wait, timeout),
+    } => cmd_prompt(run, &name, &text, wait, timeout),
     Command::Task { action } => match action {
       TaskCommand::New {
         files,
@@ -203,7 +173,7 @@ fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
         retry_of_task_id,
         reason,
       } => cmd_task_new(
-        coordinator,
+        run,
         NewTaskOptions {
           predicted_files,
           predicted_lines,
@@ -217,52 +187,50 @@ fn run(coordinator: &Coordinator, command: Command) -> Result<()> {
         sha,
         force,
         reason,
-      } => cmd_task_record_commit(coordinator, task, &sha, force, reason.as_deref()),
+      } => cmd_task_record_commit(run, task, &sha, force, reason.as_deref()),
       TaskCommand::RecordCommentary {
         task,
         force,
         reason,
-      } => cmd_task_record_commentary(coordinator, task, force, reason.as_deref()),
+      } => cmd_task_record_commentary(run, task, force, reason.as_deref()),
     },
-    Command::Abort { task, reason } => cmd_abort(coordinator, task, &reason),
-    Command::Dispatch { task, to, reason } => {
-      cmd_dispatch(coordinator, task, &to, reason.as_deref())
-    }
+    Command::Abort { task, reason } => cmd_abort(run, task, &reason),
+    Command::Dispatch { task, to, reason } => cmd_dispatch(run, task, &to, reason.as_deref()),
     Command::Accept {
       task,
       force,
       reason,
-    } => cmd_accept(coordinator, task, force, reason.as_deref()),
-    Command::Calibrate { task } => cmd_calibrate(coordinator, task),
-    Command::Observe { task, text } => cmd_observe(coordinator, task, &text),
-    Command::Finding { task, description } => cmd_finding(coordinator, task, &description),
+    } => cmd_accept(run, task, force, reason.as_deref()),
+    Command::Calibrate { task } => cmd_calibrate(run, task),
+    Command::Observe { task, text } => cmd_observe(run, task, &text),
+    Command::Finding { task, description } => cmd_finding(run, task, &description),
     Command::Poll {
       after_observation,
       task,
-    } => cmd_poll(coordinator, after_observation, task),
+    } => cmd_poll(run, after_observation, task),
     Command::Resolve {
       finding,
       verdict,
       fix_task_id,
       reason,
-    } => cmd_resolve(coordinator, finding, &verdict, fix_task_id, &reason),
-    Command::Resolutions => cmd_resolutions(coordinator),
-    Command::State { task } => cmd_state(coordinator, task),
+    } => cmd_resolve(run, finding, &verdict, fix_task_id, &reason),
+    Command::Resolutions => cmd_resolutions(run),
+    Command::State { task } => cmd_state(run, task),
     Command::TranscriptsDir => {
-      println!("{}", coordinator.store.transcripts_dir.display());
+      println!("{}", run.store().transcripts_dir.display());
       Ok(())
     }
-    Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(coordinator, interval_ms),
-    Command::Context { name } => cmd_context(coordinator, name.as_deref()),
-    Command::HumanWait { action } => cmd_human_wait(coordinator, action),
-    Command::Stop => cmd_stop(coordinator),
+    Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(run, interval_ms),
+    Command::Context { name } => cmd_context(run, name.as_deref()),
+    Command::HumanWait { action } => cmd_human_wait(run, action),
+    Command::Stop => cmd_stop(run),
   }
 }
 
 /// Journals one supervisor action that belongs to no other write.
-fn record_run_event(coordinator: &Coordinator, kind: RunEventKind, detail: &str) -> Result<()> {
-  coordinator
-    .store
+fn record_run_event(run: &Run, kind: RunEventKind, detail: &str) -> Result<()> {
+  run
+    .store()
     .write(|tx| run_event::create(tx, kind, detail))?;
   Ok(())
 }

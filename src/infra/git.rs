@@ -2,7 +2,7 @@
 //! whether a commit exists and descends from another, and what one changed.
 //! Every call runs the git CLI in the run directory.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
@@ -15,14 +15,16 @@ pub struct Commit {
   pub message: String,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Repo<'a> {
-  dir: &'a Path,
+#[derive(Clone, Debug)]
+pub struct Repo {
+  dir: PathBuf,
 }
 
-impl<'a> Repo<'a> {
-  pub fn new(dir: &'a Path) -> Self {
-    Self { dir }
+impl Repo {
+  pub fn new(dir: &Path) -> Self {
+    Self {
+      dir: dir.to_path_buf(),
+    }
   }
 
   /// The full id HEAD points at.
@@ -136,7 +138,7 @@ impl<'a> Repo<'a> {
   fn run(&self, args: &[&str]) -> Result<Output> {
     Command::new("git")
       .arg("-C")
-      .arg(self.dir)
+      .arg(&self.dir)
       .args(args)
       .output()
       .context("failed to run git")

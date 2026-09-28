@@ -8,26 +8,26 @@ use std::io::Read;
 use anyhow::{Context, Result, bail};
 
 use super::{
-  Coordinator, cmd_prompt, daemon_prompt, record_run_event, session_name, session_transcript,
-  task_session,
+  cmd_prompt, daemon_prompt, record_run_event, session_name, session_transcript, task_session,
 };
 use crate::domain::{RunEventKind, Session, Task, TaskState};
 use crate::infra::agent;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::{run_event, session, task};
+use crate::run::Run;
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
 
 /// Commit ids the task's session may have made since the task was dispatched;
 /// `new_commit_for` decides whether one is really new.
-pub(super) fn task_commits(coordinator: &Coordinator, task: &Task) -> Result<Vec<String>> {
-  let Some(session) = task_session(coordinator, task)? else {
+pub(super) fn task_commits(run: &Run, task: &Task) -> Result<Vec<String>> {
+  let Some(session) = task_session(run, task)? else {
     return Ok(Vec::new());
   };
-  let Some(transcript) = session_transcript(coordinator, &session)? else {
+  let Some(transcript) = session_transcript(run, &session)? else {
     return Ok(Vec::new());
   };
-  let head = coordinator.repo.head()?;
+  let head = run.repo().head()?;
   Ok(agent::for_session(&session).commit_candidates(
     &transcript,
     task.transcript_offset() as u64,
@@ -35,10 +35,10 @@ pub(super) fn task_commits(coordinator: &Coordinator, task: &Task) -> Result<Vec
   ))
 }
 
-fn last_task_on(coordinator: &Coordinator, session_id: i64) -> Result<Option<Task>> {
+fn last_task_on(run: &Run, session_id: i64) -> Result<Option<Task>> {
   Ok(
-    coordinator
-      .store
+    run
+      .store()
       .read(|tx| task::tasks_for_session(tx, session_id))?
       .into_iter()
       .rev()
@@ -55,7 +55,7 @@ pub(super) struct NewTaskOptions<'a> {
   pub(super) reason: Option<&'a str>,
 }
 
-pub(super) fn cmd_task_new(coordinator: &Coordinator, options: NewTaskOptions<'_>) -> Result<()> {
+pub(super) fn cmd_task_new(run: &Run, options: NewTaskOptions<'_>) -> Result<()> {
   let NewTaskOptions {
     mut predicted_files,
     predicted_lines,
@@ -70,8 +70,8 @@ pub(super) fn cmd_task_new(coordinator: &Coordinator, options: NewTaskOptions<'_
   }
   let active_retry = match retry_of_task_id {
     Some(retry_of_task_id) => {
-      let predecessor = coordinator
-        .store
+      let predecessor = run
+        .store()
         .read(|tx| task::get(tx, retry_of_task_id))?
         .with_context(|| {
           format!(
@@ -118,9 +118,9 @@ pub(super) fn cmd_task_new(coordinator: &Coordinator, options: NewTaskOptions<'_
   let predicted_file_list =
     (!file_list.is_empty()).then(|| file_list.into_iter().map(str::to_owned).collect::<Vec<_>>());
   if let Some((retry_of_task_id, reason)) = active_retry {
-    abort_task(coordinator, retry_of_task_id, reason)?;
+    abort_task(run, retry_of_task_id, reason)?;
   }
-  let task = coordinator.store.write(|tx| {
+  let task = run.store().write(|tx| {
     task::create(
       tx,
       &text,
@@ -135,31 +135,31 @@ pub(super) fn cmd_task_new(coordinator: &Coordinator, options: NewTaskOptions<'_
 }
 
 pub(super) fn cmd_dispatch(
-  coordinator: &Coordinator,
+  run: &Run,
   task_id: i64,
   implementer: &str,
   reason: Option<&str>,
 ) -> Result<()> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: task {task_id} is not in state drafted");
   };
   if task.state() != TaskState::Drafted {
     bail!("supervisor: task {task_id} is not in state drafted");
   }
-  let flying = coordinator
-    .store
+  let flying = run
+    .store()
     .read(task::all)?
     .into_iter()
     .find(|task| matches!(task.state(), TaskState::Dispatched | TaskState::InFlight));
   if let Some(flying) = flying {
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
-      session_name(coordinator, flying.session_id())?,
+      session_name(run, flying.session_id())?,
       flying.id()
     );
   }
-  let Some(session) = coordinator
-    .store
+  let Some(session) = run
+    .store()
     .read(|tx| session::latest_named(tx, implementer))?
   else {
     bail!("supervisor: no session {implementer}; launch it first");
@@ -173,7 +173,7 @@ pub(super) fn cmd_dispatch(
     }
     bail!("supervisor: {implementer} is stopped; launch it again first");
   }
-  if let Some(prior) = last_task_on(coordinator, session.id())? {
+  if let Some(prior) = last_task_on(run, session.id())? {
     bail!(
       "supervisor: {implementer} already took task {} ({}); every task gets a fresh implementer",
       prior.id(),
@@ -181,7 +181,7 @@ pub(super) fn cmd_dispatch(
     );
   }
 
-  let preamble = files_changed_since_launch(coordinator, &session)?;
+  let preamble = files_changed_since_launch(run, &session)?;
 
   let prompt = format!(
     "{}{text}\n\n{CONTRACT}",
@@ -191,19 +191,19 @@ pub(super) fn cmd_dispatch(
   // The task is measured from where the transcript and the branch stood
   // before the send: an agent may be at work, even past its commit, before
   // its transcript shows the prompt.
-  let transcript_offset = transcript_size(session_transcript(coordinator, &session)?.as_deref());
-  let base_head = coordinator.repo.head()?;
+  let transcript_offset = transcript_size(session_transcript(run, &session)?.as_deref());
+  let base_head = run.repo().head()?;
   // The task is only dispatched once the prompt is taken, so a send that
   // never is leaves it drafted and dispatchable again.
-  if let Err(error) = cmd_prompt(coordinator, implementer, &prompt, false, 300) {
+  if let Err(error) = cmd_prompt(run, implementer, &prompt, false, 300) {
     record_run_event(
-      coordinator,
+      run,
       RunEventKind::DispatchFailed,
       &format!("task {task_id} -> {implementer}: {error}"),
     )?;
     return Err(error);
   }
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     task::dispatch(
       tx,
       task_id,
@@ -227,11 +227,11 @@ pub(super) fn cmd_dispatch(
 
 /// The session may have read the tree before its task arrived; name what moved
 /// since it started so it rereads that first. Empty when nothing has.
-fn files_changed_since_launch(coordinator: &Coordinator, session: &Session) -> Result<String> {
+fn files_changed_since_launch(run: &Run, session: &Session) -> Result<String> {
   let Some(head) = session.launched_head() else {
     return Ok(String::new());
   };
-  let files = coordinator.repo.files_changed(head, "HEAD")?;
+  let files = run.repo().files_changed(head, "HEAD")?;
   if files.is_empty() {
     return Ok(String::new());
   }
@@ -242,35 +242,33 @@ fn files_changed_since_launch(coordinator: &Coordinator, session: &Session) -> R
 }
 
 pub(super) fn new_commit_for(
-  coordinator: &Coordinator,
+  run: &Run,
   shas: &[String],
   base_head: Option<&str>,
 ) -> Result<Option<String>> {
   match base_head {
-    Some(base_head) => coordinator.repo.new_commit_among(shas, base_head),
+    Some(base_head) => run.repo().new_commit_among(shas, base_head),
     None => Ok(None),
   }
 }
 
-fn failures_in_lineage(coordinator: &Coordinator, task_id: i64) -> Result<i64> {
+fn failures_in_lineage(run: &Run, task_id: i64) -> Result<i64> {
   let mut failures = 0;
-  let mut current = coordinator.store.read(|tx| task::get(tx, task_id))?;
+  let mut current = run.store().read(|tx| task::get(tx, task_id))?;
   while let Some(task) = current {
     if task.state() == TaskState::Aborted {
       failures += 1;
     }
     current = match task.retry_of_task_id() {
-      Some(retry_of_task_id) => coordinator
-        .store
-        .read(|tx| task::get(tx, retry_of_task_id))?,
+      Some(retry_of_task_id) => run.store().read(|tx| task::get(tx, retry_of_task_id))?,
       None => None,
     };
   }
   Ok(failures)
 }
 
-fn abort_task(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<(i64, String)> {
-  let Some(task) = coordinator.store.read(|tx| task::get(tx, task_id))? else {
+fn abort_task(run: &Run, task_id: i64, reason: &str) -> Result<(i64, String)> {
+  let Some(task) = run.store().read(|tx| task::get(tx, task_id))? else {
     bail!("supervisor: no task {task_id}");
   };
   if reason.trim().is_empty() {
@@ -279,8 +277,8 @@ fn abort_task(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<(
   if task.state().is_terminal() {
     bail!("supervisor: task {task_id} is already {}", task.state());
   }
-  let dirty = coordinator.repo.status()?;
-  coordinator.store.write(|tx| {
+  let dirty = run.repo().status()?;
+  run.store().write(|tx| {
     task::abort(tx, task_id, reason)?;
     run_event::create(
       tx,
@@ -290,13 +288,13 @@ fn abort_task(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<(
     Ok(())
   })?;
   if let Some(session_id) = task.session_id()
-    && let Some(session) = coordinator.store.read(|tx| session::get(tx, session_id))?
+    && let Some(session) = run.store().read(|tx| session::get(tx, session_id))?
     && session.is_live()
   {
     let detail = format!("task {task_id} -> {}", session.name());
-    let outcome = coordinator.runtime.interrupt(session.name()).and_then(|()| {
+    let outcome = run.runtime().interrupt(session.name()).and_then(|()| {
       daemon_prompt(
-        coordinator,
+        run,
         session.name(),
         &format!(
           "supervisor: task {task_id} is aborted: {reason}. Stop, leave the tree clean, do not commit."
@@ -306,20 +304,20 @@ fn abort_task(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<(
       .with_context(|| format!("abort message did not reach {}", session.name()))
     });
     match outcome {
-      Ok(()) => record_run_event(coordinator, RunEventKind::AbortInterrupt, &detail)?,
+      Ok(()) => record_run_event(run, RunEventKind::AbortInterrupt, &detail)?,
       Err(error) => record_run_event(
-        coordinator,
+        run,
         RunEventKind::AbortUnreachable,
         &format!("{detail}: {error}"),
       )?,
     }
   }
-  let failures = failures_in_lineage(coordinator, task_id)?;
+  let failures = failures_in_lineage(run, task_id)?;
   Ok((failures, dirty))
 }
 
-pub(super) fn cmd_abort(coordinator: &Coordinator, task_id: i64, reason: &str) -> Result<()> {
-  let (failures, dirty) = abort_task(coordinator, task_id, reason)?;
+pub(super) fn cmd_abort(run: &Run, task_id: i64, reason: &str) -> Result<()> {
+  let (failures, dirty) = abort_task(run, task_id, reason)?;
   let plural = if failures == 1 { "" } else { "s" };
   println!("task {task_id} aborted ({failures} abort{plural} on this task): {reason}");
   if !dirty.is_empty() {

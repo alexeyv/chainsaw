@@ -11,13 +11,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 
-use super::{Coordinator, record_run_event, session_transcript};
+use super::{record_run_event, session_transcript};
 use crate::domain::RunEventKind;
 use crate::infra::agent::{self, Agent, PromptEcho, PromptState};
 use crate::infra::session_runtime::{SessionRuntime, SessionStatus};
 use crate::infra::store::now;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::{prompt, session};
+use crate::run::Run;
 
 /// How many times an agent that echoes its prompts as it takes them is sent
 /// one that has not shown up, and so how many prompt timeouts every prompt
@@ -25,34 +26,31 @@ use crate::persistence::{prompt, session};
 const PROMPT_ATTEMPTS: i64 = 3;
 
 pub(super) fn cmd_prompt(
-  coordinator: &Coordinator,
+  run: &Run,
   name: &str,
   text: &str,
   wait: bool,
   timeout: u64,
 ) -> Result<()> {
-  let lock_path = PathBuf::from(format!("{}.prompt-lock", coordinator.store.path.display()));
+  let lock_path = PathBuf::from(format!("{}.prompt-lock", run.store().path.display()));
   let lock = OpenOptions::new()
     .create(true)
     .write(true)
     .truncate(false)
     .open(lock_path)?;
   lock.lock_exclusive()?;
-  let Some(session) = coordinator
-    .store
-    .read(|tx| session::latest_named(tx, name))?
-  else {
+  let Some(session) = run.store().read(|tx| session::latest_named(tx, name))? else {
     bail!("supervisor: no session {name}; launch it first");
   };
   // Only the prompt's opening is matched in the transcript.
   let opening: String = text.chars().take(80).collect();
-  let prompt_id = coordinator
-    .store
+  let prompt_id = run
+    .store()
     .write(|tx| prompt::create(tx, session.id(), text))?
     .id();
-  let prompt_timeout_millis = i64::try_from(coordinator.settings.prompt_timeout().as_millis())
+  let prompt_timeout_millis = i64::try_from(run.settings().prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
-  let transcript = || -> Result<Option<PathBuf>> { session_transcript(coordinator, &session) };
+  let transcript = || -> Result<Option<PathBuf>> { session_transcript(run, &session) };
   let agent = agent::for_session(&session);
   // Every prompt has the same time to be taken in, spread over as many sends
   // as its agent allows: one that echoes a prompt as it takes it can be sent
@@ -68,16 +66,16 @@ pub(super) fn cmd_prompt(
     // Polling the runtime gives it a turn to deliver what a busy session has
     // queued; the state check below then reads what actually arrived. What it
     // reports is the state the send finds the session in.
-    let idle_before = status_of(coordinator.runtime, name) == Some(SessionStatus::Idle);
+    let idle_before = status_of(run.runtime(), name) == Some(SessionStatus::Idle);
     let path_before = transcript()?;
     let mut offset = transcript_size(path_before.as_deref());
-    coordinator
-      .store
+    run
+      .store()
       .write(|tx| prompt::record_attempt(tx, prompt_id))?;
-    let _ = coordinator.runtime.prompt(name, text);
+    let _ = run.runtime().prompt(name, text);
     let deadline = now() + window_millis;
     while now() < deadline {
-      let status = status_of(coordinator.runtime, name);
+      let status = status_of(run.runtime(), name);
       let path = transcript()?;
       if path != path_before {
         offset = 0;
@@ -86,24 +84,22 @@ pub(super) fn cmd_prompt(
         && let state @ (PromptState::Started | PromptState::Queued) =
           agent.prompt_state(&path, offset, &opening)
       {
-        coordinator
-          .store
-          .write(|tx| prompt::record_seen(tx, prompt_id))?;
+        run.store().write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
-          record_run_event(coordinator, RunEventKind::PromptQueued, name)?;
+          record_run_event(run, RunEventKind::PromptQueued, name)?;
         }
-        return prompt_taken(&lock, coordinator, name, agent, &transcript, wait, timeout);
+        return prompt_taken(&lock, run, name, agent, &transcript, wait, timeout);
       }
       // An agent that echoes a prompt only with its reply has taken it once
       // the session the send found idle is busy. A session busy already, on
       // its launch prompt or something else, proves nothing about this one.
       if echo == PromptEcho::WithReply && idle_before && status == Some(SessionStatus::Busy) {
         record_run_event(
-          coordinator,
+          run,
           RunEventKind::PromptTaken,
           &format!("{name}: session went busy before its transcript showed the prompt"),
         )?;
-        return prompt_taken(&lock, coordinator, name, agent, &transcript, wait, timeout);
+        return prompt_taken(&lock, run, name, agent, &transcript, wait, timeout);
       }
       thread::sleep(Duration::from_secs(1));
     }
@@ -111,7 +107,7 @@ pub(super) fn cmd_prompt(
       eprintln!("prompt did not show up in the transcript (attempt {attempt}), resending");
     }
   }
-  record_run_event(coordinator, RunEventKind::PromptFailed, name)?;
+  record_run_event(run, RunEventKind::PromptFailed, name)?;
   FileExt::unlock(&lock)?;
   match echo {
     PromptEcho::OnTake => {
@@ -139,7 +135,7 @@ pub(super) fn status_of(runtime: &dyn SessionRuntime, name: &str) -> Option<Sess
 /// the turn to end and print the last thing the agent said.
 fn prompt_taken(
   lock: &File,
-  coordinator: &Coordinator,
+  run: &Run,
   name: &str,
   agent: &dyn Agent,
   transcript: &dyn Fn() -> Result<Option<PathBuf>>,
@@ -148,7 +144,7 @@ fn prompt_taken(
 ) -> Result<()> {
   FileExt::unlock(lock)?;
   if wait {
-    let _ = coordinator.runtime.wait(name, Duration::from_secs(timeout));
+    let _ = run.runtime().wait(name, Duration::from_secs(timeout));
     println!(
       "{}",
       transcript()?
@@ -159,12 +155,12 @@ fn prompt_taken(
   Ok(())
 }
 
-pub(super) fn daemon_prompt(coordinator: &Coordinator, name: &str, text: &str) -> bool {
-  match cmd_prompt(coordinator, name, text, false, 300) {
+pub(super) fn daemon_prompt(run: &Run, name: &str, text: &str) -> bool {
+  match cmd_prompt(run, name, text, false, 300) {
     Ok(()) => true,
     Err(error) => {
       let _ = record_run_event(
-        coordinator,
+        run,
         RunEventKind::PromptUnreachable,
         &format!("{name}: {error}"),
       );

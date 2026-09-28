@@ -5,17 +5,13 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 
-use super::Coordinator;
 use crate::cli::Verdict;
 use crate::domain::{FindingVerdict, Task};
 use crate::persistence::{finding, observation, task};
+use crate::run::Run;
 
-pub(super) fn cmd_observe(
-  coordinator: &Coordinator,
-  task_id: Option<i64>,
-  text: &str,
-) -> Result<()> {
-  let observation = coordinator.store.write(|tx| {
+pub(super) fn cmd_observe(run: &Run, task_id: Option<i64>, text: &str) -> Result<()> {
+  let observation = run.store().write(|tx| {
     if let Some(task_id) = task_id {
       require_task(tx, task_id)?;
     }
@@ -25,12 +21,8 @@ pub(super) fn cmd_observe(
   Ok(())
 }
 
-pub(super) fn cmd_finding(
-  coordinator: &Coordinator,
-  task_id: i64,
-  description: &str,
-) -> Result<()> {
-  let finding = coordinator.store.write(|tx| {
+pub(super) fn cmd_finding(run: &Run, task_id: i64, description: &str) -> Result<()> {
+  let finding = run.store().write(|tx| {
     require_task(tx, task_id)?;
     finding::register(tx, task_id, description)
   })?;
@@ -38,15 +30,11 @@ pub(super) fn cmd_finding(
   Ok(())
 }
 
-pub(super) fn cmd_poll(
-  coordinator: &Coordinator,
-  after_observation: i64,
-  task_id: Option<i64>,
-) -> Result<()> {
+pub(super) fn cmd_poll(run: &Run, after_observation: i64, task_id: Option<i64>) -> Result<()> {
   if after_observation < 0 {
     bail!("supervisor: --after-observation must be nonnegative");
   }
-  let (observations, findings) = coordinator.store.read(|tx| {
+  let (observations, findings) = run.store().read(|tx| {
     if let Some(task_id) = task_id {
       require_task(tx, task_id)?;
     }
@@ -92,7 +80,7 @@ pub(super) fn cmd_poll(
 }
 
 pub(super) fn cmd_resolve(
-  coordinator: &Coordinator,
+  run: &Run,
   finding_id: i64,
   verdict: &Verdict,
   fix_task_id: Option<i64>,
@@ -102,7 +90,7 @@ pub(super) fn cmd_resolve(
     Verdict::Task => FindingVerdict::Task,
     Verdict::Dropped => FindingVerdict::Dropped,
   };
-  coordinator.store.write(|tx| {
+  run.store().write(|tx| {
     let finding = finding::get(tx, finding_id)?
       .with_context(|| format!("supervisor: no finding {finding_id}"))?;
     if let Some(fix_task_id) = fix_task_id {
@@ -116,9 +104,9 @@ pub(super) fn cmd_resolve(
   Ok(())
 }
 
-pub(super) fn cmd_resolutions(coordinator: &Coordinator) -> Result<()> {
-  let resolutions = coordinator
-    .store
+pub(super) fn cmd_resolutions(run: &Run) -> Result<()> {
+  let resolutions = run
+    .store()
     .read(finding::resolved)?
     .into_iter()
     .map(|finding| {
