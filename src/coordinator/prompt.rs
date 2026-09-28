@@ -38,27 +38,26 @@ pub(super) fn cmd_prompt(
     .truncate(false)
     .open(lock_path)?;
   lock.lock_exclusive()?;
+  let Some(session) = coordinator
+    .store
+    .read(|tx| session::latest_named(tx, name))?
+  else {
+    bail!("supervisor: no session {name}; launch it first");
+  };
   // Only the prompt's opening is matched in the transcript.
   let opening: String = text.chars().take(80).collect();
   let prompt_id = coordinator
     .store
-    .write(|tx| prompt::create(tx, name, text))?;
+    .write(|tx| prompt::create(tx, session.id(), text))?
+    .id();
   let prompt_timeout_millis = i64::try_from(coordinator.settings.prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
-  let session = coordinator
-    .store
-    .read(|tx| session::latest_named(tx, name))?;
-  let transcript = || -> Result<Option<PathBuf>> {
-    match &session {
-      Some(session) => session_transcript(coordinator, session),
-      None => Ok(None),
-    }
-  };
-  let agent = session.as_ref().map(agent::for_session);
+  let transcript = || -> Result<Option<PathBuf>> { session_transcript(coordinator, &session) };
+  let agent = agent::for_session(&session);
   // Every prompt has the same time to be taken in, spread over as many sends
   // as its agent allows: one that echoes a prompt as it takes it can be sent
   // it again; one that echoes it only with its reply may be at work on it.
-  let echo = agent.map_or(PromptEcho::OnTake, Agent::prompt_echo);
+  let echo = agent.prompt_echo();
   let attempts = match echo {
     PromptEcho::OnTake => PROMPT_ATTEMPTS,
     PromptEcho::WithReply => 1,
@@ -83,7 +82,7 @@ pub(super) fn cmd_prompt(
       if path != path_before {
         offset = 0;
       }
-      if let Some((agent, path)) = agent.zip(path)
+      if let Some(path) = path
         && let state @ (PromptState::Started | PromptState::Queued) =
           agent.prompt_state(&path, offset, &opening)
       {
@@ -98,11 +97,7 @@ pub(super) fn cmd_prompt(
       // An agent that echoes a prompt only with its reply has taken it once
       // the session the send found idle is busy. A session busy already, on
       // its launch prompt or something else, proves nothing about this one.
-      if let Some(agent) = agent
-        && echo == PromptEcho::WithReply
-        && idle_before
-        && status == Some(SessionStatus::Busy)
-      {
+      if echo == PromptEcho::WithReply && idle_before && status == Some(SessionStatus::Busy) {
         record_run_event(
           coordinator,
           RunEventKind::PromptTaken,

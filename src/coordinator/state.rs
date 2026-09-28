@@ -89,7 +89,7 @@ pub(super) fn cmd_state(coordinator: &Coordinator, only_task: Option<i64>) -> Re
     }
   }
   print_time_summary(coordinator)?;
-  if coordinator.store.read(human_wait::is_open)? {
+  if coordinator.store.read(human_wait::open)?.is_some() {
     println!("  (a human wait is open)");
   }
   let events = coordinator
@@ -156,10 +156,13 @@ fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
       busy += end.unwrap_or_else(now) - start;
     }
   }
-  let mut human = 0;
-  for (start, end) in coordinator.store.read(human_wait::intervals)? {
-    human += end.unwrap_or_else(now) - start;
-  }
+  let at = Utc::now();
+  let human: i64 = coordinator
+    .store
+    .read(human_wait::all)?
+    .iter()
+    .map(|wait| wait.duration(at).num_milliseconds())
+    .sum();
   if let Some(first) = first {
     let wall = now() - first;
     let percentage = if wall == 0 {
@@ -179,9 +182,13 @@ fn print_time_summary(coordinator: &Coordinator) -> Result<()> {
 
 pub(super) fn cmd_human_wait(coordinator: &Coordinator, action: HumanWaitAction) -> Result<()> {
   match action {
-    HumanWaitAction::Start => coordinator.store.write(human_wait::start)?,
-    HumanWaitAction::End => coordinator.store.write(human_wait::end)?,
-  };
+    HumanWaitAction::Start => {
+      coordinator.store.write(human_wait::start)?;
+    }
+    HumanWaitAction::End => {
+      coordinator.store.write(human_wait::end)?;
+    }
+  }
   Ok(())
 }
 

@@ -1,46 +1,84 @@
-//! The intervals the run spent waiting on the human. At most one is open at
-//! a time; an open one has no end.
-
-use anyhow::Result;
-use chrono::Utc;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 
-/// Opens a wait unless one is open already. True when this call opened it.
-pub fn start(transaction: &Transaction<'_>) -> Result<bool> {
-  if is_open(transaction)? {
-    return Ok(false);
+use crate::domain::HumanWait;
+
+struct HumanWaitRow {
+  id: i64,
+  started: i64,
+  ended: Option<i64>,
+}
+
+/// Opens a wait unless one is open already, and returns the open one.
+pub fn start(transaction: &Transaction<'_>) -> Result<HumanWait> {
+  if let Some(open) = open(transaction)? {
+    return Ok(open);
   }
-  transaction.execute(
-    "insert into human_waits(started) values(?)",
-    [Utc::now().timestamp_millis()],
+  let started = Utc::now().timestamp_millis();
+  let id = transaction.query_row(
+    "insert into human_waits(started) values(?) returning id",
+    [started],
+    |row| row.get(0),
   )?;
-  Ok(true)
+  materialize(HumanWaitRow {
+    id,
+    started,
+    ended: None,
+  })
 }
 
-/// Closes the open wait, if any. True when there was one.
-pub fn end(transaction: &Transaction<'_>) -> Result<bool> {
-  let closed = transaction.execute(
-    "update human_waits set ended=? where ended is null",
-    [Utc::now().timestamp_millis()],
-  )?;
-  Ok(closed > 0)
+/// Closes the open wait and returns it; None when no wait was open.
+pub fn end(transaction: &Transaction<'_>) -> Result<Option<HumanWait>> {
+  transaction
+    .query_row(
+      "update human_waits set ended=? where ended is null returning id, started, ended",
+      [Utc::now().timestamp_millis()],
+      human_wait_row,
+    )
+    .optional()?
+    .map(materialize)
+    .transpose()
 }
 
-pub fn is_open(transaction: &Transaction<'_>) -> Result<bool> {
-  let open: Option<i64> = transaction
-    .query_row("select 1 from human_waits where ended is null", [], |row| {
-      row.get(0)
-    })
-    .optional()?;
-  Ok(open.is_some())
+/// The open wait, if any.
+pub fn open(transaction: &Transaction<'_>) -> Result<Option<HumanWait>> {
+  transaction
+    .query_row(
+      "select id, started, ended from human_waits where ended is null",
+      [],
+      human_wait_row,
+    )
+    .optional()?
+    .map(materialize)
+    .transpose()
 }
 
-/// Every wait as (started, ended) in milliseconds since the epoch, oldest
-/// first; an open wait has no end.
-pub fn intervals(transaction: &Transaction<'_>) -> Result<Vec<(i64, Option<i64>)>> {
-  let mut statement = transaction.prepare("select started, ended from human_waits order by id")?;
-  let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-  Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+/// Every wait, oldest first.
+pub fn all(transaction: &Transaction<'_>) -> Result<Vec<HumanWait>> {
+  let mut statement =
+    transaction.prepare("select id, started, ended from human_waits order by id")?;
+  let rows = statement.query_map([], human_wait_row)?;
+  rows.map(|row| materialize(row?)).collect()
+}
+
+fn human_wait_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HumanWaitRow> {
+  Ok(HumanWaitRow {
+    id: row.get("id")?,
+    started: row.get("started")?,
+    ended: row.get("ended")?,
+  })
+}
+
+fn materialize(row: HumanWaitRow) -> Result<HumanWait> {
+  let started = time(row.started, "started")?;
+  let ended = row.ended.map(|at| time(at, "ended")).transpose()?;
+  HumanWait::new(row.id, started, ended)
+}
+
+fn time(millis: i64, field: &str) -> Result<DateTime<Utc>> {
+  DateTime::from_timestamp_millis(millis)
+    .with_context(|| format!("human wait {field} is outside the supported range"))
 }
 
 #[cfg(test)]

@@ -2,8 +2,18 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::Connection;
 
-use super::{end, intervals, is_open, start};
+use super::{all, end, open, start};
+use crate::domain::HumanWait;
+use crate::domain::test_helpers::{format_human_wait, within};
 use crate::persistence::test_fixture::{database, row_count};
+
+fn format_human_waits(waits: &[HumanWait]) -> String {
+  waits
+    .iter()
+    .map(format_human_wait)
+    .collect::<Vec<_>>()
+    .join("\n\n")
+}
 
 /// Every stored wait as `started..ended`, with an open one ending in `open`.
 fn stored_rows(db: &Connection) -> Result<String> {
@@ -28,30 +38,33 @@ mod start {
   #[test]
   fn should_work() -> Result<()> {
     let mut db = database();
-    let before = Utc::now().timestamp_millis();
+    let before = Utc::now();
 
     let transaction = db.transaction()?;
-    let opened = start(&transaction)?;
+    let wait = start(&transaction)?;
     transaction.commit()?;
 
-    let after = Utc::now().timestamp_millis();
-    let started: i64 = db.query_row("select started from human_waits", [], |row| row.get(0))?;
-    assert!(opened);
-    assert!((before..=after).contains(&started));
-    assert_eq!(stored_rows(&db)?, format!("{started}..open"));
+    let after = Utc::now();
+    assert_eq!(wait.id(), 1);
+    assert!(wait.is_open());
+    assert!(within(wait.started(), before, after));
+    assert_eq!(
+      stored_rows(&db)?,
+      format!("{}..open", wait.started().timestamp_millis())
+    );
     Ok(())
   }
 
   #[test]
-  fn should_leave_the_open_wait_alone_when_one_is_open() -> Result<()> {
+  fn should_return_the_open_wait_when_one_is_open() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    start(&transaction)?;
+    let first = start(&transaction)?;
 
-    let opened = start(&transaction)?;
+    let again = start(&transaction)?;
     transaction.commit()?;
 
-    assert!(!opened);
+    assert_eq!(again, first);
     assert_eq!(row_count(&db, "human_waits")?, 1);
     Ok(())
   }
@@ -63,10 +76,11 @@ mod start {
     start(&transaction)?;
     end(&transaction)?;
 
-    let opened = start(&transaction)?;
+    let wait = start(&transaction)?;
     transaction.commit()?;
 
-    assert!(opened);
+    assert_eq!(wait.id(), 2);
+    assert!(wait.is_open());
     assert_eq!(row_count(&db, "human_waits")?, 2);
     Ok(())
   }
@@ -79,81 +93,96 @@ mod end {
   fn should_work() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    start(&transaction)?;
+    let opened = start(&transaction)?;
 
-    let closed = end(&transaction)?;
+    let closed = end(&transaction)?.expect("the open wait is closed");
     transaction.commit()?;
 
-    let (started, ended): (i64, Option<i64>) =
-      db.query_row("select started, ended from human_waits", [], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-      })?;
-    assert!(closed);
-    assert!(ended.is_some_and(|ended| ended >= started));
+    let ended = closed.ended().expect("ended is stamped");
+    assert_eq!(closed.id(), opened.id());
+    assert_eq!(closed.started(), opened.started());
+    assert!(ended >= opened.started());
+    assert_eq!(
+      stored_rows(&db)?,
+      format!(
+        "{}..{}",
+        opened.started().timestamp_millis(),
+        ended.timestamp_millis()
+      )
+    );
     Ok(())
   }
 
   #[test]
-  fn should_do_nothing_when_no_wait_is_open() -> Result<()> {
+  fn should_be_none_when_no_wait_is_open() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let closed = end(&transaction)?;
-
-    assert!(!closed);
+    assert_eq!(end(&transaction)?, None);
     Ok(())
   }
 }
 
-mod is_open {
+mod open {
   use super::*;
 
   #[test]
   fn should_work() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    start(&transaction)?;
+    let started = start(&transaction)?;
 
-    assert!(is_open(&transaction)?);
+    assert_eq!(open(&transaction)?, Some(started));
     Ok(())
   }
 
   #[test]
-  fn should_be_false_when_every_wait_ended() -> Result<()> {
+  fn should_be_none_when_every_wait_ended() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
     start(&transaction)?;
     end(&transaction)?;
 
-    assert!(!is_open(&transaction)?);
+    assert_eq!(open(&transaction)?, None);
     Ok(())
   }
 
   #[test]
-  fn should_be_false_when_no_wait_was_ever_opened() -> Result<()> {
+  fn should_be_none_when_no_wait_was_ever_opened() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    assert!(!is_open(&transaction)?);
+    assert_eq!(open(&transaction)?, None);
     Ok(())
   }
 }
 
-mod intervals {
+mod all {
   use super::*;
 
   #[test]
   fn should_work() -> Result<()> {
     let mut db = database();
     db.execute_batch(
-      "insert into human_waits(started, ended) values (100, 250);
-       insert into human_waits(started) values (400);",
+      "insert into human_waits(started, ended) values (1700000000000, 1700000300000);
+       insert into human_waits(started) values (1700000400000);",
     )?;
     let transaction = db.transaction()?;
 
-    let waits = intervals(&transaction)?;
+    let waits = all(&transaction)?;
 
-    assert_eq!(waits, vec![(100, Some(250)), (400, None)]);
+    assert_eq!(
+      format_human_waits(&waits),
+      r#"id: 1
+started: 2023-11-14T22:13:20Z
+ended: 2023-11-14T22:18:20Z
+is_open: false
+
+id: 2
+started: 2023-11-14T22:20:00Z
+ended: none
+is_open: true"#
+    );
     Ok(())
   }
 
@@ -162,9 +191,7 @@ mod intervals {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let waits = intervals(&transaction)?;
-
-    assert_eq!(waits, Vec::new());
+    assert_eq!(all(&transaction)?, Vec::new());
     Ok(())
   }
 }

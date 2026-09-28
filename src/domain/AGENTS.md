@@ -16,4 +16,8 @@ Task is a state machine. Drafted → Dispatched → InFlight → CommittedUnveri
 **`Observation`** (`observation.rs`): Timestamped informational text requiring
 no response. Optionally references a `Task`.
 
+**`Prompt`** (`prompt.rs`): One prompt the supervisor sent to a Session: its text, when it was sent, how many times it went out, and when the session's transcript first showed it.
+
+**`HumanWait`** (`human_wait.rs`): One interval the run spent waiting on the human. At most one is open at a time. Knows how long it lasted, or has lasted so far while open.
+
 **`Calibration`** (`calibration.rs`): Measurement record linked to a `Task`. Predicted / actual file and line counts, starting / ending implementer context sizes etc.

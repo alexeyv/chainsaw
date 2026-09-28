@@ -31,8 +31,10 @@ create table task_events(
   id integer primary key autoincrement,
   task_id int not null references tasks(id), state text not null,
   reason text, created_at int not null);
-create table prompts(id integer primary key, session text, text text,
-  sent_at int, seen_at int, attempts int);
+create table prompts(
+  id integer primary key,
+  session_id int not null references sessions(id), text text not null,
+  sent_at int not null, seen_at int, attempts int not null);
 create table calibrations(
   id integer primary key autoincrement,
   task_id int not null unique references tasks(id),

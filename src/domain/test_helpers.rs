@@ -5,8 +5,8 @@ use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, Observation, Role, Run, RunEvent,
-  RunEventKind, Session, Task, TaskEvent, TaskState,
+  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Observation, Prompt,
+  Role, Run, RunEvent, RunEventKind, Session, Task, TaskEvent, TaskState,
 };
 
 pub fn created_at() -> DateTime<Utc> {
@@ -173,6 +173,43 @@ pub fn format_observation(observation: &Observation) -> String {
     format_option(observation.task_id()),
     observation.text(),
     format_time(observation.created_at()),
+  )
+}
+
+/// A prompt just sent, not yet seen, never resent.
+pub fn prompt(id: i64, session_id: i64, text: &str) -> Result<Prompt> {
+  Prompt::new(id, session_id, text.to_owned(), created_at(), None, 0)
+}
+
+pub fn format_prompt(prompt: &Prompt) -> String {
+  format!(
+    "id: {}\nsession_id: {}\ntext: {:?}\nsent_at: {}\nseen_at: {}\nattempts: {}",
+    prompt.id(),
+    prompt.session_id(),
+    prompt.text(),
+    format_time(prompt.sent_at()),
+    format_option(prompt.seen_at().map(format_time)),
+    prompt.attempts(),
+  )
+}
+
+/// A wait that started at the shared creation time and is still open.
+pub fn open_wait(id: i64) -> Result<HumanWait> {
+  HumanWait::new(id, created_at(), None)
+}
+
+/// A wait that started at the shared creation time and ended five minutes later.
+pub fn ended_wait(id: i64) -> Result<HumanWait> {
+  HumanWait::new(id, created_at(), Some(timestamp(1_700_000_300)))
+}
+
+pub fn format_human_wait(wait: &HumanWait) -> String {
+  format!(
+    "id: {}\nstarted: {}\nended: {}\nis_open: {}",
+    wait.id(),
+    format_time(wait.started()),
+    format_option(wait.ended().map(format_time)),
+    wait.is_open(),
   )
 }
 
