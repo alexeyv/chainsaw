@@ -14,6 +14,7 @@ use crate::infra::store::Store;
 pub struct Run {
   dir: PathBuf,
   transcripts_dir: PathBuf,
+  prompt_lock_path: PathBuf,
   store: Store,
   repo: Repo,
   runtime: Box<dyn SessionRuntime>,
@@ -31,6 +32,7 @@ impl Run {
     Ok(Self {
       dir: store.run_dir.clone(),
       transcripts_dir: store.transcripts_dir.clone(),
+      prompt_lock_path: PathBuf::from(format!("{}.prompt-lock", store.path.display())),
       store,
       repo,
       runtime,
@@ -47,6 +49,12 @@ impl Run {
   /// under `~/.claude/projects/`.
   pub fn transcripts_dir(&self) -> &Path {
     &self.transcripts_dir
+  }
+
+  /// The file every `prompt` command holds a lock on while it sends, so two
+  /// prompts to the same run never interleave.
+  pub fn prompt_lock_path(&self) -> &Path {
+    &self.prompt_lock_path
   }
 
   pub fn store(&self) -> &Store {

@@ -9,13 +9,13 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use fs2::FileExt;
 
 use super::{record_run_event, session_transcript};
 use crate::domain::RunEventKind;
 use crate::infra::agent::{self, Agent, PromptEcho, PromptState};
 use crate::infra::session_runtime::{SessionRuntime, SessionStatus};
-use crate::infra::store::now;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::{prompt, session};
 use crate::run::Run;
@@ -32,12 +32,11 @@ pub(super) fn cmd_prompt(
   wait: bool,
   timeout: u64,
 ) -> Result<()> {
-  let lock_path = PathBuf::from(format!("{}.prompt-lock", run.store().path.display()));
   let lock = OpenOptions::new()
     .create(true)
     .write(true)
     .truncate(false)
-    .open(lock_path)?;
+    .open(run.prompt_lock_path())?;
   lock.lock_exclusive()?;
   let Some(session) = run.store().read(|tx| session::latest_named(tx, name))? else {
     bail!("supervisor: no session {name}; launch it first");
@@ -73,8 +72,8 @@ pub(super) fn cmd_prompt(
       .store()
       .write(|tx| prompt::record_attempt(tx, prompt_id))?;
     let _ = run.runtime().prompt(name, text);
-    let deadline = now() + window_millis;
-    while now() < deadline {
+    let deadline = Utc::now().timestamp_millis() + window_millis;
+    while Utc::now().timestamp_millis() < deadline {
       let status = status_of(run.runtime(), name);
       let path = transcript()?;
       if path != path_before {

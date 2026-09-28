@@ -9,7 +9,6 @@ use strum::IntoEnumIterator;
 use super::{last_event_at, session_name, session_transcript};
 use crate::cli::HumanWaitAction;
 use crate::domain::{Role, RunEventKind, TaskState};
-use crate::infra::store::now;
 use crate::persistence::{human_wait, run as run_record, run_event, session, task};
 use crate::run::Run;
 
@@ -154,7 +153,7 @@ fn print_time_summary(run: &Run) -> Result<()> {
       })
       .map(|event| event.created_at().timestamp_millis());
     if let Some(start) = start {
-      busy += end.unwrap_or_else(now) - start;
+      busy += end.unwrap_or_else(|| Utc::now().timestamp_millis()) - start;
     }
   }
   let at = Utc::now();
@@ -165,7 +164,7 @@ fn print_time_summary(run: &Run) -> Result<()> {
     .map(|wait| wait.duration(at).num_milliseconds())
     .sum();
   if let Some(first) = first {
-    let wall = now() - first;
+    let wall = Utc::now().timestamp_millis() - first;
     let percentage = if wall == 0 {
       0.0
     } else {

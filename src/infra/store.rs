@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -109,14 +109,6 @@ impl Store {
     transaction.commit()?;
     Ok(value)
   }
-}
-
-/// Milliseconds since the epoch: the unit of every stored timestamp.
-pub fn now() -> i64 {
-  SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_millis() as i64
 }
 
 pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
