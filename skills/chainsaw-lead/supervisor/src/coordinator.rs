@@ -217,7 +217,7 @@ fn dispatch(run: &Run, command: Command) -> Result<()> {
     Command::Resolutions => cmd_resolutions(run),
     Command::State { task } => cmd_state(run, task),
     Command::TranscriptsDir => {
-      println!("{}", run.store().transcripts_dir.display());
+      println!("{}", run.transcripts_dir().display());
       Ok(())
     }
     Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(run, interval_ms),

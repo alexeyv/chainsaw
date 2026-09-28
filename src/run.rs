@@ -1,8 +1,8 @@
-//! The run as every command sees it: its checkout, its database, the runtime
-//! its sessions live in, and its settings. `Run` carries no behavior of its
-//! own yet; commands are functions over it.
+//! The run as every command sees it: its directory, its checkout, its
+//! database, the runtime its sessions live in, and its settings. `Run` carries
+//! no behavior of its own yet; commands are functions over it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -12,6 +12,8 @@ use crate::infra::settings::Settings;
 use crate::infra::store::Store;
 
 pub struct Run {
+  dir: PathBuf,
+  transcripts_dir: PathBuf,
   store: Store,
   repo: Repo,
   runtime: Box<dyn SessionRuntime>,
@@ -27,11 +29,24 @@ impl Run {
     let store = Store::open(run_dir)?;
     let repo = Repo::new(&store.run_dir);
     Ok(Self {
+      dir: store.run_dir.clone(),
+      transcripts_dir: store.transcripts_dir.clone(),
       store,
       repo,
       runtime,
       settings,
     })
+  }
+
+  /// The run's clean-slate checkout, canonicalized.
+  pub fn dir(&self) -> &Path {
+    &self.dir
+  }
+
+  /// Where the run's session transcripts and durable supervisor state live,
+  /// under `~/.claude/projects/`.
+  pub fn transcripts_dir(&self) -> &Path {
+    &self.transcripts_dir
   }
 
   pub fn store(&self) -> &Store {

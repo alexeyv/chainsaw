@@ -41,8 +41,7 @@ pub(super) fn session_transcript(run: &Run, session: &Session) -> Result<Option<
     }
     return Ok(Some(path.to_owned()));
   }
-  let found =
-    agent::for_session(session).transcript(&run.store().run_dir, session.external_session_id());
+  let found = agent::for_session(session).transcript(run.dir(), session.external_session_id());
   if let Some(path) = &found {
     run
       .store()
@@ -65,7 +64,7 @@ pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()>
   let agent = run.settings().launch_agent(kind);
   let started = run.runtime().start(StartSession {
     id: name,
-    run_dir: &run.store().run_dir,
+    run_dir: run.dir(),
     kind,
     agent,
     args: run.settings().launch_args(kind),
@@ -95,7 +94,7 @@ pub(super) fn cmd_launch(run: &Run, name: &str, kind: SessionKind) -> Result<()>
 }
 
 pub(super) fn cmd_start_commentator(run: &Run, role_prompt: &Path) -> Result<()> {
-  let name = commentator_agent_name(&run.store().run_dir);
+  let name = commentator_agent_name(run.dir());
   cmd_launch(run, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
   cmd_prompt(
@@ -104,8 +103,8 @@ pub(super) fn cmd_start_commentator(run: &Run, role_prompt: &Path) -> Result<()>
     &format!(
       "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
       role_prompt.display(),
-      run.store().transcripts_dir.display(),
-      run.store().run_dir.display()
+      run.transcripts_dir().display(),
+      run.dir().display()
     ),
     false,
     300,
