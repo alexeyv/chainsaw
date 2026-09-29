@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::domain::ContextSize;
-use crate::infra::agent::PromptEcho;
+use crate::domain::PromptEcho;
 
 const DISALLOWED: &str = "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput";
 

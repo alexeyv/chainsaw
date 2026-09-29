@@ -13,8 +13,8 @@ use chrono::Utc;
 use fs2::FileExt;
 
 use super::{record_run_event, session_transcript};
-use crate::domain::{RunEventKind, Session, SessionStatus};
-use crate::infra::agent::{self, Agent, PromptEcho, PromptState};
+use crate::domain::{Agent, PromptEcho, PromptState, RunEventKind, Session, SessionStatus};
+use crate::infra::agent;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::prompt;
 use crate::persistence::store::Store;

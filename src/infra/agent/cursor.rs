@@ -15,8 +15,8 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{Agent, PromptEcho, PromptState, entries, read_lossy, text_of};
-use crate::domain::{ContextSize, SessionKind};
+use super::{entries, read_lossy, text_of};
+use crate::domain::{Agent, ContextSize, PromptEcho, PromptState, SessionKind};
 
 /// The prompt a new session is launched with.
 pub const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the task.";

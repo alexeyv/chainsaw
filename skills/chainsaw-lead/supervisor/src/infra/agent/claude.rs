@@ -9,8 +9,8 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{Agent, PromptState, entries, read_lossy, text_of};
-use crate::domain::{ContextSize, SessionKind};
+use super::{commits_printed, entries, read_lossy, text_of};
+use crate::domain::{Agent, ContextSize, PromptState, SessionKind};
 
 pub struct Claude;
 
@@ -145,6 +145,11 @@ impl Agent for Claude {
       entry.get("type").and_then(Value::as_str) == Some("assistant")
         && entry.to_string().contains(text)
     })
+  }
+
+  /// The transcript shows what git printed, so its commit lines are read.
+  fn commit_candidates(&self, transcript: &Path, offset: u64, _head: &str) -> Vec<String> {
+    commits_printed(transcript, offset)
   }
 }
 

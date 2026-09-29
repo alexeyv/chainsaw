@@ -1,15 +1,14 @@
-//! The agent a session runs: what flags it launches with, and where and how
-//! its transcript is read. A session runtime launches the CLI an `AgentKind`
-//! names and drives the terminal; the agent reads what the process in it
-//! wrote. A session runs Claude Code, OpenAI Codex or the Cursor Agent CLI.
+//! The agents a session can run: Claude Code, OpenAI Codex or the Cursor
+//! Agent CLI. Which one a session runs is recorded on the session. Each reads
+//! its own transcript format, and what reading a JSONL transcript takes is
+//! shared here.
 
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::Path;
 
 use regex::Regex;
 use serde_json::Value;
 
-use crate::domain::{AgentKind, ContextSize, Session, SessionKind};
+use crate::domain::{Agent, AgentKind, Session};
 
 mod claude;
 mod codex;
@@ -18,93 +17,6 @@ mod cursor;
 pub use claude::Claude;
 pub use codex::Codex;
 pub use cursor::Cursor;
-
-/// Where a sent prompt is in the session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptState {
-  /// Not in the transcript yet.
-  Unseen,
-  /// Taken up as the current turn.
-  Started,
-  /// Waiting in the session's queue behind the current turn.
-  Queued,
-}
-
-/// When an agent writes a prompt to its transcript.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptEcho {
-  /// As it takes the prompt. One still unseen after a while was lost, and can
-  /// be sent again.
-  OnTake,
-  /// Only with its first reply. One still unseen may be at work, and a second
-  /// send would be a second prompt; sooner than the reply, only the session
-  /// going busy tells that it was taken.
-  WithReply,
-}
-
-pub trait Agent {
-  /// The executable a session of this kind runs, as the agent's CLI is
-  /// installed on PATH.
-  fn program(&self) -> &'static str;
-
-  /// The flags a session of this kind launches with when settings name none.
-  fn default_args(&self, kind: SessionKind) -> String;
-
-  /// The prompt that asks a session to compact its context.
-  fn compact_prompt(&self) -> &'static str;
-
-  /// The flags that make a new session take `id` as its own, for an agent
-  /// that accepts one. None when the agent names its sessions itself, and the
-  /// id has to be read from the transcript the session starts writing.
-  fn session_id_args(&self, id: &str) -> Option<Vec<String>>;
-
-  /// The id of the newest session this agent started in `run_dir` at or after
-  /// `since`, once it has written its transcript.
-  fn session_started_since(&self, canonical_run_dir: &Path, since: SystemTime) -> Option<String>;
-
-  /// The transcript of a session started in `run_dir`, or None until it exists.
-  fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;
-
-  /// Context the session held at its latest turn.
-  fn context_size(&self, transcript: &Path) -> ContextSize;
-
-  /// Context the session held at its last turn before `offset`.
-  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
-
-  /// The largest context the session held between `start` and `end`, or to
-  /// the end of the transcript.
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
-
-  /// The state of a prompt opening with `prompt`, sent after `offset`.
-  fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
-
-  /// When this agent writes a prompt it was sent to its transcript, and so
-  /// what an unseen prompt means.
-  fn prompt_echo(&self) -> PromptEcho {
-    PromptEcho::OnTake
-  }
-
-  /// The last text the agent said, if it has said anything.
-  fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
-
-  /// Whether anything the agent said or did mentions `text`.
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
-
-  /// Commit ids the session may have made from `offset` on, given `head`,
-  /// where the branch stands now. An agent whose transcript shows what git
-  /// printed reads them from it, as `[branch sha]` in git's own commit output;
-  /// one whose transcript keeps no tool output can only name HEAD.
-  fn commit_candidates(&self, transcript: &Path, offset: u64, _head: &str) -> Vec<String> {
-    let Ok(text) = read_lossy(transcript, offset, None) else {
-      return Vec::new();
-    };
-    let pattern = Regex::new(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]").expect("valid commit regex");
-    pattern
-      .captures_iter(&text)
-      .map(|capture| capture[1].to_owned())
-      .collect()
-  }
-}
 
 /// The agent behind a session already started: the one its row names.
 pub fn for_session(session: &Session) -> &'static dyn Agent {
@@ -118,6 +30,19 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
     AgentKind::Codex => &Codex,
     AgentKind::Cursor => &Cursor,
   }
+}
+
+/// The commits git printed into the transcript from `offset` on, as
+/// `[branch sha]` in its own commit output.
+fn commits_printed(transcript: &Path, offset: u64) -> Vec<String> {
+  let Ok(text) = read_lossy(transcript, offset, None) else {
+    return Vec::new();
+  };
+  let pattern = Regex::new(r"\[[\w/.-]+ ([0-9a-f]{7,40})\]").expect("valid commit regex");
+  pattern
+    .captures_iter(&text)
+    .map(|capture| capture[1].to_owned())
+    .collect()
 }
 
 /// The transcript between two byte offsets, or to its end, tolerating a cut

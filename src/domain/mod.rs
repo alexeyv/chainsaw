@@ -1,3 +1,4 @@
+mod agent;
 mod calibration;
 mod context_size;
 mod finding;
@@ -16,6 +17,7 @@ pub(crate) mod test_helpers;
 
 use anyhow::{Result, bail};
 
+pub use agent::{Agent, PromptEcho, PromptState};
 pub use calibration::Calibration;
 pub use context_size::ContextSize;
 pub use finding::{Finding, FindingVerdict};

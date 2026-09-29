@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::domain::ContextSize;
-use crate::infra::agent::PromptEcho;
+use crate::domain::PromptEcho;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 

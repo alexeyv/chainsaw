@@ -6,6 +6,8 @@
 
 **`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Records the agent it was launched with and keeps it for life. Has zero-to-many Tasks. Borrows the run's `SessionRuntime` and drives itself through it: status, prompt, interrupt, wait.
 
+**`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: its launch flags, and where and how its transcript is read. Implemented in `infra`, one per `AgentKind`.
+
 **`SessionRuntime`** (`session_runtime.rs`): the interface to the terminal multiplexer a run's sessions live in: it starts a session and drives it by name. Implemented in `infra`; the run owns one and hands every `Session` a reference.
 
 **`Task`** (`task.rs`): One unit of work. Typically belongs to an implementer Session, sometimes more than one Task belong to the same implementer Session. May be a retry of another Task. Owns ordered list of TaskEvents. The last TaskEvent in the list determines Task's state. Also owns zero-to-many Findings, Observations, and Calibrations.  

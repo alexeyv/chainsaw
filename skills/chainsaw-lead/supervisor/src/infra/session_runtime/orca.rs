@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::Cli;
-use crate::domain::{SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession};
-use crate::infra::agent::{self, Agent, Claude};
+use crate::domain::{
+  Agent, SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession,
+};
+use crate::infra::agent::{self, Claude};
 
 /// The registry's name, beside the run's database.
 pub const REGISTRY_FILE_NAME: &str = "chainsaw-orca-terminals.json";
