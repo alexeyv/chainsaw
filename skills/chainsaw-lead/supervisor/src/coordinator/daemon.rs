@@ -17,7 +17,6 @@ use super::{
 use crate::domain::{
   AgentKind, ContextSize, Role, RunEventKind, Session, SessionStatus, Task, TaskState,
 };
-use crate::infra::agent;
 
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
@@ -94,7 +93,7 @@ pub(super) fn start(
         )?;
       }
       let size = transcript_size(Some(&transcript));
-      let context = agent::for_session(&session).context_size(&transcript);
+      let context = session.agent().context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
@@ -180,7 +179,7 @@ fn observe_implementer(
   transcript: &Path,
   quiet: f64,
 ) -> Result<()> {
-  let agent = agent::for_session(session);
+  let agent = session.agent();
   let task = store
     .read(|tx| task::tasks_for_session(tx, session.id()))?
     .into_iter()
@@ -240,7 +239,7 @@ fn observe_commentator(
     .into_iter()
     .filter(Task::awaits_commentary)
     .collect::<Vec<_>>();
-  let agent = agent::for_session(session);
+  let agent = session.agent();
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);

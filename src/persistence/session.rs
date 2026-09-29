@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{AgentKind, ContextSize, Role, Session, SessionRuntime};
+use crate::domain::{Agent, AgentKind, ContextSize, Role, Session, SessionRuntime};
 
 struct SessionRow {
   id: i64,
@@ -31,9 +31,11 @@ const SELECT: &str = "
 
 /// Register a session that has just started with `agent`. Its transcript has
 /// not grown yet, so its last growth is its start.
+#[allow(clippy::too_many_arguments)]
 pub fn create<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   name: &str,
   role: Role,
   agent: AgentKind,
@@ -58,24 +60,29 @@ pub fn create<'r>(
     ],
     |row| row.get(0),
   )?;
-  get(transaction, runtime, id)?.with_context(|| format!("created session {id} is missing"))
+  get(transaction, runtime, agent_for, id)?
+    .with_context(|| format!("created session {id} is missing"))
 }
 
 pub fn get<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   id: i64,
 ) -> Result<Option<Session<'r>>> {
   let row = transaction
     .query_row(&format!("{SELECT} where id=?"), [id], session_row)
     .optional()?;
-  row.map(|row| materialize(row, runtime)).transpose()
+  row
+    .map(|row| materialize(row, runtime, agent_for))
+    .transpose()
 }
 
 /// The newest incarnation of `name`, live or not.
 pub fn latest_named<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   name: &str,
 ) -> Result<Option<Session<'r>>> {
   let row = transaction
@@ -85,16 +92,21 @@ pub fn latest_named<'r>(
       session_row,
     )
     .optional()?;
-  row.map(|row| materialize(row, runtime)).transpose()
+  row
+    .map(|row| materialize(row, runtime, agent_for))
+    .transpose()
 }
 
 pub fn all<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
 ) -> Result<Vec<Session<'r>>> {
   let mut statement = transaction.prepare(&format!("{SELECT} order by started_at, id"))?;
   let rows = statement.query_map([], session_row)?;
-  rows.map(|row| materialize(row?, runtime)).collect()
+  rows
+    .map(|row| materialize(row?, runtime, agent_for))
+    .collect()
 }
 
 /// Stop every live incarnation of `name`. Returns how many were stopped.
@@ -111,6 +123,7 @@ pub fn stop_named(transaction: &Transaction<'_>, name: &str) -> Result<usize> {
 pub fn record_transcript<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   id: i64,
   path: &Path,
 ) -> Result<Session<'r>> {
@@ -118,7 +131,7 @@ pub fn record_transcript<'r>(
     "update sessions set transcript=? where id=?",
     params![path.to_string_lossy(), id],
   )?;
-  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, agent_for, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Record one poll's reading of the transcript. Growth moves the last-growth
@@ -128,6 +141,7 @@ pub fn record_transcript<'r>(
 pub fn record_reading<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   id: i64,
   context: ContextSize,
   grew: bool,
@@ -145,20 +159,21 @@ pub fn record_reading<'r>(
       ",
     params![context.stored(), grew, at.timestamp_millis(), id],
   )?;
-  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, agent_for, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Latch that the session has been nudged; cleared by the next growth.
 pub fn record_kick<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   id: i64,
 ) -> Result<Session<'r>> {
   transaction.execute(
     "update sessions set kicked_at=? where id=?",
     params![Utc::now().timestamp_millis(), id],
   )?;
-  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, agent_for, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Stamp that the session crossed its context stop threshold. The update
@@ -167,13 +182,14 @@ pub fn record_kick<'r>(
 pub fn record_over_limit<'r>(
   transaction: &Transaction<'_>,
   runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
   id: i64,
 ) -> Result<Session<'r>> {
   transaction.execute(
     "update sessions set over_limit_at=? where id=?",
     params![Utc::now().timestamp_millis(), id],
   )?;
-  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, agent_for, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -195,16 +211,21 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
   })
 }
 
-fn materialize<'r>(row: SessionRow, runtime: &'r dyn SessionRuntime) -> Result<Session<'r>> {
+fn materialize<'r>(
+  row: SessionRow,
+  runtime: &'r dyn SessionRuntime,
+  agent_for: fn(AgentKind) -> &'r dyn Agent,
+) -> Result<Session<'r>> {
   let on_session = |error: anyhow::Error| anyhow!("session {}: {error}", row.name);
   let role = Role::try_from(row.role.as_str()).map_err(on_session)?;
-  let agent = AgentKind::try_from(row.agent.as_str()).map_err(on_session)?;
+  let agent_kind = AgentKind::try_from(row.agent.as_str()).map_err(on_session)?;
   Session::new(
     runtime,
+    agent_for(agent_kind),
     row.id,
     row.name,
     role,
-    agent,
+    agent_kind,
     row.external_session_id,
     row.launched_head,
     time(row.started_at, "started_at")?,

@@ -265,7 +265,7 @@ can_latch_over_limit: false"#
     })
     .unwrap();
 
-    assert_eq!(session.agent(), AgentKind::Cursor);
+    assert_eq!(session.agent_kind(), AgentKind::Cursor);
     assert_eq!(session.context(), ContextSize::UNKNOWN);
     assert_eq!(session.context_max(), ContextSize::UNKNOWN);
   }
@@ -331,6 +331,16 @@ can_latch_over_limit: false"#
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "over_limit_at cannot precede started_at");
+  }
+}
+
+mod agent {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let session = build_session(launched_implementer()).unwrap();
+    assert_eq!(session.agent().program(), "fake-agent");
   }
 }
 

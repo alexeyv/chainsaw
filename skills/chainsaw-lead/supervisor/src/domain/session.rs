@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
 use super::{
-  ContextSize, SessionRuntime, SessionStatus, require_nonblank, require_optional_nonblank,
+  Agent, ContextSize, SessionRuntime, SessionStatus, require_nonblank, require_optional_nonblank,
   require_positive,
 };
 
@@ -112,14 +112,16 @@ impl fmt::Display for AgentKind {
 
 /// One agent session under the supervisor's watch. A row is one
 /// incarnation: relaunching the same name stops this one and starts another.
-/// It drives itself through the run's runtime, which it borrows.
+/// It drives itself through the run's runtime, and reads its transcript
+/// through the agent it was launched with; it borrows both from the run.
 #[derive(Clone)]
 pub struct Session<'r> {
   runtime: &'r dyn SessionRuntime,
+  agent: &'r dyn Agent,
   id: i64,
   name: String,
   role: Role,
-  agent: AgentKind,
+  agent_kind: AgentKind,
   external_session_id: String,
   launched_head: Option<String>,
   started_at: DateTime<Utc>,
@@ -136,10 +138,11 @@ impl<'r> Session<'r> {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
     runtime: &'r dyn SessionRuntime,
+    agent: &'r dyn Agent,
     id: i64,
     name: String,
     role: Role,
-    agent: AgentKind,
+    agent_kind: AgentKind,
     external_session_id: String,
     launched_head: Option<String>,
     started_at: DateTime<Utc>,
@@ -181,10 +184,11 @@ impl<'r> Session<'r> {
 
     Ok(Self {
       runtime,
+      agent,
       id,
       name,
       role,
-      agent,
+      agent_kind,
       external_session_id,
       launched_head,
       started_at,
@@ -229,7 +233,13 @@ impl<'r> Session<'r> {
     self.role
   }
 
-  pub fn agent(&self) -> AgentKind {
+  /// The kind of agent the session was launched with, as its row records.
+  pub fn agent_kind(&self) -> AgentKind {
+    self.agent_kind
+  }
+
+  /// The agent the session runs: the implementation of its kind.
+  pub fn agent(&self) -> &'r dyn Agent {
     self.agent
   }
 
@@ -310,13 +320,13 @@ impl<'r> Session<'r> {
 }
 
 /// Two sessions are the same session when their records agree; the runtime
-/// they borrow is the run's, not theirs.
+/// and the agent they borrow are the run's, not theirs.
 impl PartialEq for Session<'_> {
   fn eq(&self, other: &Self) -> bool {
     self.id == other.id
       && self.name == other.name
       && self.role == other.role
-      && self.agent == other.agent
+      && self.agent_kind == other.agent_kind
       && self.external_session_id == other.external_session_id
       && self.launched_head == other.launched_head
       && self.started_at == other.started_at
@@ -337,7 +347,7 @@ impl fmt::Debug for Session<'_> {
       .field("id", &self.id)
       .field("name", &self.name)
       .field("role", &self.role)
-      .field("agent", &self.agent)
+      .field("agent_kind", &self.agent_kind)
       .field("external_session_id", &self.external_session_id)
       .field("launched_head", &self.launched_head)
       .field("started_at", &self.started_at)

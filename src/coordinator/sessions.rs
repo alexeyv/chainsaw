@@ -13,7 +13,6 @@ use sha1::{Digest, Sha1};
 use super::cmd_prompt;
 use crate::domain::StartSession;
 use crate::domain::{RunEventKind, Session, SessionKind, Task};
-use crate::infra::agent;
 use crate::infra::transcript_monitor::TranscriptMonitor;
 use crate::persistence::store::Store;
 use crate::persistence::{run_event, session};
@@ -50,7 +49,9 @@ pub(super) fn session_transcript(
     }
     return Ok(Some(path.to_owned()));
   }
-  let found = agent::for_session(session).transcript(run.dir(), session.external_session_id());
+  let found = session
+    .agent()
+    .transcript(run.dir(), session.external_session_id());
   if let Some(path) = &found {
     store.write(|tx| run.record_session_transcript(tx, session.id(), path))?;
   }
@@ -179,7 +180,7 @@ pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Resul
       println!(
         "{}\t{}",
         session.name(),
-        agent::for_session(&session).context_size(&transcript)
+        session.agent().context_size(&transcript)
       );
     } else {
       println!("{}\tUNAVAILABLE (transcript not found)", session.name());

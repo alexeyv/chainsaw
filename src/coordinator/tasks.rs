@@ -11,7 +11,6 @@ use super::{
   cmd_prompt, daemon_prompt, record_run_event, session_name, session_transcript, task_session,
 };
 use crate::domain::{RunEventKind, Session, Task, TaskState};
-use crate::infra::agent;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
 use crate::persistence::{run_event, task};
@@ -29,11 +28,11 @@ pub(super) fn task_commits(run: &Run, store: &Store, task: &Task) -> Result<Vec<
     return Ok(Vec::new());
   };
   let head = run.repo().head()?;
-  Ok(agent::for_session(&session).commit_candidates(
-    &transcript,
-    task.transcript_offset() as u64,
-    &head,
-  ))
+  Ok(
+    session
+      .agent()
+      .commit_candidates(&transcript, task.transcript_offset() as u64, &head),
+  )
 }
 
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {

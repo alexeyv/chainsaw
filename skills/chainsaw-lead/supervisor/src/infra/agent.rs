@@ -8,7 +8,7 @@ use std::path::Path;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::domain::{Agent, AgentKind, Session};
+use crate::domain::{Agent, AgentKind};
 
 mod claude;
 mod codex;
@@ -17,11 +17,6 @@ mod cursor;
 pub use claude::Claude;
 pub use codex::Codex;
 pub use cursor::Cursor;
-
-/// The agent behind a session already started: the one its row names.
-pub fn for_session(session: &Session) -> &'static dyn Agent {
-  implementing(session.agent())
-}
 
 /// The implementation of a named agent.
 pub fn implementing(kind: AgentKind) -> &'static dyn Agent {

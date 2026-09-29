@@ -12,7 +12,7 @@ use rusqlite::Transaction;
 use chrono::{DateTime, Utc};
 
 use crate::domain::{AgentKind, ContextSize, Role, Session, SessionRuntime};
-use crate::infra::agent::Claude;
+use crate::infra::agent::{self, Claude};
 use crate::infra::git::Repo;
 use crate::infra::session_runtime::{HerdrSessionRuntime, OrcaSessionRuntime};
 use crate::infra::settings::Settings;
@@ -83,14 +83,14 @@ impl Run {
   }
 
   // Every session is built here, so every session drives itself through
-  // this run's runtime.
+  // this run's runtime and reads its transcript through its agent.
 
   pub fn sessions(&self, transaction: &Transaction<'_>) -> Result<Vec<Session<'_>>> {
-    session::all(transaction, self.runtime())
+    session::all(transaction, self.runtime(), agent::implementing)
   }
 
   pub fn session(&self, transaction: &Transaction<'_>, id: i64) -> Result<Option<Session<'_>>> {
-    session::get(transaction, self.runtime(), id)
+    session::get(transaction, self.runtime(), agent::implementing, id)
   }
 
   /// The newest incarnation of the session called `name`, live or not.
@@ -99,7 +99,7 @@ impl Run {
     transaction: &Transaction<'_>,
     name: &str,
   ) -> Result<Option<Session<'_>>> {
-    session::latest_named(transaction, self.runtime(), name)
+    session::latest_named(transaction, self.runtime(), agent::implementing, name)
   }
 
   /// Registers a session its runtime has just started.
@@ -115,6 +115,7 @@ impl Run {
     session::create(
       transaction,
       self.runtime(),
+      agent::implementing,
       name,
       role,
       agent,
@@ -129,7 +130,7 @@ impl Run {
     id: i64,
     path: &Path,
   ) -> Result<Session<'_>> {
-    session::record_transcript(transaction, self.runtime(), id, path)
+    session::record_transcript(transaction, self.runtime(), agent::implementing, id, path)
   }
 
   pub fn record_session_reading(
@@ -140,11 +141,19 @@ impl Run {
     grew: bool,
     at: DateTime<Utc>,
   ) -> Result<Session<'_>> {
-    session::record_reading(transaction, self.runtime(), id, context, grew, at)
+    session::record_reading(
+      transaction,
+      self.runtime(),
+      agent::implementing,
+      id,
+      context,
+      grew,
+      at,
+    )
   }
 
   pub fn record_session_kick(&self, transaction: &Transaction<'_>, id: i64) -> Result<Session<'_>> {
-    session::record_kick(transaction, self.runtime(), id)
+    session::record_kick(transaction, self.runtime(), agent::implementing, id)
   }
 
   pub fn record_session_over_limit(
@@ -152,7 +161,7 @@ impl Run {
     transaction: &Transaction<'_>,
     id: i64,
   ) -> Result<Session<'_>> {
-    session::record_over_limit(transaction, self.runtime(), id)
+    session::record_over_limit(transaction, self.runtime(), agent::implementing, id)
   }
 }
 

@@ -1,14 +1,14 @@
 use std::fmt;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Observation, Prompt,
-  Role, Run, RunEvent, RunEventKind, Session, SessionRuntime, SessionStatus, StartSession,
-  StartedSession, Task, TaskEvent, TaskState,
+  Agent, AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Observation,
+  Prompt, PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind, SessionRuntime,
+  SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState,
 };
 
 /// A runtime that answers every status query the same way and accepts every
@@ -60,6 +60,69 @@ static IDLE_RUNTIME: FakeSessionRuntime = FakeSessionRuntime {
 /// The runtime every fixture session borrows: reachable and always idle.
 pub fn runtime() -> &'static dyn SessionRuntime {
   &IDLE_RUNTIME
+}
+
+/// An agent that has never written anything: no transcript, no context, no
+/// prompt seen.
+pub struct FakeAgent;
+
+impl Agent for FakeAgent {
+  fn program(&self) -> &'static str {
+    "fake-agent"
+  }
+
+  fn default_args(&self, _kind: SessionKind) -> String {
+    String::new()
+  }
+
+  fn compact_prompt(&self) -> &'static str {
+    "/compact"
+  }
+
+  fn session_id_args(&self, _id: &str) -> Option<Vec<String>> {
+    None
+  }
+
+  fn session_started_since(&self, _run_dir: &Path, _since: SystemTime) -> Option<String> {
+    None
+  }
+
+  fn transcript(&self, _run_dir: &Path, _external_session_id: &str) -> Option<PathBuf> {
+    None
+  }
+
+  fn context_size(&self, _transcript: &Path) -> ContextSize {
+    ContextSize::UNKNOWN
+  }
+
+  fn context_before(&self, _transcript: &Path, _offset: u64) -> ContextSize {
+    ContextSize::UNKNOWN
+  }
+
+  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> ContextSize {
+    ContextSize::UNKNOWN
+  }
+
+  fn prompt_state(&self, _transcript: &Path, _offset: u64, _prompt: &str) -> PromptState {
+    PromptState::Unseen
+  }
+
+  fn latest_assistant_text(&self, _transcript: &Path) -> Option<String> {
+    None
+  }
+
+  fn output_mentions(&self, _transcript: &Path, _text: &str) -> bool {
+    false
+  }
+
+  fn commit_candidates(&self, _transcript: &Path, _offset: u64, _head: &str) -> Vec<String> {
+    Vec::new()
+  }
+}
+
+/// The agent every fixture session borrows.
+pub fn agent() -> &'static dyn Agent {
+  &FakeAgent
 }
 
 pub fn created_at() -> DateTime<Utc> {
@@ -521,6 +584,7 @@ pub fn build_session(spec: SessionSpec) -> Result<Session<'static>> {
 pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Result<Session<'_>> {
   Session::new(
     runtime,
+    agent(),
     spec.id,
     spec.name.to_owned(),
     spec.role,
@@ -544,7 +608,7 @@ pub fn format_session(session: &Session) -> String {
     session.id(),
     session.name(),
     session.role(),
-    session.agent(),
+    session.agent_kind(),
     session.external_session_id(),
     format_option_text(session.launched_head()),
     format_time(session.started_at()),

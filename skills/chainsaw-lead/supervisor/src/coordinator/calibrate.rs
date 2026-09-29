@@ -7,7 +7,6 @@ use regex::Regex;
 
 use super::{last_event_at, session_transcript, task_session};
 use crate::domain::{ContextSize, Session, TaskState};
-use crate::infra::agent;
 use crate::persistence::store::Store;
 use crate::persistence::{calibration, task};
 use crate::run::Run;
@@ -48,11 +47,11 @@ pub(super) fn cmd_calibrate(run: &Run, store: &Store, task_id: i64) -> Result<()
   };
   let peak = match &session {
     Some(session) => match session_transcript(run, store, session)? {
-      Some(transcript) => agent::for_session(session).context_peak(
-        &transcript,
-        task.transcript_offset() as u64,
-        next_offset,
-      ),
+      Some(transcript) => {
+        session
+          .agent()
+          .context_peak(&transcript, task.transcript_offset() as u64, next_offset)
+      }
       None => ContextSize::UNKNOWN,
     },
     None => ContextSize::UNKNOWN,

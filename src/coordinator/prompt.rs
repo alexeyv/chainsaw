@@ -14,7 +14,6 @@ use fs2::FileExt;
 
 use super::{record_run_event, session_transcript};
 use crate::domain::{Agent, PromptEcho, PromptState, RunEventKind, Session, SessionStatus};
-use crate::infra::agent;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::prompt;
 use crate::persistence::store::Store;
@@ -50,7 +49,7 @@ pub(super) fn cmd_prompt(
   let prompt_timeout_millis = i64::try_from(run.settings().prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
   let transcript = || -> Result<Option<PathBuf>> { session_transcript(run, store, &session) };
-  let agent = agent::for_session(&session);
+  let agent = session.agent();
   // Every prompt has the same time to be taken in, spread over as many sends
   // as its agent allows: one that echoes a prompt as it takes it can be sent
   // it again; one that echoes it only with its reply may be at work on it.
