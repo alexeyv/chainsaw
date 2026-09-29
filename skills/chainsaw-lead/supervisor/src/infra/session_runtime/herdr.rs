@@ -1,14 +1,13 @@
 //! Herdr: sessions are agents Herdr knows by name, each in a pane it opened.
 
 use std::env;
-use std::ffi::OsString;
-use std::process::{Command, Output};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
+use super::Cli;
 use crate::domain::{
   AgentKind, SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession,
 };
@@ -16,7 +15,7 @@ use crate::domain::{
 /// Drives sessions through the `herdr` CLI. The pane the supervisor itself runs in
 /// is ambient, so it is read once here rather than rediscovered inside `start`.
 pub struct HerdrSessionRuntime {
-  program: OsString,
+  cli: Cli,
   workspace: Option<String>,
   tab_id: String,
   /// How long, and how many times, `start` polls `agent get` for a session id
@@ -28,7 +27,7 @@ pub struct HerdrSessionRuntime {
 impl HerdrSessionRuntime {
   pub fn from_environment() -> Self {
     Self {
-      program: OsString::from("herdr"),
+      cli: Cli::new("herdr", "herdr"),
       workspace: env::var("HERDR_WORKSPACE_ID").ok(),
       tab_id: env::var("HERDR_TAB_ID").unwrap_or_default(),
       session_id_poll_interval: Duration::from_secs(2),
@@ -36,22 +35,17 @@ impl HerdrSessionRuntime {
     }
   }
 
-  fn run(&self, args: &[&str]) -> Result<Output> {
-    Command::new(&self.program)
-      .args(args)
-      .output()
-      .with_context(|| format!("failed to run {}", self.program.to_string_lossy()))
-  }
-
   fn request(&self, args: &[&str]) -> Result<Value> {
-    let output = self.run(args)?;
+    let output = self.cli.run(args)?;
     if !output.status.success() {
       bail!(
-        "herdr failed: {}",
+        "{} failed: {}",
+        self.cli.name,
         String::from_utf8_lossy(&output.stderr).trim()
       );
     }
-    serde_json::from_slice(&output.stdout).context("herdr returned invalid JSON")
+    serde_json::from_slice(&output.stdout)
+      .with_context(|| format!("{} returned invalid JSON", self.cli.name))
   }
 
   /// What Herdr calls an agent chainsaw knows.
@@ -61,14 +55,6 @@ impl HerdrSessionRuntime {
       AgentKind::Codex => "codex",
       AgentKind::Cursor => "cursor",
     }
-  }
-
-  fn json_string(value: &Value, pointer: &str) -> Result<String> {
-    value
-      .pointer(pointer)
-      .and_then(Value::as_str)
-      .map(str::to_owned)
-      .with_context(|| format!("herdr response lacks {pointer}"))
   }
 }
 
@@ -92,7 +78,7 @@ impl SessionRuntime for HerdrSessionRuntime {
           "--no-focus",
         ])?;
         (
-          Self::json_string(&response, "/result/pane/pane_id")?,
+          self.cli.json_string(&response, "/result/pane/pane_id")?,
           self.tab_id.clone(),
         )
       }
@@ -109,8 +95,10 @@ impl SessionRuntime for HerdrSessionRuntime {
           "--no-focus",
         ])?;
         (
-          Self::json_string(&response, "/result/root_pane/pane_id")?,
-          Self::json_string(&response, "/result/tab/tab_id")?,
+          self
+            .cli
+            .json_string(&response, "/result/root_pane/pane_id")?,
+          self.cli.json_string(&response, "/result/tab/tab_id")?,
         )
       }
     };
@@ -141,13 +129,17 @@ impl SessionRuntime for HerdrSessionRuntime {
     // Under load `agent start` returns before the agent has reported its
     // session id; poll `agent get` until it appears rather than failing and
     // leaving an orphaned session that the supervisor never registered.
-    let mut external_id = Self::json_string(&started, "/result/agent/agent_session/value");
+    let mut external_id = self
+      .cli
+      .json_string(&started, "/result/agent/agent_session/value");
     let mut attempt = 0;
     while external_id.is_err() && attempt < self.session_id_poll_attempts {
       thread::sleep(self.session_id_poll_interval);
       attempt += 1;
       if let Ok(response) = self.request(&["agent", "get", session.id]) {
-        external_id = Self::json_string(&response, "/result/agent/agent_session/value");
+        external_id = self
+          .cli
+          .json_string(&response, "/result/agent/agent_session/value");
       }
     }
     Ok(StartedSession {
@@ -162,14 +154,13 @@ impl SessionRuntime for HerdrSessionRuntime {
       Ok(response) => response,
       Err(_) => return Ok(None),
     };
-    Ok(Some(status_named(&Self::json_string(
-      &response,
-      "/result/agent/status",
-    )?)))
+    Ok(Some(status_named(
+      &self.cli.json_string(&response, "/result/agent/status")?,
+    )))
   }
 
   fn prompt(&self, session_id: &str, text: &str) -> Result<()> {
-    let _ = self.run(&["agent", "prompt", session_id, text])?;
+    let _ = self.cli.run(&["agent", "prompt", session_id, text])?;
     Ok(())
   }
 
@@ -180,7 +171,9 @@ impl SessionRuntime for HerdrSessionRuntime {
 
   fn wait(&self, session_id: &str, timeout: Duration) -> Result<()> {
     let timeout_ms = timeout.as_millis().to_string();
-    let _ = self.run(&["agent", "wait", session_id, "--timeout", &timeout_ms])?;
+    let _ = self
+      .cli
+      .run(&["agent", "wait", session_id, "--timeout", &timeout_ms])?;
     Ok(())
   }
 }

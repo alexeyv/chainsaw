@@ -6,12 +6,10 @@
 //! starts writing.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::Cli;
 use crate::domain::{SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession};
 use crate::infra::agent::{self, Agent, Claude};
 
@@ -27,7 +26,7 @@ pub const REGISTRY_FILE_NAME: &str = "chainsaw-orca-terminals.json";
 
 /// Drives sessions through the `orca` CLI.
 pub struct OrcaSessionRuntime {
-  program: OsString,
+  cli: Cli,
   /// The terminal the supervisor itself runs in; the commentator's pane is
   /// split from it.
   terminal: String,
@@ -89,7 +88,7 @@ impl OrcaSessionRuntime {
       .canonicalize()
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
     Ok(Self {
-      program: OsString::from("orca"),
+      cli: Cli::new("orca", "orca"),
       terminal,
       registry: Claude::transcripts_dir(&run_dir)?.join(REGISTRY_FILE_NAME),
       idle_probe: Duration::from_millis(250),
@@ -100,32 +99,34 @@ impl OrcaSessionRuntime {
     })
   }
 
-  fn run(&self, args: &[&str]) -> Result<Output> {
-    Command::new(&self.program)
-      .args(args)
-      .output()
-      .with_context(|| format!("failed to run {}", self.program.to_string_lossy()))
-  }
-
   /// Orca's `result`, or its refusal. Orca reports a refusal in its JSON
   /// reply whatever its exit status says.
   fn request(&self, args: &[&str]) -> Result<Value> {
-    let output = self.run(args)?;
+    let output = self.cli.run(args)?;
     let reply: Value = match serde_json::from_slice(&output.stdout) {
       Ok(reply) => reply,
       Err(_) if !output.status.success() => bail!(
-        "orca failed: {}",
+        "{} failed: {}",
+        self.cli.name,
         String::from_utf8_lossy(&output.stderr).trim()
       ),
-      Err(error) => return Err(error).context("orca returned invalid JSON"),
+      Err(error) => {
+        return Err(error).with_context(|| format!("{} returned invalid JSON", self.cli.name));
+      }
     };
     if reply.get("ok").and_then(Value::as_bool) == Some(true) {
       return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
     }
     Err(
       Refusal {
-        code: json_string(&reply, "/error/code").unwrap_or_else(|_| "unknown".to_owned()),
-        message: json_string(&reply, "/error/message").unwrap_or_default(),
+        code: self
+          .cli
+          .json_string(&reply, "/error/code")
+          .unwrap_or_else(|_| "unknown".to_owned()),
+        message: self
+          .cli
+          .json_string(&reply, "/error/message")
+          .unwrap_or_default(),
       }
       .into(),
     )
@@ -256,8 +257,8 @@ impl SessionRuntime for OrcaSessionRuntime {
         (opened, "/split")
       }
     };
-    let handle = json_string(&opened, &format!("{key}/handle"))?;
-    let tab_id = json_string(&opened, &format!("{key}/tabId"))?;
+    let handle = self.cli.json_string(&opened, &format!("{key}/handle"))?;
+    let tab_id = self.cli.json_string(&opened, &format!("{key}/tabId"))?;
     let external_id = match assigned {
       Some(_) => minted,
       None => self
@@ -340,7 +341,7 @@ impl SessionRuntime for OrcaSessionRuntime {
       }
     }
     let timeout_ms = timeout.as_millis().to_string();
-    let _ = self.run(&[
+    let _ = self.cli.run(&[
       "terminal",
       "wait",
       "--terminal",
@@ -354,14 +355,6 @@ impl SessionRuntime for OrcaSessionRuntime {
     thread::sleep(self.turn_end_settle);
     Ok(())
   }
-}
-
-fn json_string(value: &Value, pointer: &str) -> Result<String> {
-  value
-    .pointer(pointer)
-    .and_then(Value::as_str)
-    .map(str::to_owned)
-    .with_context(|| format!("orca response lacks {pointer}"))
 }
 
 /// A fresh version 4 UUID, for an agent that takes its session id on the

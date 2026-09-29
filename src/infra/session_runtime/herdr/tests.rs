@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -89,7 +90,7 @@ impl FakeHerdr {
 
   fn runtime(&self, workspace: Option<&str>, tab_id: &str) -> HerdrSessionRuntime {
     HerdrSessionRuntime {
-      program: OsString::from(&self.program),
+      cli: Cli::new("herdr", &self.program),
       workspace: workspace.map(str::to_owned),
       tab_id: tab_id.to_owned(),
       session_id_poll_interval: Duration::from_millis(1),

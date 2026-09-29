@@ -1,5 +1,6 @@
 use std::env;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,7 +85,7 @@ impl FakeOrca {
 
   fn runtime(&self) -> OrcaSessionRuntime {
     OrcaSessionRuntime {
-      program: OsString::from(&self.program),
+      cli: Cli::new("orca", &self.program),
       terminal: "ambient-terminal".to_owned(),
       registry: self.dir.join(REGISTRY_FILE_NAME),
       idle_probe: Duration::from_millis(1),
