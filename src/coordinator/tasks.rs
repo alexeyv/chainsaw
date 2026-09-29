@@ -14,7 +14,7 @@ use crate::domain::{RunEventKind, Session, Task, TaskState};
 use crate::infra::agent;
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
-use crate::persistence::{run_event, session, task};
+use crate::persistence::{run_event, task};
 use crate::run::Run;
 
 const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only this task. Run the task's checks as you work; run the project's quality gate once, immediately before committing. Commit without attribution trailers, leave the tree clean, then run exactly `git log -1 --format='[chainsaw %h]'` (the supervisor reads that record), and finish with the commit id, changed-file manifest, a one-paragraph semantic delta, and any gate failures you judged pre-existing (test name and one-line error).";
@@ -22,7 +22,7 @@ const CONTRACT: &str = "Verify the tree is clean; stop if dirty. Implement only 
 /// Commit ids the task's session may have made since the task was dispatched;
 /// `new_commit_for` decides whether one is really new.
 pub(super) fn task_commits(run: &Run, store: &Store, task: &Task) -> Result<Vec<String>> {
-  let Some(session) = task_session(store, task)? else {
+  let Some(session) = task_session(run, store, task)? else {
     return Ok(Vec::new());
   };
   let Some(transcript) = session_transcript(run, store, &session)? else {
@@ -153,11 +153,11 @@ pub(super) fn cmd_dispatch(
   if let Some(flying) = flying {
     bail!(
       "supervisor: an implementer is already in flight ({} is in flight on task {})",
-      session_name(store, flying.session_id())?,
+      session_name(run, store, flying.session_id())?,
       flying.id()
     );
   }
-  let Some(session) = store.read(|tx| session::latest_named(tx, implementer))? else {
+  let Some(session) = store.read(|tx| run.session_named(tx, implementer))? else {
     bail!("supervisor: no session {implementer}; launch it first");
   };
   if !session.can_take_task() {
@@ -284,11 +284,11 @@ fn abort_task(run: &Run, store: &Store, task_id: i64, reason: &str) -> Result<(i
     Ok(())
   })?;
   if let Some(session_id) = task.session_id()
-    && let Some(session) = store.read(|tx| session::get(tx, session_id))?
+    && let Some(session) = store.read(|tx| run.session(tx, session_id))?
     && session.is_live()
   {
     let detail = format!("task {task_id} -> {}", session.name());
-    let outcome = run.runtime().interrupt(session.name()).and_then(|()| {
+    let outcome = session.interrupt().and_then(|()| {
       daemon_prompt(
         run,
         store,

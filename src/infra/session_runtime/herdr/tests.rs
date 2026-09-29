@@ -333,21 +333,19 @@ mod start {
   }
 }
 
-mod query {
+mod status {
   use super::*;
 
   #[test]
   fn should_work() {
     let herdr = FakeHerdr::new();
 
-    let session = herdr
+    let status = herdr
       .runtime(Some("workspace-1"), "")
-      .query("worker")
-      .unwrap()
+      .status("worker")
       .unwrap();
 
-    assert_eq!(session.external_id, "sess-1");
-    assert_eq!(session.status, SessionStatus::Busy);
+    assert_eq!(status, Some(SessionStatus::Busy));
     assert_eq!(herdr.calls()[0], ["agent", "get", "worker"]);
   }
 
@@ -355,24 +353,24 @@ mod query {
   fn should_report_nothing_when_herdr_does_not_know_the_agent() {
     let herdr = FakeHerdr::new();
 
-    let session = herdr
+    let status = herdr
       .runtime(Some("workspace-1"), "")
-      .query("missing")
+      .status("missing")
       .unwrap();
 
-    assert!(session.is_none());
+    assert_eq!(status, None);
   }
 
   #[test]
   fn should_report_nothing_when_herdr_answers_with_invalid_json() {
     let herdr = FakeHerdr::new();
 
-    let session = herdr
+    let status = herdr
       .runtime(Some("workspace-1"), "")
-      .query("malformed")
+      .status("malformed")
       .unwrap();
 
-    assert!(session.is_none());
+    assert_eq!(status, None);
   }
 }
 

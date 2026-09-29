@@ -37,7 +37,7 @@ pub(super) fn cmd_calibrate(run: &Run, store: &Store, task_id: i64) -> Result<()
   let wall = dispatched_at
     .zip(committed_at)
     .map(|(start, end)| (end - start) as f64 / 1000.0);
-  let session = task_session(store, &task)?;
+  let session = task_session(run, store, &task)?;
   let next_offset = match task.session_id() {
     Some(session_id) => store
       .read(|tx| task::tasks_for_session(tx, session_id))?

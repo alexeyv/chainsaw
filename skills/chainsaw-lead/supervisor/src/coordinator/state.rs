@@ -10,7 +10,7 @@ use super::{last_event_at, session_name, session_transcript};
 use crate::cli::HumanWaitAction;
 use crate::domain::{Role, RunEventKind, TaskState};
 use crate::persistence::store::Store;
-use crate::persistence::{human_wait, run as run_record, run_event, session, task};
+use crate::persistence::{human_wait, run as run_record, run_event, task};
 use crate::run::Run;
 
 /// An implementer past this much context is flagged in the report.
@@ -55,12 +55,12 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
       "  {:>3} {:<10} {:<16} {:<10} {timeline}{retry}{reason}",
       task.id(),
       task.state(),
-      session_name(store, task.session_id())?,
+      session_name(run, store, task.session_id())?,
       task.commit_sha().map(short_sha).unwrap_or("-")
     );
   }
   println!("sessions");
-  for session in store.read(session::all)? {
+  for session in store.read(|tx| run.sessions(tx))? {
     let mut flags = String::new();
     let implementer = session.role() == Role::Implementer;
     if implementer && session.context().exceeds(IMPLEMENTER_LIMIT_TOKENS) {

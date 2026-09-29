@@ -11,17 +11,21 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 
 use super::cmd_prompt;
+use crate::domain::StartSession;
 use crate::domain::{RunEventKind, Session, SessionKind, Task};
 use crate::infra::agent;
-use crate::infra::session_runtime::StartSession;
 use crate::infra::transcript_monitor::TranscriptMonitor;
 use crate::persistence::store::Store;
 use crate::persistence::{run_event, session};
 use crate::run::Run;
 
-pub(super) fn task_session(store: &Store, task: &Task) -> Result<Option<Session>> {
+pub(super) fn task_session<'r>(
+  run: &'r Run,
+  store: &Store,
+  task: &Task,
+) -> Result<Option<Session<'r>>> {
   Ok(match task.session_id() {
-    Some(session_id) => store.read(|tx| session::get(tx, session_id))?,
+    Some(session_id) => store.read(|tx| run.session(tx, session_id))?,
     None => None,
   })
 }
@@ -48,15 +52,15 @@ pub(super) fn session_transcript(
   }
   let found = agent::for_session(session).transcript(run.dir(), session.external_session_id());
   if let Some(path) = &found {
-    store.write(|tx| session::record_transcript(tx, session.id(), path))?;
+    store.write(|tx| run.record_session_transcript(tx, session.id(), path))?;
   }
   Ok(found)
 }
 
-pub(super) fn session_name(store: &Store, id: Option<i64>) -> Result<String> {
+pub(super) fn session_name(run: &Run, store: &Store, id: Option<i64>) -> Result<String> {
   Ok(match id {
     Some(id) => store
-      .read(|tx| session::get(tx, id))?
+      .read(|tx| run.session(tx, id))?
       .map_or_else(|| "-".to_owned(), |session| session.name().to_owned()),
     None => "-".to_owned(),
   })
@@ -77,7 +81,7 @@ pub(super) fn cmd_launch(run: &Run, store: &Store, name: &str, kind: SessionKind
   let launched_head = run.repo().head().ok();
   store.write(|tx| {
     session::stop_named(tx, name)?;
-    session::create(
+    run.register_session(
       tx,
       name,
       kind.role(),
@@ -154,7 +158,7 @@ pub(super) fn cmd_watch_transcripts(run: &Run, store: &Store, interval_ms: u64) 
 fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
   for session in store
-    .read(session::all)?
+    .read(|tx| run.sessions(tx))?
     .into_iter()
     .filter(Session::can_take_task)
   {
@@ -167,7 +171,7 @@ fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, Path
 
 pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Result<()> {
   for session in store
-    .read(session::all)?
+    .read(|tx| run.sessions(tx))?
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {

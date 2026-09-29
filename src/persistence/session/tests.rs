@@ -9,14 +9,19 @@ use super::{
   record_transcript, stop_named,
 };
 use crate::domain::test_helpers::{
-  format_session, format_sessions, format_time, timestamp, within,
+  format_session, format_sessions, format_time, runtime, timestamp, within,
 };
 use crate::domain::{AgentKind, ContextSize, Role, Session};
 use crate::persistence::test_fixture::database;
 
-fn implementer(transaction: &Transaction<'_>, name: &str, external: &str) -> Result<Session> {
+fn implementer(
+  transaction: &Transaction<'_>,
+  name: &str,
+  external: &str,
+) -> Result<Session<'static>> {
   create(
     transaction,
+    runtime(),
     name,
     Role::Implementer,
     AgentKind::Claude,
@@ -111,6 +116,7 @@ can_latch_over_limit: true"#,
     let transaction = db.transaction()?;
     let session = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
@@ -150,7 +156,7 @@ mod get {
     let transaction = db.transaction()?;
     let created = implementer(&transaction, "implementer-1", "uuid-1")?;
 
-    let found = get(&transaction, created.id())?;
+    let found = get(&transaction, runtime(), created.id())?;
 
     assert_eq!(found, Some(created));
     Ok(())
@@ -161,7 +167,7 @@ mod get {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    assert_eq!(get(&transaction, 42)?, None);
+    assert_eq!(get(&transaction, runtime(), 42)?, None);
     Ok(())
   }
 
@@ -177,7 +183,7 @@ mod get {
     )?;
     let transaction = db.transaction()?;
 
-    let error = get(&transaction, 1).unwrap_err();
+    let error = get(&transaction, runtime(), 1).unwrap_err();
 
     assert_eq!(
       error.to_string(),
@@ -198,7 +204,7 @@ mod get {
     )?;
     let transaction = db.transaction()?;
 
-    let error = get(&transaction, 1).unwrap_err();
+    let error = get(&transaction, runtime(), 1).unwrap_err();
 
     assert_eq!(
       error.to_string(),
@@ -220,7 +226,7 @@ mod latest_named {
     let relaunched = implementer(&transaction, "implementer-1", "uuid-2")?;
     implementer(&transaction, "implementer-2", "uuid-3")?;
 
-    let found = latest_named(&transaction, "implementer-1")?;
+    let found = latest_named(&transaction, runtime(), "implementer-1")?;
 
     assert_eq!(found, Some(relaunched));
     Ok(())
@@ -232,7 +238,10 @@ mod latest_named {
     let transaction = db.transaction()?;
     implementer(&transaction, "implementer-1", "uuid-1")?;
 
-    assert_eq!(latest_named(&transaction, "implementer-2")?, None);
+    assert_eq!(
+      latest_named(&transaction, runtime(), "implementer-2")?,
+      None
+    );
     Ok(())
   }
 }
@@ -246,6 +255,7 @@ mod all {
     let transaction = db.transaction()?;
     let lead = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
@@ -256,9 +266,9 @@ mod all {
     stop_named(&transaction, "implementer-1")?;
     let second = implementer(&transaction, "implementer-1", "uuid-2")?;
 
-    let sessions = all(&transaction)?;
+    let sessions = all(&transaction, runtime())?;
 
-    let stopped = get(&transaction, first.id())?.unwrap();
+    let stopped = get(&transaction, runtime(), first.id())?.unwrap();
     assert_eq!(
       format_sessions(&sessions),
       format_sessions(&[lead, stopped, second])
@@ -271,7 +281,7 @@ mod all {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    assert_eq!(all(&transaction)?, Vec::new());
+    assert_eq!(all(&transaction, runtime())?, Vec::new());
     Ok(())
   }
 }
@@ -290,12 +300,12 @@ mod stop_named {
     let stopped = stop_named(&transaction, "implementer-1")?;
     let after = Utc::now();
 
-    let session = get(&transaction, session.id())?.unwrap();
+    let session = get(&transaction, runtime(), session.id())?.unwrap();
     let stopped_at = session.stopped_at().unwrap();
     assert_eq!(stopped, 1);
     assert!(within(stopped_at, before, after));
     assert!(!session.is_live());
-    assert_eq!(get(&transaction, other.id())?, Some(other));
+    assert_eq!(get(&transaction, runtime(), other.id())?, Some(other));
     Ok(())
   }
 
@@ -305,12 +315,15 @@ mod stop_named {
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     stop_named(&transaction, "implementer-1")?;
-    let first_stop = get(&transaction, session.id())?.unwrap();
+    let first_stop = get(&transaction, runtime(), session.id())?.unwrap();
 
     let stopped = stop_named(&transaction, "implementer-1")?;
 
     assert_eq!(stopped, 0);
-    assert_eq!(get(&transaction, session.id())?, Some(first_stop));
+    assert_eq!(
+      get(&transaction, runtime(), session.id())?,
+      Some(first_stop)
+    );
     Ok(())
   }
 
@@ -322,7 +335,7 @@ mod stop_named {
 
     assert_eq!(stop_named(&transaction, "implementer-2")?, 0);
     assert!(
-      latest_named(&transaction, "implementer-1")?
+      latest_named(&transaction, runtime(), "implementer-1")?
         .unwrap()
         .is_live()
     );
@@ -340,10 +353,10 @@ mod record_transcript {
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let path = Path::new("/home/alex/.claude/projects/-run/uuid-1.jsonl");
 
-    let found = record_transcript(&transaction, session.id(), path)?;
+    let found = record_transcript(&transaction, runtime(), session.id(), path)?;
 
     assert_eq!(found.transcript(), Some(path));
-    assert_eq!(get(&transaction, session.id())?, Some(found));
+    assert_eq!(get(&transaction, runtime(), session.id())?, Some(found));
     Ok(())
   }
 
@@ -352,7 +365,8 @@ mod record_transcript {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error = record_transcript(&transaction, 42, Path::new("/nowhere.jsonl")).unwrap_err();
+    let error =
+      record_transcript(&transaction, runtime(), 42, Path::new("/nowhere.jsonl")).unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())
@@ -372,6 +386,7 @@ mod record_reading {
 
     let read = record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(4_000),
       true,
@@ -414,15 +429,17 @@ can_latch_over_limit: true"#,
     let grown = session.started_at() + chrono::Duration::seconds(30);
     record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(4_000),
       true,
       grown,
     )?;
-    let kicked = record_kick(&transaction, session.id())?;
+    let kicked = record_kick(&transaction, runtime(), session.id())?;
 
     let read = record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(4_000),
       false,
@@ -440,11 +457,12 @@ can_latch_over_limit: true"#,
     let mut db = database();
     let transaction = db.transaction()?;
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
-    record_kick(&transaction, session.id())?;
+    record_kick(&transaction, runtime(), session.id())?;
     let grown = session.started_at() + chrono::Duration::seconds(900);
 
     let read = record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(100),
       true,
@@ -465,6 +483,7 @@ can_latch_over_limit: true"#,
     let at = session.started_at() + chrono::Duration::seconds(30);
     record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(9_000),
       true,
@@ -473,6 +492,7 @@ can_latch_over_limit: true"#,
 
     let read = record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(2_000),
       true,
@@ -491,7 +511,14 @@ can_latch_over_limit: true"#,
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
     let at = session.started_at() + chrono::Duration::seconds(30);
 
-    let read = record_reading(&transaction, session.id(), ContextSize::UNKNOWN, true, at)?;
+    let read = record_reading(
+      &transaction,
+      runtime(),
+      session.id(),
+      ContextSize::UNKNOWN,
+      true,
+      at,
+    )?;
 
     assert_eq!(read.context(), ContextSize::UNKNOWN);
     assert_eq!(read.context_max(), ContextSize::UNKNOWN);
@@ -507,13 +534,21 @@ can_latch_over_limit: true"#,
     let at = session.started_at() + chrono::Duration::seconds(30);
     record_reading(
       &transaction,
+      runtime(),
       session.id(),
       ContextSize::tokens(9_000),
       true,
       at,
     )?;
 
-    let read = record_reading(&transaction, session.id(), ContextSize::UNKNOWN, true, at)?;
+    let read = record_reading(
+      &transaction,
+      runtime(),
+      session.id(),
+      ContextSize::UNKNOWN,
+      true,
+      at,
+    )?;
 
     assert_eq!(read.context(), ContextSize::UNKNOWN);
     assert_eq!(read.context_max(), ContextSize::tokens(9_000));
@@ -527,6 +562,7 @@ can_latch_over_limit: true"#,
 
     let error = record_reading(
       &transaction,
+      runtime(),
       42,
       ContextSize::tokens(1),
       true,
@@ -549,7 +585,7 @@ mod record_kick {
     let session = implementer(&transaction, "implementer-1", "uuid-1")?;
 
     let before = Utc::now();
-    let kicked = record_kick(&transaction, session.id())?;
+    let kicked = record_kick(&transaction, runtime(), session.id())?;
     let after = Utc::now();
 
     let kicked_at = kicked.kicked_at().unwrap();
@@ -563,7 +599,7 @@ mod record_kick {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error = record_kick(&transaction, 42).unwrap_err();
+    let error = record_kick(&transaction, runtime(), 42).unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())
@@ -579,6 +615,7 @@ mod record_over_limit {
     let transaction = db.transaction()?;
     let lead = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
@@ -587,7 +624,7 @@ mod record_over_limit {
     )?;
 
     let before = Utc::now();
-    let latched = record_over_limit(&transaction, lead.id())?;
+    let latched = record_over_limit(&transaction, runtime(), lead.id())?;
     let after = Utc::now();
 
     let over_limit_at = latched.over_limit_at().unwrap();
@@ -604,17 +641,19 @@ mod record_over_limit {
     let transaction = db.transaction()?;
     let lead = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
       "uuid-lead",
       None,
     )?;
-    let latched = record_over_limit(&transaction, lead.id())?;
+    let latched = record_over_limit(&transaction, runtime(), lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
 
     let read = record_reading(
       &transaction,
+      runtime(),
       lead.id(),
       ContextSize::tokens(260_000),
       true,
@@ -632,17 +671,19 @@ mod record_over_limit {
     let transaction = db.transaction()?;
     let first = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
       "uuid-lead-1",
       None,
     )?;
-    record_over_limit(&transaction, first.id())?;
+    record_over_limit(&transaction, runtime(), first.id())?;
     stop_named(&transaction, "lead")?;
 
     let second = create(
       &transaction,
+      runtime(),
       "lead",
       Role::Lead,
       AgentKind::Claude,
@@ -653,7 +694,7 @@ mod record_over_limit {
     assert_eq!(second.over_limit_at(), None);
     assert!(second.can_latch_over_limit());
     assert!(
-      !get(&transaction, first.id())?
+      !get(&transaction, runtime(), first.id())?
         .unwrap()
         .can_latch_over_limit()
     );
@@ -665,7 +706,7 @@ mod record_over_limit {
     let mut db = database();
     let transaction = db.transaction()?;
 
-    let error = record_over_limit(&transaction, 42).unwrap_err();
+    let error = record_over_limit(&transaction, runtime(), 42).unwrap_err();
 
     assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())

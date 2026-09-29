@@ -1,11 +1,15 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
-use super::{ContextSize, require_nonblank, require_optional_nonblank, require_positive};
+use super::{
+  ContextSize, SessionRuntime, SessionStatus, require_nonblank, require_optional_nonblank,
+  require_positive,
+};
 
 /// What a session is for. The lead runs the process, implementers take tasks,
 /// and the commentator reviews commits; only implementers are ever dispatched to.
@@ -108,8 +112,10 @@ impl fmt::Display for AgentKind {
 
 /// One agent session under the supervisor's watch. A row is one
 /// incarnation: relaunching the same name stops this one and starts another.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Session {
+/// It drives itself through the run's runtime, which it borrows.
+#[derive(Clone)]
+pub struct Session<'r> {
+  runtime: &'r dyn SessionRuntime,
   id: i64,
   name: String,
   role: Role,
@@ -126,9 +132,10 @@ pub struct Session {
   transcript: Option<PathBuf>,
 }
 
-impl Session {
+impl<'r> Session<'r> {
   #[allow(clippy::too_many_arguments)]
   pub fn new(
+    runtime: &'r dyn SessionRuntime,
     id: i64,
     name: String,
     role: Role,
@@ -173,6 +180,7 @@ impl Session {
     }
 
     Ok(Self {
+      runtime,
       id,
       name,
       role,
@@ -188,6 +196,25 @@ impl Session {
       over_limit_at,
       transcript,
     })
+  }
+
+  /// What the runtime says the session is doing, or None when it has no such
+  /// session or cannot be reached.
+  pub fn status(&self) -> Option<SessionStatus> {
+    self.runtime.status(&self.name).ok().flatten()
+  }
+
+  pub fn prompt(&self, text: &str) -> Result<()> {
+    self.runtime.prompt(&self.name, text)
+  }
+
+  pub fn interrupt(&self) -> Result<()> {
+    self.runtime.interrupt(&self.name)
+  }
+
+  /// Waits for the session's current turn to end, up to `timeout`.
+  pub fn wait(&self, timeout: Duration) -> Result<()> {
+    self.runtime.wait(&self.name, timeout)
   }
 
   pub fn id(&self) -> i64 {
@@ -279,6 +306,49 @@ impl Session {
   /// lead can cross it again.
   pub fn can_latch_over_limit(&self) -> bool {
     self.is_live() && self.over_limit_at.is_none()
+  }
+}
+
+/// Two sessions are the same session when their records agree; the runtime
+/// they borrow is the run's, not theirs.
+impl PartialEq for Session<'_> {
+  fn eq(&self, other: &Self) -> bool {
+    self.id == other.id
+      && self.name == other.name
+      && self.role == other.role
+      && self.agent == other.agent
+      && self.external_session_id == other.external_session_id
+      && self.launched_head == other.launched_head
+      && self.started_at == other.started_at
+      && self.stopped_at == other.stopped_at
+      && self.context == other.context
+      && self.context_max == other.context_max
+      && self.last_growth == other.last_growth
+      && self.kicked_at == other.kicked_at
+      && self.over_limit_at == other.over_limit_at
+      && self.transcript == other.transcript
+  }
+}
+
+impl fmt::Debug for Session<'_> {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("Session")
+      .field("id", &self.id)
+      .field("name", &self.name)
+      .field("role", &self.role)
+      .field("agent", &self.agent)
+      .field("external_session_id", &self.external_session_id)
+      .field("launched_head", &self.launched_head)
+      .field("started_at", &self.started_at)
+      .field("stopped_at", &self.stopped_at)
+      .field("context", &self.context)
+      .field("context_max", &self.context_max)
+      .field("last_growth", &self.last_growth)
+      .field("kicked_at", &self.kicked_at)
+      .field("over_limit_at", &self.over_limit_at)
+      .field("transcript", &self.transcript)
+      .finish()
   }
 }
 

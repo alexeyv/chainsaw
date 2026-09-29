@@ -389,21 +389,19 @@ mod start {
   }
 }
 
-mod query {
+mod status {
   use super::*;
 
   #[test]
   fn should_work() {
     let orca = FakeOrca::new();
 
-    let session = orca
+    let status = orca
       .registered("worker", "term-7")
-      .query("worker")
-      .unwrap()
+      .status("worker")
       .unwrap();
 
-    assert_eq!(session.external_id, "sess-1");
-    assert_eq!(session.status, SessionStatus::Idle);
+    assert_eq!(status, Some(SessionStatus::Idle));
     assert_eq!(
       orca.calls(),
       [[
@@ -424,35 +422,33 @@ mod query {
   fn should_report_busy_when_the_agent_is_mid_turn() {
     let orca = FakeOrca::new();
 
-    let session = orca
+    let status = orca
       .registered("worker", "term-busy")
-      .query("worker")
-      .unwrap()
+      .status("worker")
       .unwrap();
 
-    assert_eq!(session.status, SessionStatus::Busy);
+    assert_eq!(status, Some(SessionStatus::Busy));
   }
 
   #[test]
   fn should_report_busy_when_the_wait_ends_unsatisfied() {
     let orca = FakeOrca::new();
 
-    let session = orca
+    let status = orca
       .registered("worker", "term-unsettled")
-      .query("worker")
-      .unwrap()
+      .status("worker")
       .unwrap();
 
-    assert_eq!(session.status, SessionStatus::Busy);
+    assert_eq!(status, Some(SessionStatus::Busy));
   }
 
   #[test]
   fn should_report_nothing_for_a_session_never_started() {
     let orca = FakeOrca::new();
 
-    let session = orca.runtime().query("worker").unwrap();
+    let status = orca.runtime().status("worker").unwrap();
 
-    assert!(session.is_none());
+    assert_eq!(status, None);
     assert!(orca.calls().is_empty());
   }
 
@@ -460,12 +456,12 @@ mod query {
   fn should_report_nothing_when_orca_no_longer_has_the_terminal() {
     let orca = FakeOrca::new();
 
-    let session = orca
+    let status = orca
       .registered("worker", "term-gone")
-      .query("worker")
+      .status("worker")
       .unwrap();
 
-    assert!(session.is_none());
+    assert_eq!(status, None);
   }
 }
 

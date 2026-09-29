@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use super::{SessionQuery, SessionRuntime, SessionStatus, StartSession, StartedSession};
-use crate::domain::{AgentKind, SessionKind};
+use crate::domain::{
+  AgentKind, SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession,
+};
 
 /// Drives sessions through the `herdr` CLI. The pane the supervisor itself runs in
 /// is ambient, so it is read once here rather than rediscovered inside `start`.
@@ -156,15 +157,15 @@ impl SessionRuntime for HerdrSessionRuntime {
     })
   }
 
-  fn query(&self, session_id: &str) -> Result<Option<SessionQuery>> {
+  fn status(&self, session_id: &str) -> Result<Option<SessionStatus>> {
     let response = match self.request(&["agent", "get", session_id]) {
       Ok(response) => response,
       Err(_) => return Ok(None),
     };
-    Ok(Some(SessionQuery {
-      external_id: Self::json_string(&response, "/result/agent/agent_session/value")?,
-      status: status_named(&Self::json_string(&response, "/result/agent/status")?),
-    }))
+    Ok(Some(status_named(&Self::json_string(
+      &response,
+      "/result/agent/status",
+    )?)))
   }
 
   fn prompt(&self, session_id: &str, text: &str) -> Result<()> {

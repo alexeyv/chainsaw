@@ -19,8 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{SessionQuery, SessionRuntime, SessionStatus, StartSession, StartedSession};
-use crate::domain::SessionKind;
+use crate::domain::{SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession};
 use crate::infra::agent::{self, Agent, Claude};
 
 /// The registry's name, beside the run's database.
@@ -286,19 +285,15 @@ impl SessionRuntime for OrcaSessionRuntime {
     })
   }
 
-  fn query(&self, session_id: &str) -> Result<Option<SessionQuery>> {
+  fn status(&self, session_id: &str) -> Result<Option<SessionStatus>> {
     let Ok(terminal) = self.terminal_of(session_id) else {
       return Ok(None);
     };
-    let status = match self.activity(&terminal.handle) {
-      Activity::Idle => SessionStatus::Idle,
-      Activity::Busy => SessionStatus::Busy,
-      Activity::Gone => return Ok(None),
-    };
-    Ok(Some(SessionQuery {
-      external_id: terminal.external_id,
-      status,
-    }))
+    Ok(match self.activity(&terminal.handle) {
+      Activity::Idle => Some(SessionStatus::Idle),
+      Activity::Busy => Some(SessionStatus::Busy),
+      Activity::Gone => None,
+    })
   }
 
   fn prompt(&self, session_id: &str, text: &str) -> Result<()> {

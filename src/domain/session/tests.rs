@@ -1,7 +1,8 @@
 use crate::domain::test_helpers::{
-  SessionSpec, build_session, format_session, launched_implementer, timestamp, working_implementer,
+  FakeSessionRuntime, SessionSpec, build_session, build_session_on, format_session,
+  launched_implementer, timestamp, working_implementer,
 };
-use crate::domain::{AgentKind, ContextSize, Role};
+use crate::domain::{AgentKind, ContextSize, Role, SessionStatus};
 
 mod role_try_from {
   use super::*;
@@ -330,6 +331,43 @@ can_latch_over_limit: false"#
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "over_limit_at cannot precede started_at");
+  }
+}
+
+mod status {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let runtime = FakeSessionRuntime {
+      status: Some(SessionStatus::Busy),
+      reachable: true,
+    };
+    let session = build_session_on(launched_implementer(), &runtime).unwrap();
+
+    assert_eq!(session.status(), Some(SessionStatus::Busy));
+  }
+
+  #[test]
+  fn should_be_none_when_the_runtime_has_no_such_session() {
+    let runtime = FakeSessionRuntime {
+      status: None,
+      reachable: true,
+    };
+    let session = build_session_on(launched_implementer(), &runtime).unwrap();
+
+    assert_eq!(session.status(), None);
+  }
+
+  #[test]
+  fn should_be_none_when_the_runtime_cannot_be_reached() {
+    let runtime = FakeSessionRuntime {
+      status: Some(SessionStatus::Idle),
+      reachable: false,
+    };
+    let session = build_session_on(launched_implementer(), &runtime).unwrap();
+
+    assert_eq!(session.status(), None);
   }
 }
 

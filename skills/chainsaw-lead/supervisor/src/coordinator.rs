@@ -6,7 +6,7 @@ use chrono::Utc;
 use crate::cli::{Command, TaskCommand};
 use crate::domain::{Role, RunEventKind, SessionKind, Task, TaskEvent, TaskState};
 use crate::persistence::store::Store;
-use crate::persistence::{run as run_record, run_event, session, task};
+use crate::persistence::{run as run_record, run_event, task};
 use crate::run::Run;
 
 mod accept;
@@ -20,7 +20,7 @@ mod tasks;
 
 use accept::{cmd_accept, cmd_task_record_commentary, cmd_task_record_commit};
 use calibrate::cmd_calibrate;
-use prompt::{cmd_prompt, daemon_prompt, status_of};
+use prompt::{cmd_prompt, daemon_prompt};
 use review::{cmd_finding, cmd_observe, cmd_poll, cmd_resolutions, cmd_resolve};
 use sessions::{
   cmd_context, cmd_launch, cmd_start_commentator, cmd_watch_transcripts, session_name,
@@ -45,7 +45,7 @@ pub fn execute(run: &Run, store: &Store, command: Command) -> Result<()> {
   let lead_facing = is_lead_facing(&command);
   dispatch(run, store, command)?;
   if lead_facing {
-    for warning in standing_warnings(store)? {
+    for warning in standing_warnings(run, store)? {
       eprintln!("WARNING: {warning}");
     }
   }
@@ -68,12 +68,12 @@ fn is_lead_facing(command: &Command) -> bool {
 /// Facts the lead must act on, printed after every lead-facing command so
 /// they do not depend on the lead remembering the skill. Each one is measured
 /// from the store, never inferred from what the lead said.
-fn standing_warnings(store: &Store) -> Result<Vec<String>> {
+fn standing_warnings(run: &Run, store: &Store) -> Result<Vec<String>> {
   let mut warnings = Vec::new();
   let at = Utc::now();
   let timestamp = at.timestamp_millis();
   if let Some(lead) = store
-    .read(session::all)?
+    .read(|tx| run.sessions(tx))?
     .into_iter()
     .find(|session| session.role() == Role::Lead && session.is_live())
   {

@@ -7,6 +7,7 @@ mod prompt;
 mod run;
 mod run_event;
 mod session;
+mod session_runtime;
 mod task;
 mod task_event;
 
@@ -24,6 +25,7 @@ pub use prompt::Prompt;
 pub use run::Run;
 pub use run_event::{RunEvent, RunEventKind};
 pub use session::{AgentKind, Role, Session, SessionKind};
+pub use session_runtime::{SessionRuntime, SessionStatus, StartSession, StartedSession};
 pub use task::{Task, TaskState};
 pub use task_event::TaskEvent;
 

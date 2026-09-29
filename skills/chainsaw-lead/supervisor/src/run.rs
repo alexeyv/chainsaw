@@ -2,15 +2,21 @@
 //! its sessions live in, and its settings. `Run` carries no behavior of its
 //! own yet; commands are functions over it.
 
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rusqlite::Transaction;
 
+use chrono::{DateTime, Utc};
+
+use crate::domain::{AgentKind, ContextSize, Role, Session, SessionRuntime};
 use crate::infra::agent::Claude;
 use crate::infra::git::Repo;
-use crate::infra::session_runtime::{self, SessionRuntime};
+use crate::infra::session_runtime::{HerdrSessionRuntime, OrcaSessionRuntime};
 use crate::infra::settings::Settings;
+use crate::persistence::session;
 use crate::persistence::store::DATABASE_FILE_NAME;
 
 pub struct Run {
@@ -26,7 +32,7 @@ impl Run {
   /// Opens the run rooted at `run_dir`, with `overrides` applied over its
   /// settings files as `--set KEY=VALUE` pairs.
   pub fn open(run_dir: &Path, overrides: &[String]) -> Result<Self> {
-    let runtime = session_runtime::from_environment(run_dir)?;
+    let runtime = runtime_from_environment(run_dir)?;
     let settings = Settings::load(run_dir, overrides)?;
     let dir = run_dir
       .canonicalize()
@@ -75,4 +81,101 @@ impl Run {
   pub fn settings(&self) -> &Settings {
     &self.settings
   }
+
+  // Every session is built here, so every session drives itself through
+  // this run's runtime.
+
+  pub fn sessions(&self, transaction: &Transaction<'_>) -> Result<Vec<Session<'_>>> {
+    session::all(transaction, self.runtime())
+  }
+
+  pub fn session(&self, transaction: &Transaction<'_>, id: i64) -> Result<Option<Session<'_>>> {
+    session::get(transaction, self.runtime(), id)
+  }
+
+  /// The newest incarnation of the session called `name`, live or not.
+  pub fn session_named(
+    &self,
+    transaction: &Transaction<'_>,
+    name: &str,
+  ) -> Result<Option<Session<'_>>> {
+    session::latest_named(transaction, self.runtime(), name)
+  }
+
+  /// Registers a session its runtime has just started.
+  pub fn register_session(
+    &self,
+    transaction: &Transaction<'_>,
+    name: &str,
+    role: Role,
+    agent: AgentKind,
+    external_session_id: &str,
+    launched_head: Option<&str>,
+  ) -> Result<Session<'_>> {
+    session::create(
+      transaction,
+      self.runtime(),
+      name,
+      role,
+      agent,
+      external_session_id,
+      launched_head,
+    )
+  }
+
+  pub fn record_session_transcript(
+    &self,
+    transaction: &Transaction<'_>,
+    id: i64,
+    path: &Path,
+  ) -> Result<Session<'_>> {
+    session::record_transcript(transaction, self.runtime(), id, path)
+  }
+
+  pub fn record_session_reading(
+    &self,
+    transaction: &Transaction<'_>,
+    id: i64,
+    context: ContextSize,
+    grew: bool,
+    at: DateTime<Utc>,
+  ) -> Result<Session<'_>> {
+    session::record_reading(transaction, self.runtime(), id, context, grew, at)
+  }
+
+  pub fn record_session_kick(&self, transaction: &Transaction<'_>, id: i64) -> Result<Session<'_>> {
+    session::record_kick(transaction, self.runtime(), id)
+  }
+
+  pub fn record_session_over_limit(
+    &self,
+    transaction: &Transaction<'_>,
+    id: i64,
+  ) -> Result<Session<'_>> {
+    session::record_over_limit(transaction, self.runtime(), id)
+  }
 }
+
+/// The runtime the supervisor was started under: Herdr inside a Herdr pane,
+/// Orca inside an Orca terminal. A Herdr pane opened from an Orca terminal
+/// sees both and is a Herdr pane. Outside both, Herdr, which then refuses to
+/// start a session. The tests put a `herdr` of their own on PATH.
+fn runtime_from_environment(run_dir: &Path) -> Result<Box<dyn SessionRuntime>> {
+  Ok(
+    match runtime_named_by(
+      env::var_os("HERDR_WORKSPACE_ID").is_some(),
+      env::var("ORCA_TERMINAL_HANDLE").ok(),
+    ) {
+      Some(terminal) => Box::new(OrcaSessionRuntime::from_environment(run_dir, terminal)?),
+      None => Box::new(HerdrSessionRuntime::from_environment()),
+    },
+  )
+}
+
+/// The Orca terminal to drive sessions from, or None for Herdr.
+fn runtime_named_by(inside_herdr: bool, orca_terminal: Option<String>) -> Option<String> {
+  orca_terminal.filter(|_| !inside_herdr)
+}
+
+#[cfg(test)]
+mod tests;

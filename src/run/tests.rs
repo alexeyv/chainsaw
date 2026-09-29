@@ -1,4 +1,4 @@
-use super::*;
+use super::runtime_named_by;
 
 mod runtime_named_by {
   use super::*;

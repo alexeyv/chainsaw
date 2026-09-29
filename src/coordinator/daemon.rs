@@ -12,11 +12,13 @@ use anyhow::Result;
 use chrono::Utc;
 
 use super::{
-  LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event, session_transcript, status_of,
+  LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event, session_transcript,
 };
-use crate::domain::{AgentKind, ContextSize, Role, RunEventKind, Session, Task, TaskState};
+use crate::domain::{
+  AgentKind, ContextSize, Role, RunEventKind, Session, SessionStatus, Task, TaskState,
+};
 use crate::infra::agent;
-use crate::infra::session_runtime::SessionStatus;
+
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
 use crate::persistence::{run as run_record, run_event, session, task};
@@ -35,7 +37,7 @@ pub(super) fn start(
   lead_session_id: &str,
   poll_interval: Duration,
 ) -> Result<()> {
-  register_lead(store, lead, lead_session_id)?;
+  register_lead(run, store, lead, lead_session_id)?;
   store.write(|tx| {
     run_record::clear_stop_request(tx)?;
     run_event::create(
@@ -62,7 +64,7 @@ pub(super) fn start(
     }
     let timestamp = Utc::now();
     for session in store
-      .read(session::all)?
+      .read(|tx| run.sessions(tx))?
       .into_iter()
       .filter(Session::is_live)
     {
@@ -95,7 +97,7 @@ pub(super) fn start(
       let context = agent::for_session(&session).context_size(&transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
-      store.write(|tx| session::record_reading(tx, session.id(), context, grew, timestamp))?;
+      store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
       let quiet = session.quiet_seconds(timestamp) as f64;
 
       match session.role() {
@@ -115,7 +117,7 @@ pub(super) fn start(
             &mut compacting,
           )?;
         }
-        Role::Lead => observe_lead(store, &session, context)?,
+        Role::Lead => observe_lead(run, store, &session, context)?,
       }
     }
     thread::sleep(poll_interval);
@@ -131,16 +133,16 @@ pub(super) fn start(
 /// it from what the lead says about itself. The same session id keeps its row
 /// across daemon restarts; a different one is a new incarnation and stops the
 /// old row.
-fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
+fn register_lead(run: &Run, store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
   store.write(|tx| {
-    let current = session::latest_named(tx, lead)?;
+    let current = run.session_named(tx, lead)?;
     if !current.is_some_and(|session| {
       session.is_live()
         && session.role() == Role::Lead
         && session.external_session_id() == lead_session_id
     }) {
       session::stop_named(tx, lead)?;
-      session::create(
+      run.register_session(
         tx,
         lead,
         Role::Lead,
@@ -159,11 +161,11 @@ fn register_lead(store: &Store, lead: &str, lead_session_id: &str) -> Result<()>
 fn kick_if_stalled(run: &Run, store: &Store, session: &Session, quiet: f64) -> Result<()> {
   if quiet > STALE_SECONDS
     && session.can_be_kicked()
-    && status_of(run.runtime(), session.name()) == Some(SessionStatus::Idle)
+    && session.status() == Some(SessionStatus::Idle)
     && daemon_prompt(run, store, session.name(), "continue")
   {
     store.write(|tx| {
-      session::record_kick(tx, session.id())?;
+      run.record_session_kick(tx, session.id())?;
       run_event::create(tx, RunEventKind::Kick, session.name())?;
       Ok(())
     })?;
@@ -295,10 +297,10 @@ fn observe_commentator(
 /// is pushed at the lead: an unsolicited prompt mid-thought is a context switch
 /// it did not choose. The warning printed after every lead-facing command
 /// carries the same fact at the moment the lead is already reading output.
-fn observe_lead(store: &Store, session: &Session, context: ContextSize) -> Result<()> {
+fn observe_lead(run: &Run, store: &Store, session: &Session, context: ContextSize) -> Result<()> {
   if context.exceeds(LEAD_STOP_TOKENS) && session.can_latch_over_limit() {
     store.write(|tx| {
-      session::record_over_limit(tx, session.id())?;
+      run.record_session_over_limit(tx, session.id())?;
       run_event::create(tx, RunEventKind::StopLead, &format!("context {context}"))?;
       Ok(())
     })?;

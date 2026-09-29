@@ -1,13 +1,66 @@
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
   AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Observation, Prompt,
-  Role, Run, RunEvent, RunEventKind, Session, Task, TaskEvent, TaskState,
+  Role, Run, RunEvent, RunEventKind, Session, SessionRuntime, SessionStatus, StartSession,
+  StartedSession, Task, TaskEvent, TaskState,
 };
+
+/// A runtime that answers every status query the same way and accepts every
+/// prompt, interrupt and wait, or refuses everything when unreachable.
+pub struct FakeSessionRuntime {
+  pub status: Option<SessionStatus>,
+  pub reachable: bool,
+}
+
+impl SessionRuntime for FakeSessionRuntime {
+  fn start(&self, _session: StartSession<'_>) -> Result<StartedSession> {
+    bail!("the fake runtime starts nothing")
+  }
+
+  fn status(&self, _session_id: &str) -> Result<Option<SessionStatus>> {
+    if !self.reachable {
+      bail!("runtime unreachable");
+    }
+    Ok(self.status)
+  }
+
+  fn prompt(&self, _session_id: &str, _text: &str) -> Result<()> {
+    self.reach()
+  }
+
+  fn interrupt(&self, _session_id: &str) -> Result<()> {
+    self.reach()
+  }
+
+  fn wait(&self, _session_id: &str, _timeout: Duration) -> Result<()> {
+    self.reach()
+  }
+}
+
+impl FakeSessionRuntime {
+  fn reach(&self) -> Result<()> {
+    if !self.reachable {
+      bail!("runtime unreachable");
+    }
+    Ok(())
+  }
+}
+
+static IDLE_RUNTIME: FakeSessionRuntime = FakeSessionRuntime {
+  status: Some(SessionStatus::Idle),
+  reachable: true,
+};
+
+/// The runtime every fixture session borrows: reachable and always idle.
+pub fn runtime() -> &'static dyn SessionRuntime {
+  &IDLE_RUNTIME
+}
 
 pub fn created_at() -> DateTime<Utc> {
   DateTime::from_timestamp(1_700_000_000, 0).unwrap()
@@ -460,8 +513,14 @@ pub fn working_implementer() -> SessionSpec {
   }
 }
 
-pub fn build_session(spec: SessionSpec) -> Result<Session> {
+pub fn build_session(spec: SessionSpec) -> Result<Session<'static>> {
+  build_session_on(spec, runtime())
+}
+
+/// A session driven by `runtime` instead of the fixture's idle one.
+pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Result<Session<'_>> {
   Session::new(
+    runtime,
     spec.id,
     spec.name.to_owned(),
     spec.role,

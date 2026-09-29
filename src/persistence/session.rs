@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::domain::{AgentKind, ContextSize, Role, Session};
+use crate::domain::{AgentKind, ContextSize, Role, Session, SessionRuntime};
 
 struct SessionRow {
   id: i64,
@@ -31,14 +31,15 @@ const SELECT: &str = "
 
 /// Register a session that has just started with `agent`. Its transcript has
 /// not grown yet, so its last growth is its start.
-pub fn create(
+pub fn create<'r>(
   transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
   name: &str,
   role: Role,
   agent: AgentKind,
   external_session_id: &str,
   launched_head: Option<&str>,
-) -> Result<Session> {
+) -> Result<Session<'r>> {
   let started_at = Utc::now();
   let id = transaction.query_row(
     "
@@ -57,18 +58,26 @@ pub fn create(
     ],
     |row| row.get(0),
   )?;
-  get(transaction, id)?.with_context(|| format!("created session {id} is missing"))
+  get(transaction, runtime, id)?.with_context(|| format!("created session {id} is missing"))
 }
 
-pub fn get(transaction: &Transaction<'_>, id: i64) -> Result<Option<Session>> {
+pub fn get<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+  id: i64,
+) -> Result<Option<Session<'r>>> {
   let row = transaction
     .query_row(&format!("{SELECT} where id=?"), [id], session_row)
     .optional()?;
-  row.map(materialize).transpose()
+  row.map(|row| materialize(row, runtime)).transpose()
 }
 
 /// The newest incarnation of `name`, live or not.
-pub fn latest_named(transaction: &Transaction<'_>, name: &str) -> Result<Option<Session>> {
+pub fn latest_named<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+  name: &str,
+) -> Result<Option<Session<'r>>> {
   let row = transaction
     .query_row(
       &format!("{SELECT} where name=? order by started_at desc, id desc limit 1"),
@@ -76,13 +85,16 @@ pub fn latest_named(transaction: &Transaction<'_>, name: &str) -> Result<Option<
       session_row,
     )
     .optional()?;
-  row.map(materialize).transpose()
+  row.map(|row| materialize(row, runtime)).transpose()
 }
 
-pub fn all(transaction: &Transaction<'_>) -> Result<Vec<Session>> {
+pub fn all<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+) -> Result<Vec<Session<'r>>> {
   let mut statement = transaction.prepare(&format!("{SELECT} order by started_at, id"))?;
   let rows = statement.query_map([], session_row)?;
-  rows.map(|row| materialize(row?)).collect()
+  rows.map(|row| materialize(row?, runtime)).collect()
 }
 
 /// Stop every live incarnation of `name`. Returns how many were stopped.
@@ -96,25 +108,31 @@ pub fn stop_named(transaction: &Transaction<'_>, name: &str) -> Result<usize> {
 
 /// Remember where the session's transcript was found. It never moves, so
 /// nothing ever clears the column.
-pub fn record_transcript(transaction: &Transaction<'_>, id: i64, path: &Path) -> Result<Session> {
+pub fn record_transcript<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+  id: i64,
+  path: &Path,
+) -> Result<Session<'r>> {
   transaction.execute(
     "update sessions set transcript=? where id=?",
     params![path.to_string_lossy(), id],
   )?;
-  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Record one poll's reading of the transcript. Growth moves the last-growth
 /// mark to `at` and re-arms the kick; the maximum only ever rises. A reading
 /// whose context is unknown clears the context and leaves the maximum as it
 /// was.
-pub fn record_reading(
+pub fn record_reading<'r>(
   transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
   id: i64,
   context: ContextSize,
   grew: bool,
   at: DateTime<Utc>,
-) -> Result<Session> {
+) -> Result<Session<'r>> {
   transaction.execute(
     "
       update sessions set
@@ -127,27 +145,35 @@ pub fn record_reading(
       ",
     params![context.stored(), grew, at.timestamp_millis(), id],
   )?;
-  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Latch that the session has been nudged; cleared by the next growth.
-pub fn record_kick(transaction: &Transaction<'_>, id: i64) -> Result<Session> {
+pub fn record_kick<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+  id: i64,
+) -> Result<Session<'r>> {
   transaction.execute(
     "update sessions set kicked_at=? where id=?",
     params![Utc::now().timestamp_millis(), id],
   )?;
-  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Stamp that the session crossed its context stop threshold. The update
 /// overwrites, so callers check `can_latch_over_limit` first to make it once
 /// per session; nothing ever clears the column.
-pub fn record_over_limit(transaction: &Transaction<'_>, id: i64) -> Result<Session> {
+pub fn record_over_limit<'r>(
+  transaction: &Transaction<'_>,
+  runtime: &'r dyn SessionRuntime,
+  id: i64,
+) -> Result<Session<'r>> {
   transaction.execute(
     "update sessions set over_limit_at=? where id=?",
     params![Utc::now().timestamp_millis(), id],
   )?;
-  get(transaction, id)?.with_context(|| format!("session {id} is missing"))
+  get(transaction, runtime, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -169,11 +195,12 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
   })
 }
 
-fn materialize(row: SessionRow) -> Result<Session> {
+fn materialize<'r>(row: SessionRow, runtime: &'r dyn SessionRuntime) -> Result<Session<'r>> {
   let on_session = |error: anyhow::Error| anyhow!("session {}: {error}", row.name);
   let role = Role::try_from(row.role.as_str()).map_err(on_session)?;
   let agent = AgentKind::try_from(row.agent.as_str()).map_err(on_session)?;
   Session::new(
+    runtime,
     row.id,
     row.name,
     role,
