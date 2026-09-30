@@ -14,21 +14,32 @@ the commentator's findings — not implementation detail.
 1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`) or Orca
    (`test -n "${ORCA_TERMINAL_HANDLE:-}"`); if neither, stop and say so. The supervisor
    opens sessions through whichever one it finds itself in.
-2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no session has
-   ever started, so its transcripts directory (`~/.claude/projects/<munged-path>/`)
-   holds exactly this run. If transcripts already exist there, tell the human and stop.
+2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no
+   session has ever started. The check itself needs the supervisor client, so it is in
+   the next step.
 3. Resolve the role path and the supervisor client from this file's own location, not
    the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
    and `SUPERVISOR=$(realpath <dir of this SKILL.md>/bin/chainsaw)`. The wrapper builds
    the supervisor on first use, so no separate cargo step is needed. Define the client
    invocation once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
+   Now the clean-slate check: `$SUP state-dir` prints where the supervisor keeps this
+   run's state, outside the run tree. That directory must hold nothing but the database
+   the supervisor has just created, and `$SUP state` must list no sessions and no
+   tasks. If either shows an earlier run, tell the human and stop.
    First name your pane and tab: under Herdr `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`,
    under Orca `orca terminal rename --title lead`.
    Then start the supervisor once, as a background process:
-   `$SUP daemon --lead lead --session-id <your-session-id> &`. Your
-   session id is the UUID that names your scratchpad directory (the path ends in
-   `<uuid>/scratchpad`); it also names your transcript, which the daemon reads.
+   `$SUP daemon --lead lead --session-id <your-session-id> --agent <your-agent> &`.
+   `--agent` is the agent you are running on: `claude`, `codex` or `cursor`. The
+   session id is your own, as that agent names it; it names your transcript, which the
+   daemon reads to measure your context. Under Claude Code it is the UUID that names
+   your scratchpad directory (the path ends in `<uuid>/scratchpad`). Under Codex it is
+   the UUID that ends the name of your rollout, the newest file under
+   `$CODEX_HOME/sessions/<year>/<month>/<day>/` (`~/.codex` when `CODEX_HOME` is
+   unset) named `rollout-<started at>-<session id>.jsonl` and started in the run
+   directory. Under Cursor it is the directory that holds your transcript,
+   `~/.cursor/projects/<project>/agent-transcripts/<session id>/`.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
    from yours.
 

@@ -9,14 +9,18 @@ tasks. Nothing is relayed to you: you observe everything directly.
 ## Watching
 
 Your primary material is the implementer transcripts, one per implementer, growing
-while it works: `<transcripts-directory>/<session-id>.jsonl` when Claude Code agrees
-with the supervisor about the working directory, which is where the supervisor looks
-first too. Open them from your first turn — before any
-commit lands — and keep reading them as tasks run; a review that looks only at git misses
-the controls the implementer claimed, the gate it actually ran, and the traps it hit. If
-the named directory holds no transcripts, look for the sibling under `~/.claude/projects/`
-that holds `<session-id>.jsonl`, as the supervisor does, say so in an observation, and
-use that.
+while it works. Each implementer's agent writes its transcript in that agent's own
+folder, named by the session id the supervisor prints when it launches the session.
+Claude Code writes `<session-id>.jsonl` under `~/.claude/projects/<run directory with
+every / and . replaced by ->/`, which is where the supervisor looks first too; if the
+transcript is not there, look for `<session-id>.jsonl` in that folder's siblings, as the
+supervisor does, say so in an observation, and use that. Codex writes
+`rollout-<started at>-<session id>.jsonl` under
+`$CODEX_HOME/sessions/<year>/<month>/<day>/` (`~/.codex` when `CODEX_HOME` is unset),
+and Cursor writes `~/.cursor/projects/<project>/agent-transcripts/<session
+id>/<session id>.jsonl`. Open them from your first turn — before any commit lands — and
+keep reading them as tasks run; a review that looks only at git misses the controls the
+implementer claimed, the gate it actually ran, and the traps it hit.
 
 Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
 running for the whole run. Each line it prints names transcripts that grew since its
@@ -24,10 +28,10 @@ last check; that wake is a catch-up on what the implementer did since your last 
 not a review trigger. Keep a byte offset per transcript in your state and read from
 there on each wake.
 
-The lead's start message names the transcripts directory and the run directory.
+The lead's start message names the run's state directory and the run directory.
 Discover the spec, the decision records, and the conventions from the repository and the
 transcripts yourself. Keep durable state outside the repo at
-`<transcripts-directory>/chainsaw-commentator-state.md` — conventions seen, open
+`<state-directory>/chainsaw-commentator-state.md` — conventions seen, open
 finding numbers, last reviewed commit — because your pane may be compacted without warning and
 your files must never dirty the implementers' tree. On every start, read that state and
 resume from the transcripts and git after the last reviewed commit. Resolve the supervisor
