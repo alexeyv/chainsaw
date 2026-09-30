@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -26,8 +25,6 @@ mod write_transaction {
     db.busy_timeout(Duration::from_secs(2))?;
     db.execute_batch("create table counter(value int); insert into counter values(0);")?;
     let store = Store {
-      run_dir: PathBuf::new(),
-      transcripts_dir: PathBuf::new(),
       path: path.clone(),
       db,
     };
@@ -69,12 +66,7 @@ fn counter_store(name: &str) -> Result<Store> {
   ));
   let db = Connection::open(&path)?;
   db.execute_batch("create table counter(value int); insert into counter values(0);")?;
-  Ok(Store {
-    run_dir: PathBuf::new(),
-    transcripts_dir: PathBuf::new(),
-    path,
-    db,
-  })
+  Ok(Store { path, db })
 }
 
 fn counter(store: &Store) -> Result<i64> {

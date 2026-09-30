@@ -38,7 +38,7 @@ How tests should be written is in `tests/AGENTS.md`.
 
 ## Conventions that differ from defaults
 
-- Supervisor and commentator durable state lives under `~/.claude/projects/<munged-run-dir>/`, never in the run tree.
+- Supervisor and commentator durable state lives under `~/.chainsaw/runs/<munged-run-dir>/`, never in the run tree and never in an agent's own folder. `chainsaw state-dir` prints it.
 
 ## Error handling
 

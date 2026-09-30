@@ -97,7 +97,7 @@ class SupervisorContractCase(unittest.TestCase):
         self.git("add", "seed.txt")
         self.git("commit", "-q", "-m", "chore: initial fixture")
         self._tool_use_sequence = 0
-        self._transcripts_dirs = {}
+        self._state_dirs = {}
 
     def _runtime_environment(self):
         """What the lead's terminal exports, and where its fake keeps state."""
@@ -123,28 +123,35 @@ class SupervisorContractCase(unittest.TestCase):
         return [str(private)]
 
     @property
-    def transcripts_dir(self):
-        return self.transcripts_dir_for(self.run_dir)
+    def state_dir(self):
+        return self.state_dir_for(self.run_dir)
 
-    def transcripts_dir_for(self, run_dir):
-        """Ask the supervisor where it keeps transcripts; never reimplement its rule."""
-        if run_dir not in self._transcripts_dirs:
+    def state_dir_for(self, run_dir):
+        """Ask the supervisor where it keeps a run's state; never reimplement its rule."""
+        if run_dir not in self._state_dirs:
             result = subprocess.run(
-                [*self.supervisor_command, "--run-dir", str(run_dir), "transcripts-dir"],
+                [*self.supervisor_command, "--run-dir", str(run_dir), "state-dir"],
                 text=True, capture_output=True, env=self.env, timeout=30,
             )
             self.assert_success(result)
-            self._transcripts_dirs[run_dir] = Path(result.stdout.strip())
-        return self._transcripts_dirs[run_dir]
+            self._state_dirs[run_dir] = Path(result.stdout.strip())
+        return self._state_dirs[run_dir]
 
     def write_supervisor_db(self, sql, *params):
         """Move a durable fact the CLI cannot, such as a timestamp into the past."""
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             database.execute(sql, params)
+
+    def claude_transcript(self, session_id, run_dir=None):
+        """Where Claude Code writes the transcript of `session_id` started in `run_dir`,
+        which is where the supervisor reads the transcript of a session on Claude."""
+        return fake_agent.transcript_for(
+            "claude", run_dir or self.run_dir, session_id, home=self.home,
+        )
 
     def write_lead_transcript(self, context, session_id="session-lead"):
         """Give the lead a transcript whose last turn carried this much context."""
-        log = self.transcripts_dir / f"{session_id}.jsonl"
+        log = self.claude_transcript(session_id)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "type": "assistant",
@@ -241,7 +248,7 @@ class SupervisorContractCase(unittest.TestCase):
 
     def session_agent(self, name):
         """The agent the live session row named `name` was launched with."""
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             (agent,) = database.execute(
                 "select agent from sessions where name=? and stopped_at is null", (name,)
             ).fetchone()
@@ -269,7 +276,7 @@ class SupervisorContractCase(unittest.TestCase):
         self.assert_success(self.cli(
             "start-commentator", "--role-prompt", str(self.run_dir / "commentator.md"),
         ))
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             (name,) = database.execute(
                 "select name from sessions where role='commentator' and stopped_at is null"
                 " order by id desc limit 1"
@@ -296,7 +303,7 @@ class SupervisorContractCase(unittest.TestCase):
         registry maps the name to."""
         if self.runtime == "herdr":
             return name
-        registry = json.loads((self.transcripts_dir / ORCA_REGISTRY_FILE_NAME).read_text())
+        registry = json.loads((self.state_dir / ORCA_REGISTRY_FILE_NAME).read_text())
         return registry[name]["handle"]
 
     def session_state(self, name):
@@ -474,7 +481,7 @@ class SupervisorContractCase(unittest.TestCase):
         session_id = session_id or f"session-{lead}"
         written = list((self.home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
         if lead_transcript and not written:
-            log = self.transcripts_dir / f"{session_id}.jsonl"
+            log = self.claude_transcript(session_id)
             log.parent.mkdir(parents=True, exist_ok=True)
             log.touch()
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),

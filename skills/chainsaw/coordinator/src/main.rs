@@ -8,7 +8,7 @@ use chainsaw::run::Run;
 fn main() {
   let cli = Cli::parse();
   let result = Run::open(&cli.run_dir, &cli.set).and_then(|run| {
-    let store = Store::open(run.dir())?;
+    let store = Store::open(run.state_dir())?;
     coordinator::execute(&run, &store, cli.command)
   });
   if let Err(error) = result {

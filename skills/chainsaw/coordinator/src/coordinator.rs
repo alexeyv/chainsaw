@@ -58,7 +58,7 @@ fn is_lead_facing(command: &Command) -> bool {
     command,
     Command::Daemon { .. }
       | Command::WatchTranscripts { .. }
-      | Command::TranscriptsDir
+      | Command::StateDir
       | Command::Context { .. }
       | Command::Stop
   )
@@ -219,8 +219,8 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
     } => cmd_resolve(store, finding, &verdict, fix_task_id, &reason),
     Command::Resolutions => cmd_resolutions(store),
     Command::State { task } => cmd_state(run, store, task),
-    Command::TranscriptsDir => {
-      println!("{}", run.transcripts_dir().display());
+    Command::StateDir => {
+      println!("{}", run.state_dir().display());
       Ok(())
     }
     Command::WatchTranscripts { interval_ms } => cmd_watch_transcripts(run, store, interval_ms),

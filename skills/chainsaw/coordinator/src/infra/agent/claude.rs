@@ -177,9 +177,7 @@ impl TranscriptFormat for Claude {
 /// Where Claude Code writes.
 impl Claude {
   /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
-  /// The supervisor database lives here too: the lead runs inside Claude
-  /// Code, so a run's state sits beside the transcripts it is derived from.
-  pub fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
+  fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
     let home = env::var_os("HOME").context("HOME is not set")?;
     Ok(
       PathBuf::from(home)
@@ -217,8 +215,8 @@ fn newest_transcript_in(dir: &Path, since: SystemTime) -> Option<String> {
 /// Claude Code names a session's transcripts directory after its cwd, replacing
 /// both separators and dots with dashes: `/Users/alex/src/ui.wt/run` becomes
 /// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
-/// dots put the database beside no transcript at all, and the commentator's
-/// start message named a directory holding nothing (run of 2026-08-28).
+/// dots looked for transcripts in a directory holding none (run of
+/// 2026-08-28).
 fn transcripts_dir_name(canonical_run_dir: &Path) -> String {
   canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
 }

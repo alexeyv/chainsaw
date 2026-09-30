@@ -1,11 +1,8 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-
-use crate::infra::agent::Claude;
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -62,29 +59,18 @@ pragma user_version=1;
 pub const DATABASE_FILE_NAME: &str = "chainsaw-supervisor.db";
 
 pub struct Store {
-  pub run_dir: PathBuf,
-  pub transcripts_dir: PathBuf,
   pub path: PathBuf,
   pub db: Connection,
 }
 
 impl Store {
-  pub fn open(run_dir: &Path) -> Result<Self> {
-    let run_dir = run_dir
-      .canonicalize()
-      .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
-    let transcripts_dir = Claude::transcripts_dir(&run_dir)?;
-    fs::create_dir_all(&transcripts_dir)?;
-    let path = transcripts_dir.join(DATABASE_FILE_NAME);
+  /// Opens the database in the run's state directory, which must exist.
+  pub fn open(state_dir: &Path) -> Result<Self> {
+    let path = state_dir.join(DATABASE_FILE_NAME);
     let db = Connection::open(&path)?;
     db.busy_timeout(Duration::from_secs(30))?;
     initialize_schema(&db)?;
-    Ok(Self {
-      run_dir,
-      transcripts_dir,
-      path,
-      db,
-    })
+    Ok(Self { path, db })
   }
 
   /// Reserve the SQLite writer lock before any reads can make an upgrade fail fast.

@@ -98,9 +98,9 @@ pub(super) fn cmd_start_commentator(run: &Run, store: &Store, role_prompt: &Path
     &name,
     SessionKind::Commentator,
     &format!(
-      "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
+      "Read and follow this role prompt entirely: {}\nState directory: {}\nRun directory: {}",
       role_prompt.display(),
-      run.transcripts_dir().display(),
+      run.state_dir().display(),
       run.dir().display()
     ),
   )

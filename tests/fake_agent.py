@@ -143,8 +143,10 @@ def drain_queue(current, agent):
 # --- where and how each agent writes
 
 
-def transcript_for(kind, run_dir, session_id):
-    home = Path(os.environ["HOME"])
+def transcript_for(kind, run_dir, session_id, home=None):
+    """Where the agent of `kind` writes the transcript of `session_id` started in
+    `run_dir`, under `home` (the fake's own when unnamed)."""
+    home = Path(home or os.environ["HOME"])
     if kind == "claude":
         project = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
         return home / ".claude" / "projects" / project / f"{session_id}.jsonl"

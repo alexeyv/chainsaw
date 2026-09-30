@@ -153,7 +153,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
     runtime = "orca"
 
     def external_session_id(self, name):
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             (external_id,) = database.execute(
                 "select external_session_id from sessions where name=? and stopped_at is null",
                 (name,),
@@ -223,7 +223,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         commentator = self.start_commentator()
 
         registry = json.loads(
-            (self.transcripts_dir / "chainsaw-orca-terminals.json").read_text()
+            (self.state_dir / "chainsaw-orca-terminals.json").read_text()
         )
         self.assertEqual(
             {name: terminal["handle"] for name, terminal in registry.items()},

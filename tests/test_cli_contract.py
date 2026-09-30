@@ -171,7 +171,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         flight_state = self.wait_for_state(f"{task} in_flight")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             recorded_offset, base_head = database.execute(
                 "select transcript_offset, base_head from tasks where id=?", (task,),
             ).fetchone()
@@ -713,8 +713,8 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         )
         self.assertEqual(resolutions["resolutions"][0]["verdict"], "dropped")
         self.assertEqual(second_commentator_view, resolutions)
-        self.assertFalse((self.transcripts_dir / "chainsaw-comments.md").exists())
-        self.assertFalse((self.transcripts_dir / "chainsaw-dispositions.md").exists())
+        self.assertFalse((self.state_dir / "chainsaw-comments.md").exists())
+        self.assertFalse((self.state_dir / "chainsaw-dispositions.md").exists())
 
     def test_task_filtered_cursor_does_not_skip_later_relevant_observations(self):
         relevant_task = self.new_task(text="Relevant task.", files="relevant.txt")
@@ -778,10 +778,10 @@ class CommunicationProtocolContractTests(SupervisorContractCase):
         ), "finding 1 is already resolved")
 
     def test_legacy_commands_are_absent_and_historical_files_are_untouched(self):
-        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         historical = {
-            self.transcripts_dir / "chainsaw-comments.md": "historical comments\n",
-            self.transcripts_dir / "chainsaw-dispositions.md": "historical dispositions\n",
+            self.state_dir / "chainsaw-comments.md": "historical comments\n",
+            self.state_dir / "chainsaw-dispositions.md": "historical dispositions\n",
         }
         for path, text in historical.items():
             path.write_text(text)
@@ -867,7 +867,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
             sequence=0,
             drop_prompts=0,
         )
-        log = self.transcripts_dir_for(harness) / f"{session_id}.jsonl"
+        log = self.claude_transcript(session_id, harness)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "type": "assistant",
@@ -1085,15 +1085,15 @@ class BusySessionContractTests(SupervisorContractCase):
 
 
 class DottedRunDirectoryContractTests(SupervisorContractCase):
-    """Claude Code munges dots as well as path separators, so a dotted run directory loses its dot."""
+    """A run directory's dots are munged like its separators, so a dotted one loses its dot."""
 
     run_dir_name = "run.wt"
 
-    def test_commentator_is_pointed_at_the_directory_claude_code_actually_writes(self):
+    def test_commentator_is_pointed_at_the_state_directory_of_the_dotted_run(self):
         commentator = self.start_commentator()
 
         prompt = self.launch_prompt(commentator)
-        prefix = "Transcripts directory: "
+        prefix = "State directory: "
         announced = next(
             line.removeprefix(prefix)
             for line in prompt.splitlines() if line.startswith(prefix)
@@ -1105,13 +1105,23 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         )
         self.assertTrue(Path(announced).is_dir(), announced)
 
-    def test_supervisor_state_is_stored_beside_the_transcripts(self):
+    def test_supervisor_state_is_stored_in_the_runs_own_directory_under_home(self):
         self.launch()
 
+        self.assertEqual(self.state_dir.parent, self.home / ".chainsaw" / "runs")
         self.assertTrue(
-            (self.transcripts_dir / "chainsaw-supervisor.db").is_file(),
-            f"no database under {self.transcripts_dir}",
+            (self.state_dir / "chainsaw-supervisor.db").is_file(),
+            f"no database under {self.state_dir}",
         )
+
+    def test_transcripts_dir_still_names_the_state_directory_for_an_older_lead(self):
+        """A lead started from the previous skill asks for `transcripts-dir`."""
+        older = self.assert_success(self.cli("transcripts-dir"))
+        usage = self.assert_success(self.cli("--help"))
+
+        self.assertEqual(Path(older.stdout.strip()), self.state_dir)
+        self.assertIn("state-dir", usage.stdout)
+        self.assertNotIn("transcripts-dir", usage.stdout)
 
 
 if __name__ == "__main__":
@@ -1152,8 +1162,8 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         )
 
     def test_ignores_a_transcript_that_belongs_to_no_live_implementer(self):
-        self.transcripts_dir.mkdir(parents=True, exist_ok=True)
-        stray = self.transcripts_dir / "stray.jsonl"
+        stray = self.claude_transcript("stray")
+        stray.parent.mkdir(parents=True, exist_ok=True)
         stray.write_text("{}\n")
         self.launch("worker")
         self.append_text("worker", "working")
@@ -1322,7 +1332,7 @@ class StandingWarningTests(SupervisorContractCase):
         # The latch is journaled after the reading `past` waited for, so it is
         # only certain to be in the tail once the daemon has exited.
         after = self.assert_success(self.cli("state"))
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead'",
             ).fetchall()
@@ -1350,7 +1360,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         relaunched.wait(timeout=10)
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1368,7 +1378,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1610,7 +1620,7 @@ class SettingsContractTests(SupervisorContractCase):
         self.launch()
         commentator = self.start_commentator()
         self.assert_success(self.dispatch(task_id))
-        database = self.transcripts_dir / "chainsaw-supervisor.db"
+        database = self.state_dir / "chainsaw-supervisor.db"
         daemon = self.start_daemon()
         self.append_text("worker", "fixture work started")
         self.wait_for_state(f"{task_id} in_flight")
@@ -1805,7 +1815,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
             "prompt-taken worker: session went busy before its transcript showed the prompt",
             state.stdout,
         )
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             (seen_at,) = database.execute(
                 "select seen_at from prompts order by id desc limit 1"
             ).fetchone()
@@ -1865,7 +1875,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         state = self.wait_for_state(f"{task} committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.transcripts_dir / "chainsaw-supervisor.db") as database:
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
             base_head, offset = database.execute(
                 "select base_head, transcript_offset from tasks where id=?", (task,),
             ).fetchone()

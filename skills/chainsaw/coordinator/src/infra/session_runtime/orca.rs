@@ -21,7 +21,7 @@ use super::Cli;
 use crate::domain::{
   Agent, SessionKind, SessionRuntime, SessionStatus, StartSession, StartedSession,
 };
-use crate::infra::agent::{self, Claude};
+use crate::infra::agent;
 
 /// The registry's name, beside the run's database.
 pub const REGISTRY_FILE_NAME: &str = "chainsaw-orca-terminals.json";
@@ -84,15 +84,12 @@ impl fmt::Display for Refusal {
 impl std::error::Error for Refusal {}
 
 impl OrcaSessionRuntime {
-  /// Inside `terminal`, for sessions in `run_dir`.
-  pub fn from_environment(run_dir: &Path, terminal: String) -> Result<Self> {
-    let run_dir = run_dir
-      .canonicalize()
-      .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
+  /// Inside `terminal`, keeping its registry in the run's `state_dir`.
+  pub fn from_environment(state_dir: &Path, terminal: String) -> Result<Self> {
     Ok(Self {
       cli: Cli::new("orca", "orca"),
       terminal,
-      registry: Claude::transcripts_dir(&run_dir)?.join(REGISTRY_FILE_NAME),
+      registry: state_dir.join(REGISTRY_FILE_NAME),
       idle_probe: Duration::from_millis(250),
       turn_start_grace: Duration::from_secs(5),
       turn_end_settle: Duration::from_secs(1),

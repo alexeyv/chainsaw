@@ -1,6 +1,7 @@
 //! The run as every command sees it: its directory, its checkout, the runtime
-//! its sessions live in, and its settings. `Run` carries no behavior of its
-//! own yet; commands are functions over it.
+//! its sessions live in, its settings, and the directory its durable state
+//! lives in. `Run` carries no behavior of its own yet; commands are functions
+//! over it.
 
 use std::env;
 use std::fs;
@@ -12,7 +13,7 @@ use rusqlite::Transaction;
 use chrono::{DateTime, Utc};
 
 use crate::domain::{Agent, AgentKind, ContextSize, Role, Session, SessionRuntime};
-use crate::infra::agent::{self, Claude};
+use crate::infra::agent;
 use crate::infra::git::Repo;
 use crate::infra::session_runtime::{HerdrSessionRuntime, OrcaSessionRuntime};
 use crate::infra::settings::Settings;
@@ -21,7 +22,7 @@ use crate::persistence::store::DATABASE_FILE_NAME;
 
 pub struct Run {
   dir: PathBuf,
-  transcripts_dir: PathBuf,
+  state_dir: PathBuf,
   prompt_lock_path: PathBuf,
   repo: Repo,
   runtime: Box<dyn SessionRuntime>,
@@ -32,21 +33,22 @@ impl Run {
   /// Opens the run rooted at `run_dir`, with `overrides` applied over its
   /// settings files as `--set KEY=VALUE` pairs.
   pub fn open(run_dir: &Path, overrides: &[String]) -> Result<Self> {
-    let runtime = runtime_from_environment(run_dir)?;
     let settings = Settings::load(run_dir, overrides)?;
     let dir = run_dir
       .canonicalize()
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
-    let transcripts_dir = Claude::transcripts_dir(&dir)?;
-    fs::create_dir_all(&transcripts_dir)?;
+    let state_dir = state_dir_for(&dir)?;
+    fs::create_dir_all(&state_dir)
+      .with_context(|| format!("cannot create state directory {}", state_dir.display()))?;
     let prompt_lock_path = PathBuf::from(format!(
       "{}.prompt-lock",
-      transcripts_dir.join(DATABASE_FILE_NAME).display()
+      state_dir.join(DATABASE_FILE_NAME).display()
     ));
+    let runtime = runtime_from_environment(&state_dir)?;
     Ok(Self {
       repo: Repo::new(&dir),
       dir,
-      transcripts_dir,
+      state_dir,
       prompt_lock_path,
       runtime,
       settings,
@@ -58,10 +60,12 @@ impl Run {
     &self.dir
   }
 
-  /// Where the run's session transcripts and durable supervisor state live,
-  /// under `~/.claude/projects/`.
-  pub fn transcripts_dir(&self) -> &Path {
-    &self.transcripts_dir
+  /// Where the run's durable state lives: the supervisor database, the
+  /// prompt lock, the runtime's registry and the commentator's notes. Under
+  /// `~/.chainsaw/runs/`, named after the run directory, never in the run
+  /// tree and never in any agent's folder.
+  pub fn state_dir(&self) -> &Path {
+    &self.state_dir
   }
 
   /// The file every `prompt` command holds a lock on while it sends, so two
@@ -164,17 +168,37 @@ impl Run {
   }
 }
 
+/// The state directory of the run checked out at `canonical_run_dir`:
+/// `~/.chainsaw/runs/<run directory, munged>/`.
+fn state_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
+  let home = env::var_os("HOME").context("HOME is not set")?;
+  Ok(
+    PathBuf::from(home)
+      .join(".chainsaw")
+      .join("runs")
+      .join(state_dir_name(canonical_run_dir)),
+  )
+}
+
+/// One flat name per run directory: every `/` and `.` becomes `-`, so
+/// `/Users/alex/src/ui.wt/run` is `-Users-alex-src-ui-wt-run` and `/x/.bare`
+/// is `-x--bare`. Two run directories that differ only in a dot against a
+/// dash share a name; a run is a clean-slate checkout, so none do in practice.
+fn state_dir_name(canonical_run_dir: &Path) -> String {
+  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
+}
+
 /// The runtime the supervisor was started under: Herdr inside a Herdr pane,
 /// Orca inside an Orca terminal. A Herdr pane opened from an Orca terminal
 /// sees both and is a Herdr pane. Outside both, Herdr, which then refuses to
 /// start a session. The tests put a `herdr` of their own on PATH.
-fn runtime_from_environment(run_dir: &Path) -> Result<Box<dyn SessionRuntime>> {
+fn runtime_from_environment(state_dir: &Path) -> Result<Box<dyn SessionRuntime>> {
   Ok(
     match runtime_named_by(
       env::var_os("HERDR_WORKSPACE_ID").is_some(),
       env::var("ORCA_TERMINAL_HANDLE").ok(),
     ) {
-      Some(terminal) => Box::new(OrcaSessionRuntime::from_environment(run_dir, terminal)?),
+      Some(terminal) => Box::new(OrcaSessionRuntime::from_environment(state_dir, terminal)?),
       None => Box::new(HerdrSessionRuntime::from_environment()),
     },
   )
