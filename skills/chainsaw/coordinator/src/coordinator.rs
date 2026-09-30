@@ -147,12 +147,14 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
     Command::Daemon {
       lead,
       session_id,
+      agent,
       poll_interval_ms,
     } => daemon::start(
       run,
       store,
       &lead,
       &session_id,
+      agent,
       Duration::from_millis(poll_interval_ms),
     ),
     Command::StartCommentator { role_prompt } => cmd_start_commentator(run, store, &role_prompt),

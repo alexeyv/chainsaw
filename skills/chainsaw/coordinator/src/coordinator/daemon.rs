@@ -30,9 +30,10 @@ pub(super) fn start(
   store: &Store,
   lead: &str,
   lead_session_id: &str,
+  lead_agent: AgentKind,
   poll_interval: Duration,
 ) -> Result<()> {
-  register_lead(run, store, lead, lead_session_id)?;
+  register_lead(run, store, lead, lead_session_id, lead_agent)?;
   store.write(|tx| {
     run_record::clear_stop_request(tx)?;
     run_event::create(
@@ -98,16 +99,22 @@ pub(super) fn start(
   )
 }
 
-/// The lead is started by the human in Claude Code, so the daemon registers
-/// it from what the lead says about itself, and with the transcript it is
-/// already writing. The same session id keeps its row across daemon restarts;
-/// a different one is a new incarnation and stops the old row.
-fn register_lead(run: &Run, store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
-  let Some(transcript) = run
-    .agent(AgentKind::Claude)
-    .transcript(run.dir(), lead_session_id)
-  else {
-    bail!("supervisor: lead session {lead_session_id} has no transcript; check --session-id");
+/// The lead is started by the human on an agent of their choosing, so the
+/// daemon registers it from what the lead says about itself, and with the
+/// transcript that agent is already writing for it. The same session id
+/// keeps its row across daemon restarts; a different one, as a relaunch on
+/// any agent has, is a new incarnation and stops the old row.
+fn register_lead(
+  run: &Run,
+  store: &Store,
+  lead: &str,
+  lead_session_id: &str,
+  lead_agent: AgentKind,
+) -> Result<()> {
+  let Some(transcript) = run.agent(lead_agent).transcript(run.dir(), lead_session_id) else {
+    bail!(
+      "supervisor: lead session {lead_session_id} has no {lead_agent} transcript; check --session-id and --agent"
+    );
   };
   store.write(|tx| {
     let current = run.session_named(tx, lead)?;
@@ -121,7 +128,7 @@ fn register_lead(run: &Run, store: &Store, lead: &str, lead_session_id: &str) ->
         tx,
         lead,
         Role::Lead,
-        AgentKind::Claude,
+        lead_agent,
         lead_session_id,
         None,
         &transcript,

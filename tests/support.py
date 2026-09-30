@@ -473,19 +473,22 @@ class SupervisorContractCase(unittest.TestCase):
         daemon.wait(timeout=10)
         return state
 
-    def start_daemon(self, lead="lead", session_id=None, expected_exit=0,
+    def start_daemon(self, lead="lead", session_id=None, agent=None, expected_exit=0,
                      lead_transcript=True):
         """Start a daemon that must have exited with `expected_exit` by teardown.
-        The lead registers with the transcript it is already writing, so one is
-        begun for it unless the case says otherwise or has written its own."""
+        The lead runs on `agent` when named, otherwise on the daemon's default. It
+        registers with the transcript its agent is already writing, so one is begun
+        for it unless the case says otherwise or has written its own."""
         session_id = session_id or f"session-{lead}"
-        written = list((self.home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
+        kind = agent or "claude"
+        written = list(fake_agent.transcripts_root(kind, self.home).rglob(f"*{session_id}.jsonl"))
         if lead_transcript and not written:
-            log = self.claude_transcript(session_id)
+            log = fake_agent.transcript_for(kind, self.run_dir, session_id, home=self.home)
             log.parent.mkdir(parents=True, exist_ok=True)
             log.touch()
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
+                   *(["--agent", agent] if agent else []),
                    "--poll-interval-ms", "10"]
         stderr_path = self.sandbox / f"daemon-{len(self._daemons)}.stderr"
         process = subprocess.Popen(

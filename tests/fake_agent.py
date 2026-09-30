@@ -143,6 +143,19 @@ def drain_queue(current, agent):
 # --- where and how each agent writes
 
 
+def transcripts_root(kind, home=None):
+    """The folder under `home` (the fake's own when unnamed) below which the agent
+    of `kind` writes every transcript."""
+    home = Path(home or os.environ["HOME"])
+    if kind == "claude":
+        return home / ".claude" / "projects"
+    if kind == "codex":
+        return Path(os.environ.get("CODEX_HOME") or home / ".codex") / "sessions"
+    if kind == "cursor":
+        return home / ".cursor" / "projects"
+    raise SystemExit(f"fake runtime cannot stand in for {kind}")
+
+
 def transcript_for(kind, run_dir, session_id, home=None):
     """Where the agent of `kind` writes the transcript of `session_id` started in
     `run_dir`, under `home` (the fake's own when unnamed)."""

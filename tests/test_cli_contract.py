@@ -900,9 +900,33 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         daemon.wait(timeout=10)
 
         self.assertIn(
-            "supervisor: lead session session-lead has no transcript; check --session-id",
+            "supervisor: lead session session-lead has no claude transcript;"
+            " check --session-id and --agent",
             daemon.stderr_path.read_text(),
         )
+
+    def test_the_lead_is_registered_on_the_agent_it_names(self):
+        daemon = self.start_daemon(agent="codex")
+        self.wait_for_state("lead")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertEqual(self.session_agent("lead"), "codex")
+
+    def test_the_lead_runs_on_claude_unless_it_says_otherwise(self):
+        daemon = self.start_daemon()
+        self.wait_for_state("lead")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertEqual(self.session_agent("lead"), "claude")
+
+    def test_a_lead_naming_an_unknown_agent_is_refused(self):
+        result = self.cli(
+            "daemon", "--lead", "lead", "--session-id", "session-lead", "--agent", "gemini",
+        )
+
+        self.assert_failure(result, 'unknown agent "gemini"')
 
     def test_a_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
         self.launch()

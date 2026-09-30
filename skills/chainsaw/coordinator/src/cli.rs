@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::domain::AgentKind;
+
 #[derive(Debug, Parser)]
 #[command(about = "Coordinate a Chainsaw development run")]
 pub struct Cli {
@@ -22,12 +24,15 @@ pub struct Cli {
 pub enum Command {
   /// Run the background coordinator.
   Daemon {
-    /// The lead's agent name.
+    /// The lead's session name.
     #[arg(long)]
     lead: String,
-    /// The lead's own Claude Code session id, which names its transcript.
+    /// The lead's own session id, as its agent names it.
     #[arg(long)]
     session_id: String,
+    /// The agent the lead runs on: claude, codex or cursor.
+    #[arg(long, default_value = "claude", value_parser = agent_kind)]
+    agent: AgentKind,
     #[arg(long, default_value_t = 5_000, hide = true)]
     poll_interval_ms: u64,
   },
@@ -176,6 +181,10 @@ pub enum TaskCommand {
     #[arg(long)]
     reason: Option<String>,
   },
+}
+
+fn agent_kind(value: &str) -> anyhow::Result<AgentKind> {
+  AgentKind::try_from(value)
 }
 
 #[derive(Clone, Debug, ValueEnum)]
