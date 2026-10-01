@@ -132,15 +132,6 @@ impl Run {
     )
   }
 
-  pub fn record_session_transcript(
-    &self,
-    transaction: &Transaction<'_>,
-    id: i64,
-    path: &Path,
-  ) -> Result<Session<'_>> {
-    session::record_transcript(transaction, self.runtime(), agent::implementing, id, path)
-  }
-
   pub fn record_session_reading(
     &self,
     transaction: &Transaction<'_>,

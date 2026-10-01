@@ -1,6 +1,6 @@
 //! Sessions as the supervisor handles them: launching one in the runtime,
-//! finding the transcript its agent writes, and the commands that read
-//! transcripts back to the lead and the commentator.
+//! and the commands that read transcripts back to the lead and the
+//! commentator.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -28,33 +28,19 @@ pub(super) fn task_session<'r>(
   })
 }
 
-/// Where the session's transcript is, or None until its agent has written
-/// one. The search can scan every project directory, so a hit is remembered
-/// on the session row and never looked for again. Nothing in a run deletes a
-/// transcript, so a remembered one that is gone means something outside the
-/// run removed it, and that is an error rather than a session reading zero.
-pub(super) fn session_transcript(
-  run: &Run,
-  store: &Store,
-  session: &Session,
-) -> Result<Option<PathBuf>> {
-  if let Some(path) = session.transcript() {
-    if !path.is_file() {
-      bail!(
-        "supervisor: transcript of {} vanished from {}",
-        session.name(),
-        path.display()
-      );
-    }
-    return Ok(Some(path.to_owned()));
+/// Where the session's transcript is. Nothing in a run deletes one, so a
+/// transcript that is gone means something outside the run removed it, and
+/// that is an error rather than a session reading zero.
+pub(super) fn session_transcript<'s>(session: &'s Session) -> Result<&'s Path> {
+  let path = session.transcript();
+  if !path.is_file() {
+    bail!(
+      "supervisor: transcript of {} vanished from {}",
+      session.name(),
+      path.display()
+    );
   }
-  let found = session
-    .agent()
-    .transcript(run.dir(), session.external_session_id());
-  if let Some(path) = &found {
-    store.write(|tx| run.record_session_transcript(tx, session.id(), path))?;
-  }
-  Ok(found)
+  Ok(path)
 }
 
 pub(super) fn session_name(run: &Run, store: &Store, id: Option<i64>) -> Result<String> {
@@ -171,7 +157,7 @@ pub(super) fn cmd_watch_transcripts(run: &Run, store: &Store, interval_ms: u64) 
   }
 }
 
-/// The transcripts of the live implementers that have one, by session id.
+/// The transcripts of the live implementers, by session id.
 fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, PathBuf)>> {
   let mut transcripts = Vec::new();
   for session in store
@@ -179,9 +165,8 @@ fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, Path
     .into_iter()
     .filter(Session::can_take_task)
   {
-    if let Some(path) = session_transcript(run, store, &session)? {
-      transcripts.push((session.external_session_id().to_owned(), path));
-    }
+    let path = session_transcript(&session)?.to_owned();
+    transcripts.push((session.external_session_id().to_owned(), path));
   }
   Ok(transcripts)
 }
@@ -192,15 +177,11 @@ pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Resul
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    if let Some(transcript) = session_transcript(run, store, &session)? {
-      println!(
-        "{}\t{}",
-        session.name(),
-        session.agent().context_size(&transcript)
-      );
-    } else {
-      println!("{}\tUNAVAILABLE (transcript not found)", session.name());
-    }
+    println!(
+      "{}\t{}",
+      session.name(),
+      session.agent().context_size(session_transcript(&session)?)
+    );
   }
   Ok(())
 }

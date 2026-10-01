@@ -9,11 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Bytes in a transcript, or zero while it does not exist yet.
-pub fn transcript_size(path: Option<&Path>) -> u64 {
-  path
-    .and_then(|path| path.metadata().ok())
-    .map_or(0, |metadata| metadata.len())
+/// Bytes in a transcript, or zero when it cannot be read.
+pub fn transcript_size(path: &Path) -> u64 {
+  path.metadata().map_or(0, |metadata| metadata.len())
 }
 
 /// Holds the sizes seen at the last look. Transcripts are named by the
@@ -54,7 +52,7 @@ impl TranscriptMonitor {
 fn sizes(transcripts: &[(String, PathBuf)]) -> BTreeMap<String, u64> {
   transcripts
     .iter()
-    .map(|(name, path)| (name.clone(), transcript_size(Some(path))))
+    .map(|(name, path)| (name.clone(), transcript_size(path)))
     .collect()
 }
 

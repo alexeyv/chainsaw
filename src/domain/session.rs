@@ -131,7 +131,7 @@ pub struct Session<'r> {
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
-  transcript: Option<PathBuf>,
+  transcript: PathBuf,
 }
 
 impl<'r> Session<'r> {
@@ -152,16 +152,13 @@ impl<'r> Session<'r> {
     last_growth: DateTime<Utc>,
     kicked_at: Option<DateTime<Utc>>,
     over_limit_at: Option<DateTime<Utc>>,
-    transcript: Option<PathBuf>,
+    transcript: PathBuf,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("name", &name)?;
     require_nonblank("external_session_id", &external_session_id)?;
     require_optional_nonblank("launched_head", launched_head.as_deref())?;
-    if transcript
-      .as_deref()
-      .is_some_and(|path| path.as_os_str().is_empty())
-    {
+    if transcript.as_os_str().is_empty() {
       bail!("transcript cannot be blank");
     }
     if let (Some(context), Some(context_max)) = (context.known(), context_max.known())
@@ -283,10 +280,9 @@ impl<'r> Session<'r> {
     self.over_limit_at
   }
 
-  /// Where the agent writes this session's transcript, once it has been
-  /// found. It never moves.
-  pub fn transcript(&self) -> Option<&Path> {
-    self.transcript.as_deref()
+  /// Where the agent writes this session's transcript. It never moves.
+  pub fn transcript(&self) -> &Path {
+    &self.transcript
   }
 
   /// A session is live until it is superseded or stopped.

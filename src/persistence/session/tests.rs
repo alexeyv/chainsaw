@@ -5,8 +5,7 @@ use chrono::Utc;
 use rusqlite::{Connection, Transaction};
 
 use super::{
-  all, create, get, latest_named, record_kick, record_over_limit, record_reading,
-  record_transcript, stop_named,
+  all, create, get, latest_named, record_kick, record_over_limit, record_reading, stop_named,
 };
 use crate::domain::test_helpers::{
   format_session, format_sessions, format_time, runtime, timestamp, within,
@@ -57,7 +56,7 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
         row.get::<_, i64>(9)?,
         row.get::<_, Option<i64>>(10)?,
         row.get::<_, Option<i64>>(11)?,
-        row.get::<_, Option<String>>(12)?,
+        row.get::<_, String>(12)?,
       ))
     },
   )?;
@@ -105,7 +104,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=Some(\"/transcripts/session.jsonl\")",
+        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=\"/transcripts/session.jsonl\"",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -181,8 +180,10 @@ mod get {
     let mut db = database();
     db.execute(
       "
-        insert into sessions(name, role, agent, external_session_id, started_at, last_growth)
-        values('implementer-1', 'reviewer', 'claude', 'uuid-1', 0, 0)
+        insert into sessions(
+          name, role, agent, external_session_id, started_at, last_growth, transcript
+        )
+        values('implementer-1', 'reviewer', 'claude', 'uuid-1', 0, 0, '/transcripts/session.jsonl')
         ",
       [],
     )?;
@@ -202,8 +203,10 @@ mod get {
     let mut db = database();
     db.execute(
       "
-        insert into sessions(name, role, agent, external_session_id, started_at, last_growth)
-        values('implementer-1', 'implementer', 'gemini', 'uuid-1', 0, 0)
+        insert into sessions(
+          name, role, agent, external_session_id, started_at, last_growth, transcript
+        )
+        values('implementer-1', 'implementer', 'gemini', 'uuid-1', 0, 0, '/transcripts/session.jsonl')
         ",
       [],
     )?;
@@ -349,45 +352,6 @@ mod stop_named {
         .unwrap()
         .is_live()
     );
-    Ok(())
-  }
-}
-
-mod record_transcript {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-    let session = implementer(&transaction, "implementer-1", "uuid-1")?;
-    let path = Path::new("/home/alex/.claude/projects/-run/uuid-1.jsonl");
-
-    let found = record_transcript(&transaction, runtime(), implementing, session.id(), path)?;
-
-    assert_eq!(found.transcript(), Some(path));
-    assert_eq!(
-      get(&transaction, runtime(), implementing, session.id())?,
-      Some(found)
-    );
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_session_does_not_exist() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-
-    let error = record_transcript(
-      &transaction,
-      runtime(),
-      implementing,
-      42,
-      Path::new("/nowhere.jsonl"),
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "session 42 is missing");
     Ok(())
   }
 }

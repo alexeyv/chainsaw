@@ -3,7 +3,7 @@
 //! it finds by role: records the implementer's flight and commit, wakes and
 //! compacts the commentator, and notes the lead crossing its stop threshold.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -47,7 +47,6 @@ pub(super) fn start(
     Ok(())
   })?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
-  let mut missing_transcripts = HashSet::new();
   let mut compacting = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
@@ -68,32 +67,9 @@ pub(super) fn start(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let Some(transcript) = session_transcript(run, store, &session)? else {
-        if missing_transcripts.insert(name.to_owned()) {
-          let danger = if session.role() == Role::Lead {
-            "; the lead context stop threshold cannot fire"
-          } else {
-            ""
-          };
-          let detail = format!("{name} ({}): transcript not found{danger}", session.role());
-          eprintln!("WARNING: {detail}");
-          record_run_event(store, RunEventKind::TranscriptMissing, &detail)?;
-        }
-        continue;
-      };
-      if missing_transcripts.remove(name) {
-        eprintln!(
-          "supervisor: transcript found for {name}: {}",
-          transcript.display()
-        );
-        record_run_event(
-          store,
-          RunEventKind::TranscriptFound,
-          &format!("{name}: {}", transcript.display()),
-        )?;
-      }
-      let size = transcript_size(Some(&transcript));
-      let context = session.agent().context_size(&transcript);
+      let transcript = session_transcript(&session)?;
+      let size = transcript_size(transcript);
+      let context = session.agent().context_size(transcript);
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
@@ -101,7 +77,7 @@ pub(super) fn start(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(run, store, &session, &transcript, quiet)?;
+          observe_implementer(run, store, &session, transcript, quiet)?;
         }
         Role::Commentator => {
           observe_commentator(
@@ -109,7 +85,7 @@ pub(super) fn start(
             store,
             &session,
             Reading {
-              transcript: &transcript,
+              transcript,
               context,
               quiet,
             },
@@ -197,7 +173,7 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.transcript_offset() as u64;
-    if transcript_size(Some(transcript)) <= dispatch_offset {
+    if transcript_size(transcript) <= dispatch_offset {
       return Ok(());
     }
     let context = agent.context_before(transcript, dispatch_offset);

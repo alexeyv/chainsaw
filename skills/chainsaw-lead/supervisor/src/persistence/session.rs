@@ -20,7 +20,7 @@ struct SessionRow {
   last_growth: i64,
   kicked_at: Option<i64>,
   over_limit_at: Option<i64>,
-  transcript: Option<String>,
+  transcript: String,
 }
 
 const SELECT: &str = "
@@ -119,22 +119,6 @@ pub fn stop_named(transaction: &Transaction<'_>, name: &str) -> Result<usize> {
     params![Utc::now().timestamp_millis(), name],
   )?;
   Ok(stopped)
-}
-
-/// Remember where the session's transcript was found. It never moves, so
-/// nothing ever clears the column.
-pub fn record_transcript<'r>(
-  transaction: &Transaction<'_>,
-  runtime: &'r dyn SessionRuntime,
-  agent_for: fn(AgentKind) -> &'r dyn Agent,
-  id: i64,
-  path: &Path,
-) -> Result<Session<'r>> {
-  transaction.execute(
-    "update sessions set transcript=? where id=?",
-    params![path.to_string_lossy(), id],
-  )?;
-  get(transaction, runtime, agent_for, id)?.with_context(|| format!("session {id} is missing"))
 }
 
 /// Record one poll's reading of the transcript. Growth moves the last-growth
@@ -244,7 +228,7 @@ fn materialize<'r>(
       .over_limit_at
       .map(|at| time(at, "over_limit_at"))
       .transpose()?,
-    row.transcript.map(From::from),
+    row.transcript.into(),
   )
 }
 

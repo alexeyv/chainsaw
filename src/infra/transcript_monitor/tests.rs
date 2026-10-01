@@ -57,15 +57,14 @@ mod transcript_size {
   fn should_work() {
     let transcript = Transcript::containing("0123456789");
 
-    assert_eq!(transcript_size(Some(transcript.path())), 10);
+    assert_eq!(transcript_size(transcript.path()), 10);
   }
 
   #[test]
-  fn should_read_as_zero_when_the_transcript_does_not_exist_yet() {
+  fn should_read_as_zero_when_the_transcript_does_not_exist() {
     let transcript = Transcript::missing();
 
-    assert_eq!(transcript_size(Some(transcript.path())), 0);
-    assert_eq!(transcript_size(None), 0);
+    assert_eq!(transcript_size(transcript.path()), 0);
   }
 }
 

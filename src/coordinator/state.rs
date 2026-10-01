@@ -67,26 +67,15 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    if session_transcript(run, store, &session)?.is_some() {
-      println!(
-        "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
-        session.name(),
-        session.role(),
-        session.context(),
-        session.context_max()
-      );
-    } else {
-      let danger = if session.role() == Role::Lead {
-        "; lead stop threshold disabled"
-      } else {
-        ""
-      };
-      println!(
-        "  {:<16} {:<12} context UNAVAILABLE (transcript not found{danger}) quiet {quiet}s{flags}",
-        session.name(),
-        session.role()
-      );
-    }
+    // A transcript gone from under the run fails the report, not reads as zero.
+    session_transcript(&session)?;
+    println!(
+      "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
+      session.name(),
+      session.role(),
+      session.context(),
+      session.context_max()
+    );
   }
   print_time_summary(store)?;
   if store.read(human_wait::open)?.is_some() {

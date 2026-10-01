@@ -600,7 +600,7 @@ pub struct SessionSpec {
   pub last_growth: DateTime<Utc>,
   pub kicked_at: Option<DateTime<Utc>>,
   pub over_limit_at: Option<DateTime<Utc>>,
-  pub transcript: Option<&'static str>,
+  pub transcript: &'static str,
 }
 
 /// A live implementer that has just been launched and read nothing yet.
@@ -619,18 +619,17 @@ pub fn launched_implementer() -> SessionSpec {
     last_growth: created_at(),
     kicked_at: None,
     over_limit_at: None,
-    transcript: None,
+    transcript: "/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl",
   }
 }
 
-/// A live implementer that has been polled: its transcript was found, has
-/// grown, and its context read.
+/// A live implementer that has been polled: its transcript has grown, and
+/// its context read.
 pub fn working_implementer() -> SessionSpec {
   SessionSpec {
     context: ContextSize::tokens(4_000),
     context_max: ContextSize::tokens(5_000),
     last_growth: timestamp(1_700_000_600),
-    transcript: Some("/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"),
     ..launched_implementer()
   }
 }
@@ -657,7 +656,7 @@ pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Resu
     spec.last_growth,
     spec.kicked_at,
     spec.over_limit_at,
-    spec.transcript.map(PathBuf::from),
+    PathBuf::from(spec.transcript),
   )
 }
 
@@ -677,7 +676,7 @@ pub fn format_session(session: &Session) -> String {
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),
-    format_option(session.transcript().map(|path| path.display().to_string())),
+    session.transcript().display(),
     session.is_live(),
     session.can_take_task(),
     session.can_be_kicked(),

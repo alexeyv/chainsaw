@@ -31,8 +31,6 @@ mod try_from {
       (RunEventKind::Stop, "stop"),
       (RunEventKind::DaemonStart, "daemon-start"),
       (RunEventKind::DaemonExit, "daemon-exit"),
-      (RunEventKind::TranscriptMissing, "transcript-missing"),
-      (RunEventKind::TranscriptFound, "transcript-found"),
     ];
 
     assert_eq!(names.len(), RunEventKind::iter().count());

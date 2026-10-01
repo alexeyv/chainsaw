@@ -39,8 +39,10 @@ pub fn task_row(db: &Connection, id: i64) -> Result<()> {
 pub fn session_row(db: &Connection, id: i64) -> Result<()> {
   db.execute(
     "
-      insert into sessions(id, name, role, agent, external_session_id, started_at, last_growth)
-      values(?1, 'implementer', 'implementer', 'claude', 'session-' || ?1, 0, 0)
+      insert into sessions(
+        id, name, role, agent, external_session_id, started_at, last_growth, transcript
+      )
+      values(?1, 'implementer', 'implementer', 'claude', 'session-' || ?1, 0, 0, 'session.jsonl')
       ",
     [id],
   )?;

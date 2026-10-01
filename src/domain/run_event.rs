@@ -33,8 +33,6 @@ pub enum RunEventKind {
   Stop,
   DaemonStart,
   DaemonExit,
-  TranscriptMissing,
-  TranscriptFound,
 }
 
 impl RunEventKind {
@@ -62,8 +60,6 @@ impl RunEventKind {
       Self::Stop => "stop",
       Self::DaemonStart => "daemon-start",
       Self::DaemonExit => "daemon-exit",
-      Self::TranscriptMissing => "transcript-missing",
-      Self::TranscriptFound => "transcript-found",
     }
   }
 }
