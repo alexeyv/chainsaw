@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::{ContextSize, SessionKind};
+use anyhow::Result;
+
+use super::{ContextSize, SessionKind, SessionRuntime, StartSession, StartedSession};
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +33,25 @@ pub enum PromptEcho {
   WithReply,
 }
 
+/// A session its agent has started: what the runtime knows it by, and the
+/// transcript the agent has begun writing.
+#[derive(Debug)]
+pub struct Launched {
+  pub started: StartedSession,
+  pub transcript: PathBuf,
+}
+
 pub trait Agent {
+  /// Starts a session through `runtime` with `prompt` as its first prompt,
+  /// and returns once the agent has begun writing its transcript, or fails
+  /// when it has not within a minute.
+  fn start(
+    &self,
+    runtime: &dyn SessionRuntime,
+    session: StartSession<'_>,
+    prompt: &str,
+  ) -> Result<Launched>;
+
   /// The executable a session of this kind runs, as the agent's CLI is
   /// installed on PATH.
   fn program(&self) -> &'static str;

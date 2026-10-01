@@ -11,7 +11,7 @@ use rusqlite::Transaction;
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{AgentKind, ContextSize, Role, Session, SessionRuntime};
+use crate::domain::{Agent, AgentKind, ContextSize, Role, Session, SessionRuntime};
 use crate::infra::agent::{self, Claude};
 use crate::infra::git::Repo;
 use crate::infra::session_runtime::{HerdrSessionRuntime, OrcaSessionRuntime};
@@ -102,7 +102,13 @@ impl Run {
     session::latest_named(transaction, self.runtime(), agent::implementing, name)
   }
 
-  /// Registers a session its runtime has just started.
+  /// The agent of `kind`, as every session of that kind borrows it.
+  pub fn agent(&self, kind: AgentKind) -> &'static dyn Agent {
+    agent::implementing(kind)
+  }
+
+  /// Registers a session its agent has just started.
+  #[allow(clippy::too_many_arguments)]
   pub fn register_session(
     &self,
     transaction: &Transaction<'_>,
@@ -111,6 +117,7 @@ impl Run {
     agent: AgentKind,
     external_session_id: &str,
     launched_head: Option<&str>,
+    transcript: &Path,
   ) -> Result<Session<'_>> {
     session::create(
       transaction,
@@ -121,6 +128,7 @@ impl Run {
       agent,
       external_session_id,
       launched_head,
+      transcript,
     )
   }
 

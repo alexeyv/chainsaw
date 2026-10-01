@@ -109,7 +109,7 @@ mod default_args {
   fn should_work() {
     assert_eq!(
       Cursor.default_args(SessionKind::Implementer),
-      "--trust --force 'Reply only with the word ready, then wait for the task.'"
+      "--trust --force"
     );
   }
 

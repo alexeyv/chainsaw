@@ -126,7 +126,7 @@ mod default_args {
   fn should_work() {
     assert_eq!(
       Codex.default_args(SessionKind::Implementer),
-      "--dangerously-bypass-approvals-and-sandbox ."
+      "--dangerously-bypass-approvals-and-sandbox"
     );
   }
 

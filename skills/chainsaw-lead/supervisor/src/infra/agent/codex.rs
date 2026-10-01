@@ -11,8 +11,10 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{commits_printed, entries, read_lossy, text_of};
-use crate::domain::{Agent, ContextSize, PromptState, SessionKind};
+use super::{commits_printed, entries, read_lossy, start_with_prompt, text_of};
+use crate::domain::{
+  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+};
 
 pub struct Codex;
 
@@ -21,16 +23,25 @@ impl Agent for Codex {
     "codex"
   }
 
+  /// The prompt goes in on the command line, and the agent writes it to its
+  /// transcript before its first reply.
+  fn start(
+    &self,
+    runtime: &dyn SessionRuntime,
+    session: StartSession<'_>,
+    prompt: &str,
+  ) -> Result<Launched> {
+    start_with_prompt(self, runtime, session, prompt)
+  }
+
   /// An unattended session edits, builds, tests and commits without asking.
   /// Codex's sandboxes keep `.git` read-only, so under `--sandbox
   /// workspace-write` a `git commit` fails with "Unable to create
   /// .git/index.lock: Operation not permitted" (Codex 0.157.1, 2026-09-26),
   /// and `--full-auto` then stops at the approval that failure raises. The
-  /// model stays whatever Codex's own configuration says. The trailing `.`
-  /// is the session's first prompt: Codex writes its rollout, and so has a
-  /// session id to report, only once a prompt lands.
+  /// model stays whatever Codex's own configuration says.
   fn default_args(&self, _kind: SessionKind) -> String {
-    "--dangerously-bypass-approvals-and-sandbox .".to_owned()
+    "--dangerously-bypass-approvals-and-sandbox".to_owned()
   }
 
   fn compact_prompt(&self) -> &'static str {

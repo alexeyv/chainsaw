@@ -8,7 +8,7 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::Utc;
 
 use super::{
@@ -129,10 +129,16 @@ pub(super) fn start(
 }
 
 /// The lead is started by the human in Claude Code, so the daemon registers
-/// it from what the lead says about itself. The same session id keeps its row
-/// across daemon restarts; a different one is a new incarnation and stops the
-/// old row.
+/// it from what the lead says about itself, and with the transcript it is
+/// already writing. The same session id keeps its row across daemon restarts;
+/// a different one is a new incarnation and stops the old row.
 fn register_lead(run: &Run, store: &Store, lead: &str, lead_session_id: &str) -> Result<()> {
+  let Some(transcript) = run
+    .agent(AgentKind::Claude)
+    .transcript(run.dir(), lead_session_id)
+  else {
+    bail!("supervisor: lead session {lead_session_id} has no transcript; check --session-id");
+  };
   store.write(|tx| {
     let current = run.session_named(tx, lead)?;
     if !current.is_some_and(|session| {
@@ -148,6 +154,7 @@ fn register_lead(run: &Run, store: &Store, lead: &str, lead_session_id: &str) ->
         AgentKind::Claude,
         lead_session_id,
         None,
+        &transcript,
       )?;
     }
     Ok(())

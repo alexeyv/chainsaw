@@ -10,12 +10,11 @@ use anyhow::{Result, bail};
 use serde_json::json;
 use sha1::{Digest, Sha1};
 
-use super::cmd_prompt;
 use crate::domain::StartSession;
 use crate::domain::{RunEventKind, Session, SessionKind, Task};
 use crate::infra::transcript_monitor::TranscriptMonitor;
 use crate::persistence::store::Store;
-use crate::persistence::{run_event, session};
+use crate::persistence::{prompt, run_event, session};
 use crate::run::Run;
 
 pub(super) fn task_session<'r>(
@@ -67,29 +66,48 @@ pub(super) fn session_name(run: &Run, store: &Store, id: Option<i64>) -> Result<
   })
 }
 
-pub(super) fn cmd_launch(run: &Run, store: &Store, name: &str, kind: SessionKind) -> Result<()> {
+/// Starts a session on `prompt` and registers it once its agent has begun
+/// its transcript. The prompt goes in with the session, so it is recorded as
+/// sent once and seen.
+pub(super) fn cmd_launch(
+  run: &Run,
+  store: &Store,
+  name: &str,
+  kind: SessionKind,
+  prompt: &str,
+) -> Result<()> {
   let agent = run.settings().launch_agent(kind);
-  let started = run.runtime().start(StartSession {
-    id: name,
-    run_dir: run.dir(),
-    kind,
-    agent,
-    args: run.settings().launch_args(kind),
-  })?;
-  let external_session_id = started.external_id;
-  let pane_id = started.pane_id;
-  let tab_id = started.tab_id;
+  // The session starts working on its prompt at once, so the tree it was
+  // launched on is the one before it starts.
   let launched_head = run.repo().head().ok();
+  let launched = run.agent(agent).start(
+    run.runtime(),
+    StartSession {
+      id: name,
+      run_dir: run.dir(),
+      kind,
+      agent,
+      args: run.settings().launch_args(kind),
+    },
+    prompt,
+  )?;
+  let external_session_id = launched.started.external_id;
+  let pane_id = launched.started.pane_id;
+  let tab_id = launched.started.tab_id;
   store.write(|tx| {
     session::stop_named(tx, name)?;
-    run.register_session(
+    let session = run.register_session(
       tx,
       name,
       kind.role(),
       agent,
       &external_session_id,
       launched_head.as_deref(),
+      &launched.transcript,
     )?;
+    let sent = prompt::create(tx, session.id(), prompt)?;
+    prompt::record_attempt(tx, sent.id())?;
+    prompt::record_seen(tx, sent.id())?;
     run_event::create(tx, RunEventKind::Launch, name)?;
     Ok(())
   })?;
@@ -102,20 +120,18 @@ pub(super) fn cmd_launch(run: &Run, store: &Store, name: &str, kind: SessionKind
 
 pub(super) fn cmd_start_commentator(run: &Run, store: &Store, role_prompt: &Path) -> Result<()> {
   let name = commentator_agent_name(run.dir());
-  cmd_launch(run, store, &name, SessionKind::Commentator)?;
   let role_prompt = absolute_path(role_prompt)?;
-  cmd_prompt(
+  cmd_launch(
     run,
     store,
     &name,
+    SessionKind::Commentator,
     &format!(
       "Read and follow this role prompt entirely: {}\nTranscripts directory: {}\nRun directory: {}",
       role_prompt.display(),
       run.transcripts_dir().display(),
       run.dir().display()
     ),
-    false,
-    300,
   )
 }
 

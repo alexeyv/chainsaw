@@ -9,14 +9,27 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{commits_printed, entries, read_lossy, text_of};
-use crate::domain::{Agent, ContextSize, PromptState, SessionKind};
+use super::{commits_printed, entries, read_lossy, start_with_prompt, text_of};
+use crate::domain::{
+  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+};
 
 pub struct Claude;
 
 impl Agent for Claude {
   fn program(&self) -> &'static str {
     "claude"
+  }
+
+  /// The prompt goes in on the command line, and the agent writes it to its
+  /// transcript before its first reply.
+  fn start(
+    &self,
+    runtime: &dyn SessionRuntime,
+    session: StartSession<'_>,
+    prompt: &str,
+  ) -> Result<Launched> {
+    start_with_prompt(self, runtime, session, prompt)
   }
 
   /// Today's flags; the commentator keeps slash commands

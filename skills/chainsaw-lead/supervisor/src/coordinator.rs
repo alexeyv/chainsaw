@@ -157,7 +157,9 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
       Duration::from_millis(poll_interval_ms),
     ),
     Command::StartCommentator { role_prompt } => cmd_start_commentator(run, store, &role_prompt),
-    Command::Launch { name } => cmd_launch(run, store, &name, SessionKind::Implementer),
+    Command::Launch { name, prompt } => {
+      cmd_launch(run, store, &name, SessionKind::Implementer, &prompt)
+    }
     Command::Prompt {
       name,
       text,

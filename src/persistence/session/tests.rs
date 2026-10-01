@@ -29,6 +29,7 @@ fn implementer(
     AgentKind::Claude,
     external,
     Some("base123"),
+    Path::new("/transcripts/session.jsonl"),
   )
 }
 
@@ -93,7 +94,7 @@ context_max: none
 last_growth: {started}
 kicked_at: none
 over_limit_at: none
-transcript: none
+transcript: /transcripts/session.jsonl
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -104,7 +105,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=None",
+        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=Some(\"/transcripts/session.jsonl\")",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -125,6 +126,7 @@ can_latch_over_limit: true"#,
       AgentKind::Claude,
       "uuid-lead",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
     transaction.commit()?;
 
@@ -265,6 +267,7 @@ mod all {
       AgentKind::Claude,
       "uuid-lead",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
     let first = implementer(&transaction, "implementer-1", "uuid-1")?;
     stop_named(&transaction, "implementer-1")?;
@@ -426,7 +429,7 @@ context_max: 4000
 last_growth: {polled}
 kicked_at: none
 over_limit_at: none
-transcript: none
+transcript: /transcripts/session.jsonl
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -648,6 +651,7 @@ mod record_over_limit {
       AgentKind::Claude,
       "uuid-lead",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
 
     let before = Utc::now();
@@ -675,6 +679,7 @@ mod record_over_limit {
       AgentKind::Claude,
       "uuid-lead",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
     let latched = record_over_limit(&transaction, runtime(), implementing, lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
@@ -707,6 +712,7 @@ mod record_over_limit {
       AgentKind::Claude,
       "uuid-lead-1",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
     record_over_limit(&transaction, runtime(), implementing, first.id())?;
     stop_named(&transaction, "lead")?;
@@ -720,6 +726,7 @@ mod record_over_limit {
       AgentKind::Claude,
       "uuid-lead-2",
       None,
+      Path::new("/transcripts/session.jsonl"),
     )?;
 
     assert_eq!(second.over_limit_at(), None);

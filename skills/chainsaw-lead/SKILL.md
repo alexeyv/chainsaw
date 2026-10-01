@@ -243,9 +243,11 @@ defect. Measure implementer-busy against wall clock; time waiting on the human i
 measured separately (`$SUP state` shows both).
 
 1. Start the next implementer and pre-populate it while the current one works. Every
-   task gets a fresh session: `$SUP launch implementer-<n+1>` starts one in its own
-   tab, and the supervisor refuses to dispatch a second task to a session that has
-   already taken one. Then `$SUP prompt implementer-<n+1> "<reading turn>"` with:
+   task gets a fresh session, started on its reading turn:
+   `$SUP launch implementer-<n+1> "<reading turn>"` starts one in its own tab and
+   returns once the session has begun writing its transcript. The supervisor refuses
+   to dispatch a second task to a session that has already taken one. The reading
+   turn is:
 
    ```text
    You are about to be given one task in this repository. This turn is preparation

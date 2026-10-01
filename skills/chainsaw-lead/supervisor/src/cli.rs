@@ -36,8 +36,12 @@ pub enum Command {
     #[arg(long)]
     role_prompt: PathBuf,
   },
-  /// Start an implementer session.
-  Launch { name: String },
+  /// Start an implementer session on its first prompt.
+  Launch {
+    name: String,
+    /// The session's first prompt, which it starts working on at once.
+    prompt: String,
+  },
   /// Deliver a prompt to a session.
   Prompt {
     name: String,

@@ -200,7 +200,10 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         ]
         external_id = self.external_session_id("worker")
         self.assertEqual(start["program"], "cursor-agent")
-        self.assertEqual(start["args"], ["--trust", "--force", "Reply only with the word ready, then wait for the task."])
+        self.assertEqual(
+            start["args"],
+            ["--trust", "--force", "--", "Reply only with the word ready, then wait for the task."],
+        )
         self.assertEqual(external_id, "session-worker-1")
         self.assertEqual(self.session_state("worker")["session_id"], external_id)
 

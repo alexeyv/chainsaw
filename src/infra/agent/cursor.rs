@@ -10,16 +10,22 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Instant, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use super::{entries, read_lossy, text_of};
-use crate::domain::{Agent, ContextSize, PromptEcho, PromptState, SessionKind};
+use super::{TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, entries, read_lossy, start_with_prompt, text_of};
+use crate::domain::{
+  Agent, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
+  SessionStatus, StartSession,
+};
 
-/// The prompt a new session is launched with.
-pub const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the task.";
+/// The prompt a session is started on, before it is sent its real first one.
+/// A bare `.` once drew a chooser, which then swallowed the prompt sent into
+/// it; this one asks for nothing more than a word.
+const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the task.";
 
 pub struct Cursor;
 
@@ -33,14 +39,41 @@ impl Agent for Cursor {
   /// `--trust` skips the workspace trust prompt and `--force` lets every
   /// command run without approval. A `git commit` succeeds under Cursor's
   /// default sandbox with `--force` (verified on 2026.08.11), so the sandbox
-  /// stays on. The model stays whatever Cursor's own configuration says. The
-  /// trailing `.` is the session's first prompt: Cursor writes its
-  /// transcript, and so has a session id to report, only once a prompt lands.
-  /// Cursor writes a session's transcript, and so its id, only once a prompt
-  /// has been answered; this first one asks for nothing more. A bare `.`
-  /// once drew a chooser, which then swallowed the task sent into it.
+  /// stays on. The model stays whatever Cursor's own configuration says.
   fn default_args(&self, _kind: SessionKind) -> String {
-    format!("--trust --force {}", shell_words::quote(LAUNCH_PROMPT))
+    "--trust --force".to_owned()
+  }
+
+  /// Cursor writes its transcript, and so has a session id to report, only
+  /// with its first reply, which to a real prompt can take minutes. So the
+  /// session starts on `LAUNCH_PROMPT`, is sent `prompt` once that reply is
+  /// written, and the start returns when the session has taken it.
+  fn start(
+    &self,
+    runtime: &dyn SessionRuntime,
+    session: StartSession<'_>,
+    prompt: &str,
+  ) -> Result<Launched> {
+    let name = session.id;
+    let launched = start_with_prompt(self, runtime, session, LAUNCH_PROMPT)?;
+    let offset = fs::metadata(&launched.transcript).map_or(0, |metadata| metadata.len());
+    runtime.prompt(name, prompt)?;
+    let opening: String = prompt.chars().take(80).collect();
+    let sent = Instant::now();
+    // Cursor writes the prompt only with its reply, so the session going busy
+    // on it is the receipt until then.
+    while self.prompt_state(&launched.transcript, offset, &opening) == PromptState::Unseen
+      && runtime.status(name).ok().flatten() != Some(SessionStatus::Busy)
+    {
+      if sent.elapsed() >= TRANSCRIPT_TIMEOUT {
+        bail!(
+          "cursor-agent session {name} did not take its first prompt within {} seconds",
+          TRANSCRIPT_TIMEOUT.as_secs()
+        );
+      }
+      thread::sleep(TRANSCRIPT_POLL);
+    }
+    Ok(launched)
   }
 
   /// Cursor's own compaction command. The daemon sends it only past a context
@@ -55,8 +88,8 @@ impl Agent for Cursor {
     None
   }
 
-  /// Cursor writes a session's transcript only once its first prompt lands,
-  /// which is why the default args end in one.
+  /// Cursor writes a session's transcript only once its first prompt has been
+  /// answered, which is why it starts on `LAUNCH_PROMPT`.
   fn session_started_since(&self, canonical_run_dir: &Path, since: SystemTime) -> Option<String> {
     newest_session_in(&Self::projects_dir().ok()?, canonical_run_dir, since)
   }

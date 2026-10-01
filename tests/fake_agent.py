@@ -65,18 +65,16 @@ def end_turn(agent):
 
 
 def open_transcript(current, agent, args):
-    """What an agent writes the moment it starts, given `args`: Codex names the
-    session and its working directory, Cursor takes the prompt on its command
-    line, Claude writes nothing."""
+    """What an agent does the moment it starts, given `args`: Codex names the
+    session and its working directory, and every agent takes the prompt after
+    `--` on its command line as a real one would."""
     if agent["agent"] == "codex":
         append_entry(agent, {
             "type": "session_meta",
             "payload": {"id": agent["session_id"], "cwd": agent["run_dir"]},
         })
-    if agent["agent"] == "cursor":
-        prompts = [word for word in args if not word.startswith("--")]
-        if prompts:
-            deliver(current, agent, prompts[-1])
+    if "--" in args and args.index("--") + 1 < len(args):
+        deliver(current, agent, args[args.index("--") + 1])
 
 
 def deliver(current, agent, text):

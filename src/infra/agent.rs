@@ -3,12 +3,21 @@
 //! its own transcript format, and what reading a JSONL transcript takes is
 //! shared here.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use anyhow::{Result, bail};
 use regex::Regex;
 use serde_json::Value;
 
-use crate::domain::{Agent, AgentKind};
+use crate::domain::{Agent, AgentKind, Launched, SessionRuntime, StartSession};
+
+/// How long a new session has to begin its transcript before its start fails.
+const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often a start looks for the transcript it is waiting on.
+const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
 
 mod claude;
 mod codex;
@@ -24,6 +33,53 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
     AgentKind::Claude => &Claude,
     AgentKind::Codex => &Codex,
     AgentKind::Cursor => &Cursor,
+  }
+}
+
+/// Starts the session with `prompt` last on its command line, after `--` so
+/// no option that takes several values swallows it, and waits for the
+/// transcript the agent opens as it takes the prompt.
+fn start_with_prompt(
+  agent: &dyn Agent,
+  runtime: &dyn SessionRuntime,
+  session: StartSession<'_>,
+  prompt: &str,
+) -> Result<Launched> {
+  let mut args = session.args.to_vec();
+  args.extend(["--".to_owned(), prompt.to_owned()]);
+  let run_dir = session.run_dir;
+  let started = runtime.start(StartSession {
+    args: &args,
+    ..session
+  })?;
+  let transcript = transcript_within(agent, run_dir, &started.external_id, TRANSCRIPT_TIMEOUT)?;
+  Ok(Launched {
+    started,
+    transcript,
+  })
+}
+
+/// The transcript of the session `external_id` once the agent has begun it,
+/// or why it did not within `timeout`.
+fn transcript_within(
+  agent: &dyn Agent,
+  canonical_run_dir: &Path,
+  external_id: &str,
+  timeout: Duration,
+) -> Result<PathBuf> {
+  let started = Instant::now();
+  loop {
+    if let Some(transcript) = agent.transcript(canonical_run_dir, external_id) {
+      return Ok(transcript);
+    }
+    if started.elapsed() >= timeout {
+      bail!(
+        "{} session {external_id} wrote no transcript within {} seconds",
+        agent.program(),
+        timeout.as_secs()
+      );
+    }
+    thread::sleep(TRANSCRIPT_POLL);
   }
 }
 
@@ -85,3 +141,6 @@ fn text_of(content: &Value) -> String {
     other => other.to_string(),
   }
 }
+
+#[cfg(test)]
+mod tests;

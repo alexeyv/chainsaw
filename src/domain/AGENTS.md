@@ -6,7 +6,7 @@
 
 **`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Records the agent it was launched with and keeps it for life. Has zero-to-many Tasks. Borrows the run's `SessionRuntime` and drives itself through it: status, prompt, interrupt, wait. Borrows the `Agent` of its kind from the run too, and reads its transcript through it.
 
-**`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: its launch flags, and where and how its transcript is read. Implemented in `infra`, one per `AgentKind`; the run hands every `Session` the one its kind names.
+**`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: how it starts a session on its first prompt, its launch flags, and where and how its transcript is read. A session exists only once its agent has begun its transcript. Implemented in `infra`, one per `AgentKind`; the run hands every `Session` the one its kind names.
 
 **`SessionRuntime`** (`session_runtime.rs`): the interface to the terminal multiplexer a run's sessions live in: it starts a session and drives it by name. Implemented in `infra`; the run owns one and hands every `Session` a reference.
 

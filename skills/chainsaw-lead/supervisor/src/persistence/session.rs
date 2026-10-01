@@ -29,8 +29,8 @@ const SELECT: &str = "
   from sessions
 ";
 
-/// Register a session that has just started with `agent`. Its transcript has
-/// not grown yet, so its last growth is its start.
+/// Register a session that has just started with `agent` and begun writing
+/// `transcript`. Its last growth is its start.
 #[allow(clippy::too_many_arguments)]
 pub fn create<'r>(
   transaction: &Transaction<'_>,
@@ -41,13 +41,15 @@ pub fn create<'r>(
   agent: AgentKind,
   external_session_id: &str,
   launched_head: Option<&str>,
+  transcript: &Path,
 ) -> Result<Session<'r>> {
   let started_at = Utc::now();
   let id = transaction.query_row(
     "
       insert into sessions(
-        name, role, agent, external_session_id, launched_head, started_at, last_growth
-      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+        name, role, agent, external_session_id, launched_head, started_at, last_growth,
+        transcript
+      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
       returning id
       ",
     params![
@@ -57,6 +59,7 @@ pub fn create<'r>(
       external_session_id,
       launched_head,
       started_at.timestamp_millis(),
+      transcript.to_string_lossy(),
     ],
     |row| row.get(0),
   )?;

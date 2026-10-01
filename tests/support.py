@@ -24,6 +24,8 @@ FAKE_RUNTIMES = {
     "herdr": PROJECT_ROOT / "tests" / "fake_herdr.py",
     "orca": PROJECT_ROOT / "tests" / "fake_orca.py",
 }
+#: The first prompt a session is launched on unless a case names another.
+READING_TURN = "Read the fixture files, then stop and wait for the task."
 #: Where the supervisor maps session names to the Orca terminals it opened.
 ORCA_REGISTRY_FILE_NAME = "chainsaw-orca-terminals.json"
 
@@ -209,8 +211,15 @@ class SupervisorContractCase(unittest.TestCase):
         result = self.assert_success(self.cli(*args, input_text=text))
         return int(result.stdout.strip())
 
-    def launch(self, name="worker"):
-        return self.assert_success(self.cli("launch", name))
+    def launch(self, name="worker", prompt=None):
+        """Launch `name` on its first prompt and let the turn that prompt starts
+        end, as the reading turn a lead launches with has ended by the time it
+        sends the task."""
+        result = self.assert_success(self.cli("launch", name, prompt or READING_TURN))
+        deadline = time.monotonic() + 5
+        while fake_agent.is_busy(self.session_state(name)) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return result
 
     def write_settings(self, text):
         """Put a chainsaw.toml in the run directory; the next process reads it."""
@@ -236,7 +245,17 @@ class SupervisorContractCase(unittest.TestCase):
         return agent
 
     def launch_args(self, name):
-        """The agent flags the runtime was handed when it last started `name`."""
+        """The agent flags the runtime was handed when it last started `name`,
+        without the prompt that follows them."""
+        args = self._start_args(name)
+        return args[:args.index("--")]
+
+    def launch_prompt(self, name):
+        """The prompt `name` was last started on, after `--` on its command line."""
+        args = self._start_args(name)
+        return args[args.index("--") + 1]
+
+    def _start_args(self, name):
         return next(
             operation["args"] for operation in reversed(self.operations_on(name))
             if operation["operation"] == "start"
@@ -444,9 +463,17 @@ class SupervisorContractCase(unittest.TestCase):
         daemon.wait(timeout=10)
         return state
 
-    def start_daemon(self, lead="lead", session_id=None, expected_exit=0):
-        """Start a daemon that must have exited with `expected_exit` by teardown."""
+    def start_daemon(self, lead="lead", session_id=None, expected_exit=0,
+                     lead_transcript=True):
+        """Start a daemon that must have exited with `expected_exit` by teardown.
+        The lead registers with the transcript it is already writing, so one is
+        begun for it unless the case says otherwise or has written its own."""
         session_id = session_id or f"session-{lead}"
+        written = list((self.home / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
+        if lead_transcript and not written:
+            log = self.transcripts_dir / f"{session_id}.jsonl"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.touch()
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
                    "--poll-interval-ms", "10"]

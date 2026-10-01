@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests.support import SupervisorContractCase
+from tests.support import READING_TURN, SupervisorContractCase
 
 
 class TaskContractTests(SupervisorContractCase):
@@ -195,9 +195,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         first = self.new_task(text="First task.")
         second = self.new_task(text="Second task.")
         self.launch("worker-one")
-        self.assert_success(self.cli(
-            "launch", "worker-two",
-        ))
+        self.launch("worker-two")
         self.assert_success(self.dispatch(first, "worker-one"))
 
         result = self.dispatch(second, "worker-two")
@@ -416,9 +414,7 @@ class VerificationContractTests(SupervisorContractCase):
             "first marker was missed",
         ))
         second = self.new_task(text="Second task.", files="second.txt")
-        self.assert_success(self.cli(
-            "launch", "replacement",
-        ))
+        self.launch("replacement")
         self.assert_success(self.dispatch(second, "replacement"))
 
         result = self.cli(
@@ -584,7 +580,7 @@ class FreshSessionContractTests(SupervisorContractCase):
     def test_launch_no_longer_refuses_while_an_earlier_session_is_idle(self):
         self.verified_first_task()
 
-        self.assert_success(self.cli("launch", "replacement"))
+        self.launch("replacement")
 
     def test_a_committed_predecessor_releases_the_next_dispatch(self):
         self.prepare_committed_task()
@@ -594,7 +590,7 @@ class FreshSessionContractTests(SupervisorContractCase):
         daemon.wait(timeout=10)
 
         second = self.new_task(text="Immediate successor.", files="second.txt")
-        self.assert_success(self.cli("launch", "replacement"))
+        self.launch("replacement")
 
         result = self.dispatch(second, "replacement")
         state = self.assert_success(self.cli("state"))
@@ -898,17 +894,14 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assert_failure(result, 'session worker: unknown agent "gemini"')
 
-    def test_missing_lead_transcript_is_not_reported_as_zero_context(self):
-        daemon = self.start_daemon()
-        state = self.wait_for_state("context UNAVAILABLE")
-        context = self.assert_success(self.cli("context", "lead"))
-        self.assert_success(self.cli("stop"))
+    def test_a_lead_without_a_transcript_is_refused(self):
+        daemon = self.start_daemon(expected_exit=1, lead_transcript=False)
+
         daemon.wait(timeout=10)
 
-        self.assertIn("lead stop threshold disabled", state.stdout)
-        self.assertEqual(
-            context.stdout,
-            "lead\tUNAVAILABLE (transcript not found)\n",
+        self.assertIn(
+            "supervisor: lead session session-lead has no transcript; check --session-id",
+            daemon.stderr_path.read_text(),
         )
 
     def test_a_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
@@ -1041,7 +1034,9 @@ class BusySessionContractTests(SupervisorContractCase):
         def release():
             entries = [json.loads(line) for line in log.read_text().splitlines()]
             seen_while_busy.append(any(
-                entry.get("type") == "user" for entry in entries
+                entry.get("type") == "user"
+                and entry["message"]["content"] == "queued while busy"
+                for entry in entries
             ))
             self.set_agent_status("worker", "idle")
 
@@ -1097,7 +1092,7 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
     def test_commentator_is_pointed_at_the_directory_claude_code_actually_writes(self):
         commentator = self.start_commentator()
 
-        prompt = self.prompts_to(commentator)[0]
+        prompt = self.launch_prompt(commentator)
         prefix = "Transcripts directory: "
         announced = next(
             line.removeprefix(prefix)
@@ -1111,7 +1106,7 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         self.assertTrue(Path(announced).is_dir(), announced)
 
     def test_supervisor_state_is_stored_beside_the_transcripts(self):
-        self.assert_success(self.cli("launch", "worker"))
+        self.launch()
 
         self.assertTrue(
             (self.transcripts_dir / "chainsaw-supervisor.db").is_file(),
@@ -1128,11 +1123,12 @@ if __name__ == "__main__":
 class WatchTranscriptsContractTests(SupervisorContractCase):
     """`watch-transcripts` prints one line per interval naming transcripts that grew."""
 
-    def test_reports_growth_of_existing_and_new_transcripts_once_per_interval(self):
+    def test_reports_growth_of_every_implementer_transcript_once_per_interval(self):
         self.launch("impl-1")
         self.launch("impl-2")
         self.append_text("impl-1", "working")
-        existing = self.session_transcript("impl-1")
+        first = self.session_transcript("impl-1")
+        second = self.session_transcript("impl-2")
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "watch-transcripts", "--interval-ms", "200"]
         process = subprocess.Popen(
@@ -1142,17 +1138,14 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
-        before = existing.stat().st_size
+        before = {path: path.stat().st_size for path in (first, second)}
         self.append_text("impl-1", "still working")
         self.append_text("impl-2", "starting")
-        grown = existing.stat().st_size - before
-        new = self.session_transcript("impl-2")
 
         line = process.stdout.readline()
-        expected = sorted([
-            (existing.stem, grown),
-            (new.stem, new.stat().st_size),
-        ])
+        expected = sorted(
+            (path.stem, path.stat().st_size - size) for path, size in before.items()
+        )
         self.assertEqual(
             line,
             "transcripts grew: " + ", ".join(f"{name} +{size}" for name, size in expected) + "\n",
@@ -1296,7 +1289,7 @@ class StandingWarningTests(SupervisorContractCase):
     def test_an_absent_daemon_is_flagged_until_one_polls_again(self):
         never = self.assert_success(self.cli("state"))
         daemon = self.start_daemon()
-        self.wait_for_state("context UNAVAILABLE")
+        self.wait_for_state("context       0")
         running = self.assert_success(self.cli("state"))
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
@@ -1305,7 +1298,7 @@ class StandingWarningTests(SupervisorContractCase):
         )
         stopped = self.assert_success(self.cli("state"))
         restarted = self.start_daemon()
-        self.wait_for_state("context UNAVAILABLE")
+        self.wait_for_state("context       0")
         again = self.assert_success(self.cli("state"))
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
@@ -1456,7 +1449,7 @@ class SettingsContractTests(SupervisorContractCase):
         self.write_settings('[implementer]\nargs = "--model sonnet"\n')
 
         self.assert_success(
-            self.cli("--set", "implementer.args=--model haiku", "launch", "worker")
+            self.cli("--set", "implementer.args=--model haiku", "launch", "worker", READING_TURN)
         )
 
         self.assertEqual(self.launch_args("worker"), ["--model", "haiku"])
@@ -1466,7 +1459,7 @@ class SettingsContractTests(SupervisorContractCase):
             self.cli(
                 "--set", "implementer.args=--model gpt-5.4",
                 "--set", "implementer.agent=codex",
-                "launch", "worker",
+                "launch", "worker", READING_TURN,
             )
         )
 
@@ -1529,7 +1522,7 @@ class SettingsContractTests(SupervisorContractCase):
 
         self.assertEqual(self.session_agent("worker"), "codex")
         self.assertEqual(
-            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox", "."],
+            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox"],
         )
 
     def test_an_invalid_global_file_fails_naming_its_full_path(self):
@@ -1582,14 +1575,14 @@ class SettingsContractTests(SupervisorContractCase):
         self.assert_failure(result, "in `commentator.agent`")
 
     def test_an_unknown_agent_in_a_set_fails_naming_the_set(self):
-        result = self.cli("--set", "implementer.agent=gemini", "launch", "worker")
+        result = self.cli("--set", "implementer.agent=gemini", "launch", "worker", READING_TURN)
 
         self.assert_failure(
             result,
             'invalid --set implementer.agent=gemini: unknown agent "gemini", '
             'expected one of `claude`, `codex`, `cursor`',
         )
-        self.assert_success(self.cli("launch", "worker"))
+        self.launch()
 
     def test_an_invalid_file_fails_every_command_until_it_is_fixed(self):
         self.write_settings('[reviewer]\nargs = "x"\n')
@@ -1668,13 +1661,14 @@ class CodexImplementerContractTests(SupervisorContractCase):
         super().setUp()
         self.write_settings('[implementer]\nagent = "codex"\n')
 
-    def test_launch_starts_codex_unsandboxed_and_the_row_records_it(self):
+    def test_launch_starts_codex_unsandboxed_on_its_prompt_and_the_row_records_it(self):
         self.launch()
 
         self.assertEqual(self.session_agent("worker"), "codex")
         self.assertEqual(
-            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox", "."],
+            self.launch_args("worker"), ["--dangerously-bypass-approvals-and-sandbox"],
         )
+        self.assertEqual(self.launch_prompt("worker"), READING_TURN)
 
     def test_dispatch_finds_its_prompt_in_the_rollout(self):
         task = self.new_task(text="Implement it the Codex way.")
@@ -1685,11 +1679,16 @@ class CodexImplementerContractTests(SupervisorContractCase):
         rollout = self.session_transcript("worker")
         self.assertEqual(rollout.parents[3], self.home / ".codex" / "sessions", rollout)
         self.assertRegex(rollout.name, r"^rollout-.*-session-worker-1\.jsonl$")
-        meta, first = (json.loads(line) for line in rollout.read_text().splitlines()[:2])
+        meta, launched, task_prompt = (
+            json.loads(line) for line in rollout.read_text().splitlines()[:3]
+        )
         self.assertEqual(meta["type"], "session_meta")
         self.assertEqual(Path(meta["payload"]["cwd"]).resolve(), self.run_dir.resolve())
-        self.assertEqual(first["payload"]["role"], "user")
-        self.assertIn("Implement it the Codex way.", first["payload"]["content"][0]["text"])
+        self.assertEqual(launched["payload"]["content"][0]["text"], READING_TURN)
+        self.assertEqual(task_prompt["payload"]["role"], "user")
+        self.assertIn(
+            "Implement it the Codex way.", task_prompt["payload"]["content"][0]["text"],
+        )
         self.assertIn(f"task {task} dispatched to worker", result.stdout)
 
     def test_context_is_the_last_response_input_not_the_thread_total(self):
@@ -1725,7 +1724,13 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.launch()
 
         self.assertEqual(self.session_agent("worker"), "cursor")
-        self.assertEqual(self.launch_args("worker"), ["--trust", "--force", self.LAUNCH_PROMPT])
+        self.assertEqual(self.launch_args("worker"), ["--trust", "--force"])
+
+    def test_launch_starts_cursor_on_a_word_then_sends_its_first_prompt(self):
+        self.launch()
+
+        self.assertEqual(self.launch_prompt("worker"), self.LAUNCH_PROMPT)
+        self.assertEqual(self.prompts_to("worker"), [READING_TURN])
 
     def test_dispatch_finds_its_prompt_in_the_transcript_under_the_project(self):
         task = self.new_task(text="Implement it the Cursor way.")
@@ -1737,12 +1742,20 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.assertEqual(transcript.parents[3], self.home / ".cursor" / "projects", transcript)
         self.assertEqual(transcript.parent.name, "session-worker-1")
         self.assertEqual(transcript.name, "session-worker-1.jsonl")
-        opening, prompt = (json.loads(line) for line in transcript.read_text().splitlines())
-        self.assertEqual((opening["role"], prompt["role"]), ("user", "user"))
-        # The prompt on the command line is the session's first.
+        opening, launched, prompt = (
+            json.loads(line) for line in transcript.read_text().splitlines()
+        )
+        self.assertEqual(
+            (opening["role"], launched["role"], prompt["role"]), ("user", "user", "user"),
+        )
+        # The word on the command line opens the transcript; the launch prompt follows.
         self.assertIn(
             f"<user_query>\n{self.LAUNCH_PROMPT}\n</user_query>",
             opening["message"]["content"][0]["text"],
+        )
+        self.assertIn(
+            f"<user_query>\n{READING_TURN}\n</user_query>",
+            launched["message"]["content"][0]["text"],
         )
         self.assertIn(
             "<user_query>\nImplement it the Cursor way.", prompt["message"]["content"][0]["text"],
@@ -1769,7 +1782,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         timer.join()
 
         self.assert_success(result)
-        self.assertEqual(self.prompts_to("worker"), ["echoed late"])
+        self.assertEqual(self.prompts_to("worker"), [READING_TURN, "echoed late"])
         self.assertNotIn("resending", result.stderr)
 
     def test_a_dispatch_is_taken_when_the_session_goes_busy_before_its_transcript_echoes(self):
@@ -1786,7 +1799,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.assert_success(result)
         self.assertIn(f"task {task} dispatched to worker", result.stdout)
         self.assertNotIn("resending", result.stderr)
-        self.assertEqual(len(self.prompts_to("worker")), 1)
+        self.assertEqual(len(self.prompts_to("worker")), 2)
         self.assertIn(f"{task} dispatched", state.stdout)
         self.assertIn(
             "prompt-taken worker: session went busy before its transcript showed the prompt",
@@ -1810,7 +1823,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         self.assert_failure(
             result, "never showed up in its transcript and the session never went busy"
         )
-        self.assertEqual(len(self.prompts_to("worker")), 1)
+        self.assertEqual(len(self.prompts_to("worker")), 2)
         self.assertIn(f"{task} drafted", state.stdout)
         self.assertIn("prompt-failed worker", state.stdout)
 
@@ -1822,7 +1835,9 @@ class CursorImplementerContractTests(SupervisorContractCase):
         result = self.cli("prompt", "worker", "second prompt")
 
         self.assert_success(result)
-        self.assertEqual(self.prompts_to("worker"), ["first prompt", "second prompt"])
+        self.assertEqual(
+            self.prompts_to("worker"), [READING_TURN, "first prompt", "second prompt"],
+        )
         entries = [json.loads(line) for line in
                    self.session_transcript("worker").read_text().splitlines()]
         self.assertEqual(

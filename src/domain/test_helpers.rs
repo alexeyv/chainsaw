@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -6,9 +7,9 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use super::{
-  Agent, AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Observation,
-  Prompt, PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind, SessionRuntime,
-  SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState,
+  Agent, AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Launched,
+  Observation, Prompt, PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind,
+  SessionRuntime, SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState,
 };
 
 /// A runtime that answers every status query the same way and accepts every
@@ -62,11 +63,24 @@ pub fn runtime() -> &'static dyn SessionRuntime {
   &IDLE_RUNTIME
 }
 
-/// An agent that has never written anything: no transcript, no context, no
-/// prompt seen.
-pub struct FakeAgent;
+/// An agent that has written nothing but, when it names one, the transcript
+/// at `transcript` once that file exists: no context, no prompt seen.
+pub struct FakeAgent {
+  pub transcript: Option<PathBuf>,
+}
+
+static SILENT_AGENT: FakeAgent = FakeAgent { transcript: None };
 
 impl Agent for FakeAgent {
+  fn start(
+    &self,
+    _runtime: &dyn SessionRuntime,
+    _session: StartSession<'_>,
+    _prompt: &str,
+  ) -> Result<Launched> {
+    bail!("the fake agent starts nothing")
+  }
+
   fn program(&self) -> &'static str {
     "fake-agent"
   }
@@ -88,7 +102,7 @@ impl Agent for FakeAgent {
   }
 
   fn transcript(&self, _run_dir: &Path, _external_session_id: &str) -> Option<PathBuf> {
-    None
+    self.transcript.clone().filter(|path| path.is_file())
   }
 
   fn context_size(&self, _transcript: &Path) -> ContextSize {
@@ -122,7 +136,52 @@ impl Agent for FakeAgent {
 
 /// The agent every fixture session borrows.
 pub fn agent() -> &'static dyn Agent {
-  &FakeAgent
+  &SILENT_AGENT
+}
+
+/// A runtime that starts every session it is asked to, under the external id
+/// `external-<name>`, and remembers the flags each was started with.
+#[derive(Default)]
+pub struct RecordingSessionRuntime {
+  pub started_args: RefCell<Vec<Vec<String>>>,
+}
+
+impl SessionRuntime for RecordingSessionRuntime {
+  fn start(&self, session: StartSession<'_>) -> Result<StartedSession> {
+    self.started_args.borrow_mut().push(session.args.to_vec());
+    Ok(StartedSession {
+      external_id: format!("external-{}", session.id),
+      pane_id: format!("pane-{}", session.id),
+      tab_id: format!("tab-{}", session.id),
+    })
+  }
+
+  fn status(&self, _session_id: &str) -> Result<Option<SessionStatus>> {
+    Ok(Some(SessionStatus::Idle))
+  }
+
+  fn prompt(&self, _session_id: &str, _text: &str) -> Result<()> {
+    Ok(())
+  }
+
+  fn interrupt(&self, _session_id: &str) -> Result<()> {
+    Ok(())
+  }
+
+  fn wait(&self, _session_id: &str, _timeout: Duration) -> Result<()> {
+    Ok(())
+  }
+}
+
+/// A request to start an implementer called `name` in `run_dir` with `args`.
+pub fn start_request<'a>(name: &'a str, run_dir: &'a Path, args: &'a [String]) -> StartSession<'a> {
+  StartSession {
+    id: name,
+    run_dir,
+    kind: SessionKind::Implementer,
+    agent: AgentKind::Claude,
+    args,
+  }
 }
 
 pub fn created_at() -> DateTime<Utc> {

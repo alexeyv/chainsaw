@@ -295,7 +295,7 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox", "."]
+      ["--dangerously-bypass-approvals-and-sandbox"]
     );
   }
 
@@ -348,7 +348,7 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox", "."]
+      ["--dangerously-bypass-approvals-and-sandbox"]
     );
   }
 
@@ -438,7 +438,7 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox", "."]
+      ["--dangerously-bypass-approvals-and-sandbox"]
     );
     assert_eq!(
       settings.launch_agent(SessionKind::Commentator),
@@ -456,11 +456,7 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Implementer),
-      [
-        "--trust",
-        "--force",
-        "Reply only with the word ready, then wait for the task."
-      ]
+      ["--trust", "--force"]
     );
     assert_eq!(
       settings.launch_agent(SessionKind::Commentator),
@@ -478,7 +474,7 @@ args = "--model sonnet --effort medium"
     );
     assert_eq!(
       settings.launch_args(SessionKind::Commentator),
-      ["--dangerously-bypass-approvals-and-sandbox", "."]
+      ["--dangerously-bypass-approvals-and-sandbox"]
     );
   }
 
