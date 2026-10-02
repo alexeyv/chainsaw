@@ -18,7 +18,7 @@ from tests import fake_agent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 #: The skill the repository ships, and the supervisor crate inside it.
-SKILL = PROJECT_ROOT / "skills" / "chainsaw-lead"
+SKILL = PROJECT_ROOT / "skills" / "chainsaw"
 CRATE = SKILL / "coordinator"
 MANIFEST = CRATE / "Cargo.toml"
 BINARY = CRATE / "target" / "debug" / "chainsaw"

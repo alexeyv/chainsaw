@@ -1,5 +1,5 @@
 ---
-name: chainsaw-lead
+name: chainsaw
 description: Lead a chainsaw run — decompose a spec into tasks sized for one implementer session each, dispatch them one at a time through the supervisor into fresh terminal sessions, pre-populate the next implementer while the current one works, route commentator findings into fix tasks, and stop cleanly on request or when a supervisor command's output says your context passed 250k. Use when the user says "run chainsaw" or "chainsaw this spec".
 ---
 
@@ -338,7 +338,7 @@ When the user says to stop OR a supervisor command's output warns that your cont
 1. Let the in-flight implementer finish.
 2. Wait for the commentator's findings on that commit.
 3. Write the continuation prompt to the run directory. Its first line is an
-   instruction, not state: "Invoke the `chainsaw-lead` skill and read it in full before
+   instruction, not state: "Invoke the `chainsaw` skill and read it in full before
    any other tool call; this file is a state snapshot, not the process." A lead that
    resumed from a continuation without the skill fired implementers as sub-agents and
    in parallel. Then: HEAD, the gate command and

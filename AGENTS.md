@@ -9,15 +9,15 @@ Agentic software development process, minimizing downtime between coding session
 
 ## Where things are
 
-- Lead prompt: `skills/chainsaw-lead/SKILL.md`
-- Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
-- Supervisor crate: `skills/chainsaw-lead/coordinator/`, shipped with the skill, tests included
-- Supervisor binary: `skills/chainsaw-lead/coordinator/target/debug/chainsaw`
+- Lead prompt: `skills/chainsaw/SKILL.md`
+- Commentator prompt: `skills/chainsaw/references/commentator.md`
+- Supervisor crate: `skills/chainsaw/coordinator/`, shipped with the skill, tests included
+- Supervisor binary: `skills/chainsaw/coordinator/target/debug/chainsaw`
 - How to write tests: `tests/AGENTS.md` 
 
 ## Running and verifying
 
-- `--run-dir` is a parent flag and must precede the subcommand: `skills/chainsaw-lead/bin/chainsaw --run-dir DIR <subcommand>`
+- `--run-dir` is a parent flag and must precede the subcommand: `skills/chainsaw/bin/chainsaw --run-dir DIR <subcommand>`
 - Build the supervisor with `cargo build` in the crate's directory.
 
 ## Quality gate
@@ -25,7 +25,7 @@ Agentic software development process, minimizing downtime between coding session
 Run the complete gate from the repository root, in this order:
 
 ```sh
-(cd skills/chainsaw-lead/coordinator &&
+(cd skills/chainsaw/coordinator &&
   cargo fmt --check &&
   cargo clippy --quiet --all-targets --all-features --locked -- -D warnings &&
   cargo test --quiet --locked)
