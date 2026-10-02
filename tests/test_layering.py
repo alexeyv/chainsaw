@@ -1,9 +1,9 @@
 import re
 import unittest
 
-from tests.support import PROJECT_ROOT
+from tests.support import CRATE, PROJECT_ROOT
 
-SRC = PROJECT_ROOT / "src"
+SRC = CRATE / "src"
 #: Each layer and the layers below it that its sources may name. A layer may
 #: always name itself. Anything above is off limits, which is what keeps the
 #: dependency graph acyclic.

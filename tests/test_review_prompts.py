@@ -1,16 +1,13 @@
 import unittest
 
-from tests.support import PROJECT_ROOT
+from tests.support import CRATE, SKILL
 
 
 class ReviewPromptContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.lead_path = PROJECT_ROOT / "skills" / "chainsaw-lead" / "SKILL.md"
-        cls.commentator_path = (
-            PROJECT_ROOT / "skills" / "chainsaw-lead" / "references" /
-            "commentator.md"
-        )
+        cls.lead_path = SKILL / "SKILL.md"
+        cls.commentator_path = SKILL / "references" / "commentator.md"
         cls.lead = cls.lead_path.read_text()
         cls.commentator = cls.commentator_path.read_text()
 
@@ -49,7 +46,7 @@ class ReviewPromptContractTests(unittest.TestCase):
         )
 
     def test_implementer_contract_runs_the_gate_once_in_both_copies(self):
-        tasks = (PROJECT_ROOT / "src" / "coordinator" / "tasks.rs").read_text()
+        tasks = (CRATE / "src" / "coordinator" / "tasks.rs").read_text()
         phrase = "run the project's quality gate once, immediately before"
         self.assertIn(phrase, self.lead.replace("\n   ", " "))
         self.assertIn(phrase, tasks)
@@ -61,8 +58,8 @@ class ReviewPromptContractTests(unittest.TestCase):
             "chainsaw-" + "comments.md",
             "chainsaw-" + "dispositions.md",
         )
-        coordinator_sources = [PROJECT_ROOT / "src" / "coordinator.rs"] + sorted(
-            (PROJECT_ROOT / "src" / "coordinator").glob("*.rs")
+        coordinator_sources = [CRATE / "src" / "coordinator.rs"] + sorted(
+            (CRATE / "src" / "coordinator").glob("*.rs")
         )
         sources = [(self.lead_path, self.lead), (self.commentator_path, self.commentator)]
         sources += [(path, path.read_text()) for path in coordinator_sources]

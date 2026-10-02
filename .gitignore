@@ -8,7 +8,7 @@ _planning/
 skills-lock.json
 chainsaw.local.toml
 
-# Ship supervisor sources in skills/; never the cargo build or binaries.
+# The skill ships the supervisor's sources, never its build.
 skills/**/target/
 _bmad/
 _bmad-output/

@@ -17,8 +17,11 @@ from tests import fake_agent
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = PROJECT_ROOT / "Cargo.toml"
-BINARY = PROJECT_ROOT / "target" / "debug" / "chainsaw"
+#: The skill the repository ships, and the supervisor crate inside it.
+SKILL = PROJECT_ROOT / "skills" / "chainsaw-lead"
+CRATE = SKILL / "coordinator"
+MANIFEST = CRATE / "Cargo.toml"
+BINARY = CRATE / "target" / "debug" / "chainsaw"
 #: The fake standing in for each terminal runtime, put on PATH under its name.
 FAKE_RUNTIMES = {
     "herdr": PROJECT_ROOT / "tests" / "fake_herdr.py",

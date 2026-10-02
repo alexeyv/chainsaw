@@ -11,22 +11,24 @@ Agentic software development process, minimizing downtime between coding session
 
 - Lead prompt: `skills/chainsaw-lead/SKILL.md`
 - Commentator prompt: `skills/chainsaw-lead/references/commentator.md`
-- Supervisor binary: `target/debug/chainsaw`, built from `src/`
+- Supervisor crate: `skills/chainsaw-lead/coordinator/`, shipped with the skill, tests included
+- Supervisor binary: `skills/chainsaw-lead/coordinator/target/debug/chainsaw`
 - How to write tests: `tests/AGENTS.md` 
 
 ## Running and verifying
 
-- `--run-dir` is a parent flag and must precede the subcommand: `target/debug/chainsaw --run-dir DIR <subcommand>`
-- Build the supervisor with `cargo build`.
+- `--run-dir` is a parent flag and must precede the subcommand: `skills/chainsaw-lead/bin/chainsaw --run-dir DIR <subcommand>`
+- Build the supervisor with `cargo build` in the crate's directory.
 
 ## Quality gate
 
 Run the complete gate from the repository root, in this order:
 
 ```sh
-cargo fmt --check
-cargo clippy --quiet --all-targets --all-features --locked -- -D warnings
-cargo test --quiet --locked
+(cd skills/chainsaw-lead/coordinator &&
+  cargo fmt --check &&
+  cargo clippy --quiet --all-targets --all-features --locked -- -D warnings &&
+  cargo test --quiet --locked)
 python3 -B -m unittest discover -s tests -q
 ```
 
