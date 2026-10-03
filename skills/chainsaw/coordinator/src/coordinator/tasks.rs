@@ -7,9 +7,7 @@ use std::io::Read;
 
 use anyhow::{Context, Result, bail};
 
-use super::{
-  cmd_prompt, daemon_prompt, record_run_event, session_name, session_transcript, task_session,
-};
+use super::{cmd_prompt, daemon_prompt, record_run_event, session_name, task_session};
 use crate::domain::{RunEventKind, Session, Task, TaskState};
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
@@ -24,13 +22,8 @@ pub(super) fn task_commits(run: &Run, store: &Store, task: &Task) -> Result<Vec<
   let Some(session) = task_session(run, store, task)? else {
     return Ok(Vec::new());
   };
-  let transcript = session_transcript(&session)?;
   let head = run.repo().head()?;
-  Ok(
-    session
-      .agent()
-      .commit_candidates(transcript, task.transcript_offset() as u64, &head),
-  )
+  session.commit_candidates(task.transcript_offset() as u64, &head)
 }
 
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
@@ -184,7 +177,7 @@ pub(super) fn cmd_dispatch(
   // The task is measured from where the transcript and the branch stood
   // before the send: an agent may be at work, even past its commit, before
   // its transcript shows the prompt.
-  let transcript_offset = transcript_size(session_transcript(&session)?);
+  let transcript_offset = transcript_size(session.existing_transcript()?);
   let base_head = run.repo().head()?;
   // The task is only dispatched once the prompt is taken, so a send that
   // never is leaves it drafted and dispatchable again.

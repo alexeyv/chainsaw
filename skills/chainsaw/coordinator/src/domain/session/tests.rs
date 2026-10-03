@@ -1,6 +1,8 @@
+use std::path::Path;
+
 use crate::domain::test_helpers::{
-  FakeSessionRuntime, SessionSpec, build_session, build_session_on, format_session,
-  launched_implementer, timestamp, working_implementer,
+  FakeSessionRuntime, PRESENT_TRANSCRIPT, SessionSpec, build_session, build_session_on,
+  format_session, launched_implementer, timestamp, working_implementer,
 };
 use crate::domain::{AgentKind, ContextSize, Role, SessionStatus};
 
@@ -378,6 +380,36 @@ mod status {
     let session = build_session_on(launched_implementer(), &runtime).unwrap();
 
     assert_eq!(session.status(), None);
+  }
+}
+
+mod existing_transcript {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let session = build_session(SessionSpec {
+      transcript: PRESENT_TRANSCRIPT,
+      ..launched_implementer()
+    })
+    .unwrap();
+
+    assert_eq!(
+      session.existing_transcript().unwrap(),
+      Path::new(PRESENT_TRANSCRIPT)
+    );
+  }
+
+  #[test]
+  fn should_fail_when_the_transcript_is_gone() {
+    let session = build_session(launched_implementer()).unwrap();
+
+    let error = session.existing_transcript().unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "supervisor: transcript of implementer-1 vanished from /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"
+    );
   }
 }
 

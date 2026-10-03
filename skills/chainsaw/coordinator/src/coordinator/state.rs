@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{Local, TimeZone, Utc};
 use strum::IntoEnumIterator;
 
-use super::{last_event_at, session_name, session_transcript};
+use super::{last_event_at, session_name};
 use crate::cli::HumanWaitAction;
 use crate::domain::{Role, RunEventKind, TaskState};
 use crate::persistence::store::Store;
@@ -68,7 +68,7 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
     }
     let quiet = session.quiet_seconds(Utc::now());
     // A transcript gone from under the run fails the report, not reads as zero.
-    session_transcript(&session)?;
+    session.existing_transcript()?;
     println!(
       "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
       session.name(),

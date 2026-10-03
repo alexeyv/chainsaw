@@ -623,6 +623,9 @@ pub fn launched_implementer() -> SessionSpec {
   }
 }
 
+/// A transcript that is always on disk: the crate's own manifest.
+pub const PRESENT_TRANSCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+
 /// A live implementer that has been polled: its transcript has grown, and
 /// its context read.
 pub fn working_implementer() -> SessionSpec {

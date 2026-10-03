@@ -4,16 +4,13 @@
 //! compacts the commentator, and notes the lead crossing its stop threshold.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use chrono::Utc;
 
-use super::{
-  LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event, session_transcript,
-};
+use super::{LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event};
 use crate::domain::{
   AgentKind, ContextSize, Role, RunEventKind, Session, SessionStatus, Task, TaskState,
 };
@@ -67,9 +64,8 @@ pub(super) fn start(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let transcript = session_transcript(&session)?;
-      let size = transcript_size(transcript);
-      let context = session.agent().context_size(transcript);
+      let size = transcript_size(session.existing_transcript()?);
+      let context = session.read_context()?;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
@@ -77,20 +73,10 @@ pub(super) fn start(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(run, store, &session, transcript, quiet)?;
+          observe_implementer(run, store, &session, size, quiet)?;
         }
         Role::Commentator => {
-          observe_commentator(
-            run,
-            store,
-            &session,
-            Reading {
-              transcript,
-              context,
-              quiet,
-            },
-            &mut compacting,
-          )?;
+          observe_commentator(run, store, &session, context, quiet, &mut compacting)?;
         }
         Role::Lead => observe_lead(run, store, &session, context)?,
       }
@@ -159,10 +145,9 @@ fn observe_implementer(
   run: &Run,
   store: &Store,
   session: &Session,
-  transcript: &Path,
+  size: u64,
   quiet: f64,
 ) -> Result<()> {
-  let agent = session.agent();
   let task = store
     .read(|tx| task::tasks_for_session(tx, session.id()))?
     .into_iter()
@@ -173,15 +158,15 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.transcript_offset() as u64;
-    if transcript_size(transcript) <= dispatch_offset {
+    if size <= dispatch_offset {
       return Ok(());
     }
-    let context = agent.context_before(transcript, dispatch_offset);
+    let context = session.context_before(dispatch_offset)?;
     store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
   let head = run.repo().head()?;
-  let shas = agent.commit_candidates(transcript, task.transcript_offset() as u64, &head);
+  let shas = session.commit_candidates(task.transcript_offset() as u64, &head)?;
   if let Some(sha) = new_commit_for(run, &shas, task.base_head())? {
     store.write(|tx| {
       task::record_commit(tx, task.id(), &sha, None)?;
@@ -198,35 +183,23 @@ fn observe_implementer(
   Ok(())
 }
 
-/// What one daemon poll saw of a session's transcript.
-struct Reading<'a> {
-  transcript: &'a Path,
-  context: ContextSize,
-  quiet: f64,
-}
-
 fn observe_commentator(
   run: &Run,
   store: &Store,
   session: &Session,
-  reading: Reading<'_>,
+  context: ContextSize,
+  quiet: f64,
   compacting: &mut bool,
 ) -> Result<()> {
-  let Reading {
-    transcript,
-    context,
-    quiet,
-  } = reading;
   let pending = store
     .read(task::all)?
     .into_iter()
     .filter(Task::awaits_commentary)
     .collect::<Vec<_>>();
-  let agent = session.agent();
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
-    if agent.output_mentions(transcript, abbreviation) {
+    if session.output_mentions(abbreviation)? {
       store.write(|tx| {
         if task::record_commentary_delivery(tx, task.id())? {
           run_event::create(
@@ -261,7 +234,7 @@ fn observe_commentator(
     }
   }
   if context.exceeds(COMMENTATOR_COMPACT_TOKENS) && !*compacting {
-    if daemon_prompt(run, store, session.name(), agent.compact_prompt()) {
+    if daemon_prompt(run, store, session.name(), session.agent().compact_prompt()) {
       *compacting = true;
       record_run_event(
         store,

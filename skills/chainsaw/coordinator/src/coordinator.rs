@@ -23,8 +23,7 @@ use calibrate::cmd_calibrate;
 use prompt::{cmd_prompt, daemon_prompt};
 use review::{cmd_finding, cmd_observe, cmd_poll, cmd_resolutions, cmd_resolve};
 use sessions::{
-  cmd_context, cmd_launch, cmd_start_commentator, cmd_watch_transcripts, session_name,
-  session_transcript, task_session,
+  cmd_context, cmd_launch, cmd_start_commentator, cmd_watch_transcripts, session_name, task_session,
 };
 use state::{cmd_human_wait, cmd_state, cmd_stop};
 use tasks::{NewTaskOptions, cmd_abort, cmd_dispatch, cmd_task_new, new_commit_for, task_commits};

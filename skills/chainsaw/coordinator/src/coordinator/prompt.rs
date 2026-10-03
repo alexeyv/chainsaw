@@ -4,7 +4,6 @@
 //! serialized through a lock file so two of them cannot interleave.
 
 use std::fs::{File, OpenOptions};
-use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -12,8 +11,8 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use fs2::FileExt;
 
-use super::{record_run_event, session_transcript};
-use crate::domain::{Agent, PromptEcho, PromptState, RunEventKind, Session, SessionStatus};
+use super::record_run_event;
+use crate::domain::{PromptEcho, PromptState, RunEventKind, Session, SessionStatus};
 use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::prompt;
 use crate::persistence::store::Store;
@@ -48,12 +47,10 @@ pub(super) fn cmd_prompt(
     .id();
   let prompt_timeout_millis = i64::try_from(run.settings().prompt_timeout().as_millis())
     .context("prompt-timeout-seconds is too large")?;
-  let transcript = session_transcript(&session)?;
-  let agent = session.agent();
   // Every prompt has the same time to be taken in, spread over as many sends
   // as its agent allows: one that echoes a prompt as it takes it can be sent
   // it again; one that echoes it only with its reply may be at work on it.
-  let echo = agent.prompt_echo();
+  let echo = session.agent().prompt_echo();
   let attempts = match echo {
     PromptEcho::OnTake => PROMPT_ATTEMPTS,
     PromptEcho::WithReply => 1,
@@ -65,20 +62,20 @@ pub(super) fn cmd_prompt(
     // queued; the state check below then reads what actually arrived. What it
     // reports is the state the send finds the session in.
     let idle_before = session.status() == Some(SessionStatus::Idle);
-    let offset = transcript_size(transcript);
+    let offset = transcript_size(session.existing_transcript()?);
     store.write(|tx| prompt::record_attempt(tx, prompt_id))?;
     let _ = session.prompt(text);
     let deadline = Utc::now().timestamp_millis() + window_millis;
     while Utc::now().timestamp_millis() < deadline {
       let status = session.status();
       if let state @ (PromptState::Started | PromptState::Queued) =
-        agent.prompt_state(transcript, offset, &opening)
+        session.prompt_state(offset, &opening)?
       {
         store.write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
           record_run_event(store, RunEventKind::PromptQueued, name)?;
         }
-        return prompt_taken(&lock, &session, agent, transcript, wait, timeout);
+        return prompt_taken(&lock, &session, wait, timeout);
       }
       // An agent that echoes a prompt only with its reply has taken it once
       // the session the send found idle is busy. A session busy already, on
@@ -89,7 +86,7 @@ pub(super) fn cmd_prompt(
           RunEventKind::PromptTaken,
           &format!("{name}: session went busy before its transcript showed the prompt"),
         )?;
-        return prompt_taken(&lock, &session, agent, transcript, wait, timeout);
+        return prompt_taken(&lock, &session, wait, timeout);
       }
       thread::sleep(Duration::from_secs(1));
     }
@@ -113,21 +110,14 @@ pub(super) fn cmd_prompt(
 
 /// The prompt is taken: let the next one through and, when asked, wait for
 /// the turn to end and print the last thing the agent said.
-fn prompt_taken(
-  lock: &File,
-  session: &Session<'_>,
-  agent: &dyn Agent,
-  transcript: &Path,
-  wait: bool,
-  timeout: u64,
-) -> Result<()> {
+fn prompt_taken(lock: &File, session: &Session<'_>, wait: bool, timeout: u64) -> Result<()> {
   FileExt::unlock(lock)?;
   if wait {
     let _ = session.wait(Duration::from_secs(timeout));
     println!(
       "{}",
-      agent
-        .latest_assistant_text(transcript)
+      session
+        .latest_assistant_text()?
         .unwrap_or_else(|| "(no assistant text)".to_owned())
     );
   }

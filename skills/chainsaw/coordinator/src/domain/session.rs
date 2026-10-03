@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use strum::EnumIter;
 
 use super::{
-  Agent, ContextSize, SessionRuntime, SessionStatus, require_nonblank, require_optional_nonblank,
-  require_positive,
+  Agent, ContextSize, PromptState, SessionRuntime, SessionStatus, require_nonblank,
+  require_optional_nonblank, require_positive,
 };
 
 /// What a session is for. The lead runs the process, implementers take tasks,
@@ -283,6 +283,65 @@ impl<'r> Session<'r> {
   /// Where the agent writes this session's transcript. It never moves.
   pub fn transcript(&self) -> &Path {
     &self.transcript
+  }
+
+  /// The transcript, which must still be there. Nothing in a run deletes one,
+  /// so a transcript that is gone means something outside the run removed it,
+  /// and that is an error rather than a session reading zero. Every read of
+  /// the transcript below goes through it.
+  pub fn existing_transcript(&self) -> Result<&Path> {
+    if !self.transcript.is_file() {
+      bail!(
+        "supervisor: transcript of {} vanished from {}",
+        self.name,
+        self.transcript.display()
+      );
+    }
+    Ok(&self.transcript)
+  }
+
+  /// Context the session holds at its latest turn, as its transcript says.
+  pub fn read_context(&self) -> Result<ContextSize> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.context_size(transcript))
+  }
+
+  /// Context the session held at its last turn before `offset`.
+  pub fn context_before(&self, offset: u64) -> Result<ContextSize> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.context_before(transcript, offset))
+  }
+
+  /// The largest context the session held between `start` and `end`, or to
+  /// the end of its transcript.
+  pub fn context_peak(&self, start: u64, end: Option<u64>) -> Result<ContextSize> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.context_peak(transcript, start, end))
+  }
+
+  /// The state of a prompt opening with `prompt`, sent after `offset`.
+  pub fn prompt_state(&self, offset: u64, prompt: &str) -> Result<PromptState> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.prompt_state(transcript, offset, prompt))
+  }
+
+  /// The last text the agent said, if it has said anything.
+  pub fn latest_assistant_text(&self) -> Result<Option<String>> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.latest_assistant_text(transcript))
+  }
+
+  /// Whether anything the agent said or did mentions `text`.
+  pub fn output_mentions(&self, text: &str) -> Result<bool> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.output_mentions(transcript, text))
+  }
+
+  /// Commit ids the session may have made from `offset` on, given `head`,
+  /// where the branch stands now.
+  pub fn commit_candidates(&self, offset: u64, head: &str) -> Result<Vec<String>> {
+    let transcript = self.existing_transcript()?;
+    Ok(self.agent.commit_candidates(transcript, offset, head))
   }
 
   /// A session is live until it is superseded or stopped.
