@@ -13,7 +13,6 @@ use fs2::FileExt;
 
 use super::record_run_event;
 use crate::domain::{PromptEcho, PromptState, RunEventKind, Session, SessionStatus};
-use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::prompt;
 use crate::persistence::store::Store;
 use crate::run::Run;
@@ -62,14 +61,15 @@ pub(super) fn cmd_prompt(
     // queued; the state check below then reads what actually arrived. What it
     // reports is the state the send finds the session in.
     let idle_before = session.status() == Some(SessionStatus::Idle);
-    let offset = transcript_size(session.existing_transcript()?);
+    let transcript = session.transcript()?;
+    let offset = transcript.size();
     store.write(|tx| prompt::record_attempt(tx, prompt_id))?;
     let _ = session.prompt(text);
     let deadline = Utc::now().timestamp_millis() + window_millis;
     while Utc::now().timestamp_millis() < deadline {
       let status = session.status();
       if let state @ (PromptState::Started | PromptState::Queued) =
-        session.prompt_state(offset, &opening)?
+        transcript.prompt_state(offset, &opening)
       {
         store.write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
@@ -117,7 +117,8 @@ fn prompt_taken(lock: &File, session: &Session<'_>, wait: bool, timeout: u64) ->
     println!(
       "{}",
       session
-        .latest_assistant_text()?
+        .transcript()?
+        .latest_assistant_text()
         .unwrap_or_else(|| "(no assistant text)".to_owned())
     );
   }

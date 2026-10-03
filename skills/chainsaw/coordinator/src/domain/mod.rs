@@ -11,6 +11,7 @@ mod session;
 mod session_runtime;
 mod task;
 mod task_event;
+mod transcript;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
@@ -30,6 +31,7 @@ pub use session::{AgentKind, Role, Session, SessionKind};
 pub use session_runtime::{SessionRuntime, SessionStatus, StartSession, StartedSession};
 pub use task::{Task, TaskState};
 pub use task_event::TaskEvent;
+pub use transcript::Transcript;
 
 fn require_positive(field: &'static str, value: i64) -> Result<()> {
   if value <= 0 {

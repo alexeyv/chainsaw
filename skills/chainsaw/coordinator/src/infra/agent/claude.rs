@@ -9,9 +9,11 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{commits_printed, entries, read_lossy, start_with_prompt, text_of};
+use super::{
+  TranscriptFormat, commits_printed, entries, open, read_lossy, start_with_prompt, text_of,
+};
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession, Transcript,
 };
 
 pub struct Claude;
@@ -70,6 +72,12 @@ impl Agent for Claude {
       .find(|path| path.is_file())
   }
 
+  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
+    open(&Claude, path)
+  }
+}
+
+impl TranscriptFormat for Claude {
   /// Zero until a response reports usage: the transcript records usage, so
   /// none yet means none used.
   fn context_size(&self, transcript: &Path) -> ContextSize {

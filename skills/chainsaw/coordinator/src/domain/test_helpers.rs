@@ -10,6 +10,7 @@ use super::{
   Agent, AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Launched,
   Observation, Prompt, PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind,
   SessionRuntime, SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState,
+  Transcript,
 };
 
 /// A runtime that answers every status query the same way and accepts every
@@ -105,31 +106,55 @@ impl Agent for FakeAgent {
     self.transcript.clone().filter(|path| path.is_file())
   }
 
-  fn context_size(&self, _transcript: &Path) -> ContextSize {
+  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
+    path.is_file().then(|| {
+      Box::new(SilentTranscript {
+        path: path.to_owned(),
+      }) as Box<dyn Transcript>
+    })
+  }
+}
+
+/// A transcript the fake agent opens: nothing in it, no context, no prompt
+/// seen.
+struct SilentTranscript {
+  path: PathBuf,
+}
+
+impl Transcript for SilentTranscript {
+  fn path(&self) -> &Path {
+    &self.path
+  }
+
+  fn size(&self) -> u64 {
+    0
+  }
+
+  fn context_size(&self) -> ContextSize {
     ContextSize::UNKNOWN
   }
 
-  fn context_before(&self, _transcript: &Path, _offset: u64) -> ContextSize {
+  fn context_before(&self, _offset: u64) -> ContextSize {
     ContextSize::UNKNOWN
   }
 
-  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> ContextSize {
+  fn context_peak(&self, _start: u64, _end: Option<u64>) -> ContextSize {
     ContextSize::UNKNOWN
   }
 
-  fn prompt_state(&self, _transcript: &Path, _offset: u64, _prompt: &str) -> PromptState {
+  fn prompt_state(&self, _offset: u64, _prompt: &str) -> PromptState {
     PromptState::Unseen
   }
 
-  fn latest_assistant_text(&self, _transcript: &Path) -> Option<String> {
+  fn latest_assistant_text(&self) -> Option<String> {
     None
   }
 
-  fn output_mentions(&self, _transcript: &Path, _text: &str) -> bool {
+  fn output_mentions(&self, _text: &str) -> bool {
     false
   }
 
-  fn commit_candidates(&self, _transcript: &Path, _offset: u64, _head: &str) -> Vec<String> {
+  fn commit_candidates(&self, _offset: u64, _head: &str) -> Vec<String> {
     Vec::new()
   }
 }
@@ -679,7 +704,7 @@ pub fn format_session(session: &Session) -> String {
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),
-    session.transcript().display(),
+    session.transcript_path().display(),
     session.is_live(),
     session.can_take_task(),
     session.can_be_kicked(),

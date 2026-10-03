@@ -150,7 +150,7 @@ fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, Path
     .into_iter()
     .filter(Session::can_take_task)
   {
-    let path = session.existing_transcript()?.to_owned();
+    let path = session.transcript()?.path().to_owned();
     transcripts.push((session.external_session_id().to_owned(), path));
   }
   Ok(transcripts)
@@ -162,7 +162,11 @@ pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Resul
     .into_iter()
     .filter(|session| name.is_none_or(|name| session.name() == name))
   {
-    println!("{}\t{}", session.name(), session.read_context()?);
+    println!(
+      "{}\t{}",
+      session.name(),
+      session.transcript()?.context_size()
+    );
   }
   Ok(())
 }

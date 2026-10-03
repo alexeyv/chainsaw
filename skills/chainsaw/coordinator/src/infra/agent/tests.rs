@@ -50,6 +50,26 @@ fn writing(transcript: &Transcript) -> FakeAgent {
   }
 }
 
+mod open {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let transcript = Transcript::written();
+
+    let opened = open(&Claude, &transcript.path()).unwrap();
+
+    assert_eq!(opened.path(), transcript.path());
+  }
+
+  #[test]
+  fn should_be_none_when_there_is_no_file() {
+    let transcript = Transcript::unwritten();
+
+    assert!(open(&Claude, &transcript.path()).is_none());
+  }
+}
+
 mod start_with_prompt {
   use super::*;
 

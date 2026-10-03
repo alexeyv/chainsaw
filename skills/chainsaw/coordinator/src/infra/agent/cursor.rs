@@ -16,10 +16,13 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use super::{TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, entries, read_lossy, start_with_prompt, text_of};
+use super::{
+  TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, TranscriptFormat, entries, open, read_lossy,
+  start_with_prompt, text_of,
+};
 use crate::domain::{
   Agent, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
-  SessionStatus, StartSession,
+  SessionStatus, StartSession, Transcript,
 };
 
 /// The prompt a session is started on, before it is sent its real first one.
@@ -104,6 +107,19 @@ impl Agent for Cursor {
     )
   }
 
+  /// Cursor writes the prompt together with its first reply, which in a real
+  /// run came 39 seconds after the prompt was sent, 16 seconds after the
+  /// commit it asked for had already landed.
+  fn prompt_echo(&self) -> PromptEcho {
+    PromptEcho::WithReply
+  }
+
+  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
+    open(&Cursor, path)
+  }
+}
+
+impl TranscriptFormat for Cursor {
   /// Cursor's transcript records no usage, so the context is unknown rather
   /// than zero.
   fn context_size(&self, _transcript: &Path) -> ContextSize {
@@ -132,13 +148,6 @@ impl Agent for Cursor {
     } else {
       PromptState::Unseen
     }
-  }
-
-  /// Cursor writes the prompt together with its first reply, which in a real
-  /// run came 39 seconds after the prompt was sent, 16 seconds after the
-  /// commit it asked for had already landed.
-  fn prompt_echo(&self) -> PromptEcho {
-    PromptEcho::WithReply
   }
 
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String> {

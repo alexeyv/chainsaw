@@ -1,7 +1,7 @@
 //! The agents a session can run: Claude Code, OpenAI Codex or the Cursor
 //! Agent CLI. Which one a session runs is recorded on the session. Each reads
 //! its own transcript format, and what reading a JSONL transcript takes is
-//! shared here.
+//! shared here, along with the transcript an agent opens on its format.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -11,7 +11,10 @@ use anyhow::{Result, bail};
 use regex::Regex;
 use serde_json::Value;
 
-use crate::domain::{Agent, AgentKind, Launched, SessionRuntime, StartSession};
+use super::transcript_monitor::transcript_size;
+use crate::domain::{
+  Agent, AgentKind, ContextSize, Launched, PromptState, SessionRuntime, StartSession, Transcript,
+};
 
 /// How long a new session has to begin its transcript before its start fails.
 const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -33,6 +36,71 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
     AgentKind::Claude => &Claude,
     AgentKind::Codex => &Codex,
     AgentKind::Cursor => &Cursor,
+  }
+}
+
+/// How an agent reads a transcript in its own format, handed the file.
+trait TranscriptFormat: Sync {
+  fn context_size(&self, transcript: &Path) -> ContextSize;
+  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
+  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
+  fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
+  fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
+  fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
+  fn commit_candidates(&self, transcript: &Path, offset: u64, head: &str) -> Vec<String>;
+}
+
+/// A transcript file, read in its agent's format.
+struct TranscriptFile {
+  format: &'static dyn TranscriptFormat,
+  path: PathBuf,
+}
+
+/// The transcript at `path` in `format`, when there is a file there.
+fn open(format: &'static dyn TranscriptFormat, path: &Path) -> Option<Box<dyn Transcript>> {
+  path.is_file().then(|| {
+    Box::new(TranscriptFile {
+      format,
+      path: path.to_owned(),
+    }) as Box<dyn Transcript>
+  })
+}
+
+impl Transcript for TranscriptFile {
+  fn path(&self) -> &Path {
+    &self.path
+  }
+
+  fn size(&self) -> u64 {
+    transcript_size(&self.path)
+  }
+
+  fn context_size(&self) -> ContextSize {
+    self.format.context_size(&self.path)
+  }
+
+  fn context_before(&self, offset: u64) -> ContextSize {
+    self.format.context_before(&self.path, offset)
+  }
+
+  fn context_peak(&self, start: u64, end: Option<u64>) -> ContextSize {
+    self.format.context_peak(&self.path, start, end)
+  }
+
+  fn prompt_state(&self, offset: u64, prompt: &str) -> PromptState {
+    self.format.prompt_state(&self.path, offset, prompt)
+  }
+
+  fn latest_assistant_text(&self) -> Option<String> {
+    self.format.latest_assistant_text(&self.path)
+  }
+
+  fn output_mentions(&self, text: &str) -> bool {
+    self.format.output_mentions(&self.path, text)
+  }
+
+  fn commit_candidates(&self, offset: u64, head: &str) -> Vec<String> {
+    self.format.commit_candidates(&self.path, offset, head)
   }
 }
 

@@ -46,7 +46,9 @@ pub(super) fn cmd_calibrate(run: &Run, store: &Store, task_id: i64) -> Result<()
     None => None,
   };
   let peak = match &session {
-    Some(session) => session.context_peak(task.transcript_offset() as u64, next_offset)?,
+    Some(session) => session
+      .transcript()?
+      .context_peak(task.transcript_offset() as u64, next_offset),
     None => ContextSize::UNKNOWN,
   };
   // No usage within the task's slice of the transcript falls back to the

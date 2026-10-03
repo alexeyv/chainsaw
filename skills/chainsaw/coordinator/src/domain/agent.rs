@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 
-use super::{ContextSize, SessionKind, SessionRuntime, StartSession, StartedSession};
+use super::{SessionKind, SessionRuntime, StartSession, StartedSession, Transcript};
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,34 +74,13 @@ pub trait Agent {
   /// The transcript of a session started in `run_dir`, or None until it exists.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;
 
-  /// Context the session held at its latest turn.
-  fn context_size(&self, transcript: &Path) -> ContextSize;
-
-  /// Context the session held at its last turn before `offset`.
-  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
-
-  /// The largest context the session held between `start` and `end`, or to
-  /// the end of the transcript.
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
-
-  /// The state of a prompt opening with `prompt`, sent after `offset`.
-  fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
+  /// The session's transcript at `path`, read in this agent's format, or
+  /// None when there is no file there.
+  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>>;
 
   /// When this agent writes a prompt it was sent to its transcript, and so
   /// what an unseen prompt means.
   fn prompt_echo(&self) -> PromptEcho {
     PromptEcho::OnTake
   }
-
-  /// The last text the agent said, if it has said anything.
-  fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
-
-  /// Whether anything the agent said or did mentions `text`.
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
-
-  /// Commit ids the session may have made from `offset` on, given `head`,
-  /// where the branch stands now. An agent whose transcript shows what git
-  /// printed reads them from it; one whose transcript keeps no tool output
-  /// can only name HEAD.
-  fn commit_candidates(&self, transcript: &Path, offset: u64, head: &str) -> Vec<String>;
 }

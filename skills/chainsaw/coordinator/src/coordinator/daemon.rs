@@ -12,10 +12,9 @@ use chrono::Utc;
 
 use super::{LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event};
 use crate::domain::{
-  AgentKind, ContextSize, Role, RunEventKind, Session, SessionStatus, Task, TaskState,
+  AgentKind, ContextSize, Role, RunEventKind, Session, SessionStatus, Task, TaskState, Transcript,
 };
 
-use crate::infra::transcript_monitor::transcript_size;
 use crate::persistence::store::Store;
 use crate::persistence::{run as run_record, run_event, session, task};
 use crate::run::Run;
@@ -64,8 +63,9 @@ pub(super) fn start(
       .filter(Session::is_live)
     {
       let name = session.name();
-      let size = transcript_size(session.existing_transcript()?);
-      let context = session.read_context()?;
+      let transcript = session.transcript()?;
+      let size = transcript.size();
+      let context = transcript.context_size();
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
@@ -73,10 +73,18 @@ pub(super) fn start(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(run, store, &session, size, quiet)?;
+          observe_implementer(run, store, &session, &*transcript, quiet)?;
         }
         Role::Commentator => {
-          observe_commentator(run, store, &session, context, quiet, &mut compacting)?;
+          observe_commentator(
+            run,
+            store,
+            &session,
+            &*transcript,
+            context,
+            quiet,
+            &mut compacting,
+          )?;
         }
         Role::Lead => observe_lead(run, store, &session, context)?,
       }
@@ -145,7 +153,7 @@ fn observe_implementer(
   run: &Run,
   store: &Store,
   session: &Session,
-  size: u64,
+  transcript: &dyn Transcript,
   quiet: f64,
 ) -> Result<()> {
   let task = store
@@ -158,15 +166,15 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.transcript_offset() as u64;
-    if size <= dispatch_offset {
+    if transcript.size() <= dispatch_offset {
       return Ok(());
     }
-    let context = session.context_before(dispatch_offset)?;
+    let context = transcript.context_before(dispatch_offset);
     store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
   let head = run.repo().head()?;
-  let shas = session.commit_candidates(task.transcript_offset() as u64, &head)?;
+  let shas = transcript.commit_candidates(task.transcript_offset() as u64, &head);
   if let Some(sha) = new_commit_for(run, &shas, task.base_head())? {
     store.write(|tx| {
       task::record_commit(tx, task.id(), &sha, None)?;
@@ -187,6 +195,7 @@ fn observe_commentator(
   run: &Run,
   store: &Store,
   session: &Session,
+  transcript: &dyn Transcript,
   context: ContextSize,
   quiet: f64,
   compacting: &mut bool,
@@ -199,7 +208,7 @@ fn observe_commentator(
   for task in pending {
     let sha = task.commit_sha().unwrap_or_default();
     let abbreviation = sha.get(..7).unwrap_or(sha);
-    if session.output_mentions(abbreviation)? {
+    if transcript.output_mentions(abbreviation) {
       store.write(|tx| {
         if task::record_commentary_delivery(tx, task.id())? {
           run_event::create(

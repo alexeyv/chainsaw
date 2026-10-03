@@ -383,7 +383,7 @@ mod status {
   }
 }
 
-mod existing_transcript {
+mod transcript {
   use super::*;
 
   #[test]
@@ -395,7 +395,7 @@ mod existing_transcript {
     .unwrap();
 
     assert_eq!(
-      session.existing_transcript().unwrap(),
+      session.transcript().unwrap().path(),
       Path::new(PRESENT_TRANSCRIPT)
     );
   }
@@ -404,7 +404,9 @@ mod existing_transcript {
   fn should_fail_when_the_transcript_is_gone() {
     let session = build_session(launched_implementer()).unwrap();
 
-    let error = session.existing_transcript().unwrap_err();
+    let Err(error) = session.transcript() else {
+      panic!("a vanished transcript opened");
+    };
 
     assert_eq!(
       error.to_string(),
