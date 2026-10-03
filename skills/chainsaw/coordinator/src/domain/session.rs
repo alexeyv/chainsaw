@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -114,7 +114,6 @@ impl fmt::Display for AgentKind {
 /// incarnation: relaunching the same name stops this one and starts another.
 /// It drives itself through the run's runtime, and reads its transcript
 /// through the agent it was launched with; it borrows both from the run.
-#[derive(Clone)]
 pub struct Session<'r> {
   runtime: &'r dyn SessionRuntime,
   agent: &'r dyn Agent,
@@ -131,7 +130,7 @@ pub struct Session<'r> {
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
-  transcript: PathBuf,
+  transcript: Box<dyn Transcript>,
 }
 
 impl<'r> Session<'r> {
@@ -177,6 +176,16 @@ impl<'r> Session<'r> {
     }
     if over_limit_at.is_some_and(|over| over < started_at) {
       bail!("over_limit_at cannot precede started_at");
+    }
+    // A stopped session's transcript may since have been cleaned up.
+    let transcript = agent.transcript_at(&transcript);
+    if stopped_at.is_none() {
+      transcript.check_readable().with_context(|| {
+        format!(
+          "supervisor: transcript of {name} is gone from {}",
+          transcript.path().display()
+        )
+      })?;
     }
 
     Ok(Self {
@@ -280,25 +289,10 @@ impl<'r> Session<'r> {
     self.over_limit_at
   }
 
-  /// Where the agent writes this session's transcript. It never moves.
-  pub fn transcript_path(&self) -> &Path {
-    &self.transcript
-  }
-
-  /// The transcript, opened by the session's agent. Nothing in a run deletes
-  /// one, so a transcript that is gone means something outside the run
-  /// removed it, and that is an error rather than a session reading zero.
-  pub fn transcript(&self) -> Result<Box<dyn Transcript>> {
-    self
-      .agent
-      .open_transcript(&self.transcript)
-      .with_context(|| {
-        format!(
-          "supervisor: transcript of {} vanished from {}",
-          self.name,
-          self.transcript.display()
-        )
-      })
+  /// The transcript the agent placed at launch. A live session's is on disk;
+  /// a stopped one's may have been cleaned up since.
+  pub fn transcript(&self) -> &dyn Transcript {
+    &*self.transcript
   }
 
   /// A session is live until it is superseded or stopped.
@@ -348,7 +342,7 @@ impl PartialEq for Session<'_> {
       && self.last_growth == other.last_growth
       && self.kicked_at == other.kicked_at
       && self.over_limit_at == other.over_limit_at
-      && self.transcript == other.transcript
+      && self.transcript.path() == other.transcript.path()
   }
 }
 
@@ -369,7 +363,7 @@ impl fmt::Debug for Session<'_> {
       .field("last_growth", &self.last_growth)
       .field("kicked_at", &self.kicked_at)
       .field("over_limit_at", &self.over_limit_at)
-      .field("transcript", &self.transcript)
+      .field("transcript", &self.transcript.path())
       .finish()
   }
 }

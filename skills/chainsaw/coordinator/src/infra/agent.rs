@@ -3,6 +3,7 @@
 //! its own transcript format, and what reading a JSONL transcript takes is
 //! shared here, along with the transcript an agent opens on its format.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,19 +51,17 @@ trait TranscriptFormat: Sync {
   fn commit_candidates(&self, transcript: &Path, offset: u64, head: &str) -> Vec<String>;
 }
 
-/// A transcript file, read in its agent's format.
+/// A session's transcript file, read in its agent's format.
 struct TranscriptFile {
   format: &'static dyn TranscriptFormat,
   path: PathBuf,
 }
 
-/// The transcript at `path` in `format`, when there is a file there.
-fn open(format: &'static dyn TranscriptFormat, path: &Path) -> Option<Box<dyn Transcript>> {
-  path.is_file().then(|| {
-    Box::new(TranscriptFile {
-      format,
-      path: path.to_owned(),
-    }) as Box<dyn Transcript>
+/// The transcript at `path` in `format`.
+fn transcript_file(format: &'static dyn TranscriptFormat, path: &Path) -> Box<dyn Transcript> {
+  Box::new(TranscriptFile {
+    format,
+    path: path.to_owned(),
   })
 }
 
@@ -71,36 +70,49 @@ impl Transcript for TranscriptFile {
     &self.path
   }
 
-  fn size(&self) -> u64 {
-    transcript_size(&self.path)
+  fn check_readable(&self) -> Result<()> {
+    File::open(&self.path)?;
+    Ok(())
   }
 
-  fn context_size(&self) -> ContextSize {
-    self.format.context_size(&self.path)
+  fn size(&self) -> Result<u64> {
+    self.check_readable()?;
+    Ok(transcript_size(&self.path))
   }
 
-  fn context_before(&self, offset: u64) -> ContextSize {
-    self.format.context_before(&self.path, offset)
+  fn context_size(&self) -> Result<ContextSize> {
+    self.check_readable()?;
+    Ok(self.format.context_size(&self.path))
   }
 
-  fn context_peak(&self, start: u64, end: Option<u64>) -> ContextSize {
-    self.format.context_peak(&self.path, start, end)
+  fn context_before(&self, offset: u64) -> Result<ContextSize> {
+    self.check_readable()?;
+    Ok(self.format.context_before(&self.path, offset))
   }
 
-  fn prompt_state(&self, offset: u64, prompt: &str) -> PromptState {
-    self.format.prompt_state(&self.path, offset, prompt)
+  fn context_peak(&self, start: u64, end: Option<u64>) -> Result<ContextSize> {
+    self.check_readable()?;
+    Ok(self.format.context_peak(&self.path, start, end))
   }
 
-  fn latest_assistant_text(&self) -> Option<String> {
-    self.format.latest_assistant_text(&self.path)
+  fn prompt_state(&self, offset: u64, prompt: &str) -> Result<PromptState> {
+    self.check_readable()?;
+    Ok(self.format.prompt_state(&self.path, offset, prompt))
   }
 
-  fn output_mentions(&self, text: &str) -> bool {
-    self.format.output_mentions(&self.path, text)
+  fn latest_assistant_text(&self) -> Result<Option<String>> {
+    self.check_readable()?;
+    Ok(self.format.latest_assistant_text(&self.path))
   }
 
-  fn commit_candidates(&self, offset: u64, head: &str) -> Vec<String> {
-    self.format.commit_candidates(&self.path, offset, head)
+  fn output_mentions(&self, text: &str) -> Result<bool> {
+    self.check_readable()?;
+    Ok(self.format.output_mentions(&self.path, text))
+  }
+
+  fn commit_candidates(&self, offset: u64, head: &str) -> Result<Vec<String>> {
+    self.check_readable()?;
+    Ok(self.format.commit_candidates(&self.path, offset, head))
   }
 }
 

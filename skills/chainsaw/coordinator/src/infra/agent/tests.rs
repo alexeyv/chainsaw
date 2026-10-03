@@ -47,26 +47,34 @@ impl Drop for Transcript {
 fn writing(transcript: &Transcript) -> FakeAgent {
   FakeAgent {
     transcript: Some(transcript.path()),
+    vanished: false,
   }
 }
 
-mod open {
+mod check_readable {
   use super::*;
 
   #[test]
   fn should_work() {
     let transcript = Transcript::written();
 
-    let opened = open(&Claude, &transcript.path()).unwrap();
-
-    assert_eq!(opened.path(), transcript.path());
+    transcript_file(&Claude, &transcript.path())
+      .check_readable()
+      .unwrap();
   }
 
   #[test]
-  fn should_be_none_when_there_is_no_file() {
+  fn should_fail_when_the_file_is_gone() {
     let transcript = Transcript::unwritten();
 
-    assert!(open(&Claude, &transcript.path()).is_none());
+    let error = transcript_file(&Claude, &transcript.path())
+      .check_readable()
+      .unwrap_err();
+
+    assert_eq!(
+      error.downcast::<std::io::Error>().unwrap().kind(),
+      std::io::ErrorKind::NotFound
+    );
   }
 }
 

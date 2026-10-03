@@ -22,11 +22,9 @@ pub(super) fn task_commits(run: &Run, store: &Store, task: &Task) -> Result<Vec<
     return Ok(Vec::new());
   };
   let head = run.repo().head()?;
-  Ok(
-    session
-      .transcript()?
-      .commit_candidates(task.transcript_offset() as u64, &head),
-  )
+  session
+    .transcript()
+    .commit_candidates(task.transcript_offset() as u64, &head)
 }
 
 fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
@@ -180,7 +178,7 @@ pub(super) fn cmd_dispatch(
   // The task is measured from where the transcript and the branch stood
   // before the send: an agent may be at work, even past its commit, before
   // its transcript shows the prompt.
-  let transcript_offset = session.transcript()?.size();
+  let transcript_offset = session.transcript().size()?;
   let base_head = run.repo().head()?;
   // The task is only dispatched once the prompt is taken, so a send that
   // never is leaves it drafted and dispatchable again.

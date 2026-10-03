@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-  TranscriptFormat, commits_printed, entries, open, read_lossy, start_with_prompt, text_of,
+  TranscriptFormat, commits_printed, entries, read_lossy, start_with_prompt, text_of,
+  transcript_file,
 };
 use crate::domain::{
   Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession, Transcript,
@@ -66,8 +67,8 @@ impl Agent for Codex {
     rollout_of(&Self::sessions_dir().ok()?, external_session_id, 4)
   }
 
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
-    open(&Codex, path)
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
+    transcript_file(&Codex, path)
   }
 }
 

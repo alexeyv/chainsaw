@@ -924,6 +924,15 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn("context 0 (session 60, base 60)", result.stdout)
 
+    def test_calibration_of_a_stopped_session_whose_transcript_is_gone_fails(self):
+        task, sha = self.prepare_committed_task()
+        self.assert_success(self.cli("accept", str(task)))
+        self.stop_session_and_remove_transcript("worker")
+
+        result = self.cli("calibrate", str(task))
+
+        self.assert_failure(result, "No such file or directory")
+
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"
         harness.mkdir()
@@ -999,21 +1008,14 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assert_failure(result, 'unknown agent "gemini"')
 
-    def test_a_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
+    def test_state_does_not_check_a_stopped_sessions_transcript(self):
         self.launch()
         self.append_usage("worker", input_tokens=7)
-        daemon = self.start_daemon(expected_exit=1)
-        self.wait_for_state("context       7")
-        transcript = self.session_transcript("worker")
+        self.stop_session_and_remove_transcript("worker")
 
-        transcript.unlink()
-        daemon.wait(timeout=10)
-        state = self.cli("state")
+        state = self.assert_success(self.cli("state"))
 
-        message = f"supervisor: transcript of worker vanished from {transcript}"
-        self.assertEqual(daemon.returncode, 1, self.daemon_report())
-        self.assertIn(message, daemon.stderr_path.read_text())
-        self.assert_failure(state, message)
+        self.assertIn("worker", state.stdout)
 
     def test_daemon_observes_a_commit_marker_and_marks_task_committed(self):
         task, sha = self.prepare_committed_task()

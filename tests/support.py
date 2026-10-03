@@ -389,6 +389,15 @@ class SupervisorContractCase(unittest.TestCase):
         """Where the session's agent writes; the fake runtime settled it at launch."""
         return Path(self.session_state(name)["transcript"])
 
+    def stop_session_and_remove_transcript(self, name):
+        """Stop the session, then delete its transcript, as Claude Code's
+        cleanup of old transcripts does long after."""
+        transcript = self.session_transcript(name)
+        self.write_supervisor_db(
+            "update sessions set stopped_at=started_at where name=? and stopped_at is null", name
+        )
+        transcript.unlink()
+
     def append_entry(self, name, entry):
         path = self.session_transcript(name)
         path.parent.mkdir(parents=True, exist_ok=True)

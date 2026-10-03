@@ -8,7 +8,7 @@
 
 **`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: how it starts a session on its first prompt, its launch flags, and where and how its transcript is read. A session exists only once its agent has begun its transcript. Implemented in `infra`, one per `AgentKind`; the run hands every `Session` the one its kind names.
 
-**`Transcript`** (`transcript.rs`): the interface to a session's transcript as its agent reads it: its size, the context the session held, whether a prompt was taken, what the agent said and which commits it may have made. Only a transcript on disk can be opened, so a session whose transcript vanished cannot be read. Implemented in `infra`, over each agent's format.
+**`Transcript`** (`transcript.rs`): the interface to a session's transcript as its agent reads it: its size, the context the session held, whether a prompt was taken, what the agent said and which commits it may have made. Every session has one; a live session's must be on disk, while a stopped one's may have been cleaned up. Implemented in `infra`, over each agent's format.
 
 **`SessionRuntime`** (`session_runtime.rs`): the interface to the terminal multiplexer a run's sessions live in: it starts a session and drives it by name. Implemented in `infra`; the run owns one and hands every `Session` a reference.
 

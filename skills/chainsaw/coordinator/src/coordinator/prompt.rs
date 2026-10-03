@@ -61,15 +61,15 @@ pub(super) fn cmd_prompt(
     // queued; the state check below then reads what actually arrived. What it
     // reports is the state the send finds the session in.
     let idle_before = session.status() == Some(SessionStatus::Idle);
-    let transcript = session.transcript()?;
-    let offset = transcript.size();
+    let transcript = session.transcript();
+    let offset = transcript.size()?;
     store.write(|tx| prompt::record_attempt(tx, prompt_id))?;
     let _ = session.prompt(text);
     let deadline = Utc::now().timestamp_millis() + window_millis;
     while Utc::now().timestamp_millis() < deadline {
       let status = session.status();
       if let state @ (PromptState::Started | PromptState::Queued) =
-        transcript.prompt_state(offset, &opening)
+        transcript.prompt_state(offset, &opening)?
       {
         store.write(|tx| prompt::record_seen(tx, prompt_id))?;
         if state == PromptState::Queued {
@@ -117,8 +117,8 @@ fn prompt_taken(lock: &File, session: &Session<'_>, wait: bool, timeout: u64) ->
     println!(
       "{}",
       session
-        .transcript()?
-        .latest_assistant_text()
+        .transcript()
+        .latest_assistant_text()?
         .unwrap_or_else(|| "(no assistant text)".to_owned())
     );
   }

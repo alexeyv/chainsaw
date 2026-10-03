@@ -17,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-  TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, TranscriptFormat, entries, open, read_lossy,
-  start_with_prompt, text_of,
+  TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, TranscriptFormat, entries, read_lossy, start_with_prompt,
+  text_of, transcript_file,
 };
 use crate::domain::{
   Agent, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
@@ -114,8 +114,8 @@ impl Agent for Cursor {
     PromptEcho::WithReply
   }
 
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
-    open(&Cursor, path)
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
+    transcript_file(&Cursor, path)
   }
 }
 

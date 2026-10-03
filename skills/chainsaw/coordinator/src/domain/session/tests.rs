@@ -1,8 +1,6 @@
-use std::path::Path;
-
 use crate::domain::test_helpers::{
-  FakeSessionRuntime, PRESENT_TRANSCRIPT, SessionSpec, build_session, build_session_on,
-  format_session, launched_implementer, timestamp, working_implementer,
+  FakeSessionRuntime, SessionSpec, build_session, build_session_on, build_session_with, created_at,
+  format_session, launched_implementer, runtime, timestamp, vanished_agent, working_implementer,
 };
 use crate::domain::{AgentKind, ContextSize, Role, SessionStatus};
 
@@ -258,6 +256,29 @@ can_latch_over_limit: false"#
   }
 
   #[test]
+  fn should_fail_when_a_live_sessions_transcript_is_gone() {
+    let error =
+      build_session_with(launched_implementer(), runtime(), vanished_agent()).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "supervisor: transcript of implementer-1 is gone from /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"
+    );
+  }
+
+  #[test]
+  fn should_accept_a_stopped_session_whose_transcript_is_gone() {
+    let spec = SessionSpec {
+      stopped_at: Some(created_at()),
+      ..launched_implementer()
+    };
+
+    let session = build_session_with(spec, runtime(), vanished_agent()).unwrap();
+
+    assert!(!session.is_live());
+  }
+
+  #[test]
   fn should_accept_a_reading_whose_context_is_unknown() {
     let session = build_session(SessionSpec {
       agent: AgentKind::Cursor,
@@ -380,38 +401,6 @@ mod status {
     let session = build_session_on(launched_implementer(), &runtime).unwrap();
 
     assert_eq!(session.status(), None);
-  }
-}
-
-mod transcript {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let session = build_session(SessionSpec {
-      transcript: PRESENT_TRANSCRIPT,
-      ..launched_implementer()
-    })
-    .unwrap();
-
-    assert_eq!(
-      session.transcript().unwrap().path(),
-      Path::new(PRESENT_TRANSCRIPT)
-    );
-  }
-
-  #[test]
-  fn should_fail_when_the_transcript_is_gone() {
-    let session = build_session(launched_implementer()).unwrap();
-
-    let Err(error) = session.transcript() else {
-      panic!("a vanished transcript opened");
-    };
-
-    assert_eq!(
-      error.to_string(),
-      "supervisor: transcript of implementer-1 vanished from /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"
-    );
   }
 }
 
