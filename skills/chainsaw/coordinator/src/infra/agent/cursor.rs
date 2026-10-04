@@ -130,7 +130,12 @@ impl TranscriptFormat for Cursor {
     ContextSize::UNKNOWN
   }
 
-  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> ContextSize {
+  fn context_peak(
+    &self,
+    _transcript: &Path,
+    _from_offset: u64,
+    _to_offset: Option<u64>,
+  ) -> ContextSize {
     ContextSize::UNKNOWN
   }
 

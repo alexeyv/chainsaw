@@ -24,9 +24,9 @@ pub trait Transcript {
   /// Context the session held at its last turn before `offset`.
   fn context_before(&self, offset: u64) -> Result<ContextSize>;
 
-  /// The largest context the session held between `start` and `end`, or to
-  /// the end of the transcript.
-  fn context_peak(&self, start: u64, end: Option<u64>) -> Result<ContextSize>;
+  /// The largest context the session held between `from_offset` and
+  /// `to_offset`, or to the end of the transcript.
+  fn context_peak(&self, from_offset: u64, to_offset: Option<u64>) -> Result<ContextSize>;
 
   /// The state of a prompt opening with `prompt`, sent after `offset`.
   fn prompt_state(&self, offset: u64, prompt: &str) -> Result<PromptState>;

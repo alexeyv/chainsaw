@@ -44,7 +44,12 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
 trait TranscriptFormat: Sync {
   fn context_size(&self, transcript: &Path) -> ContextSize;
   fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
+  fn context_peak(
+    &self,
+    transcript: &Path,
+    from_offset: u64,
+    to_offset: Option<u64>,
+  ) -> ContextSize;
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
   fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
@@ -90,9 +95,9 @@ impl Transcript for TranscriptFile {
     Ok(self.format.context_before(&self.path, offset))
   }
 
-  fn context_peak(&self, start: u64, end: Option<u64>) -> Result<ContextSize> {
+  fn context_peak(&self, from_offset: u64, to_offset: Option<u64>) -> Result<ContextSize> {
     self.check_readable()?;
-    Ok(self.format.context_peak(&self.path, start, end))
+    Ok(self.format.context_peak(&self.path, from_offset, to_offset))
   }
 
   fn prompt_state(&self, offset: u64, prompt: &str) -> Result<PromptState> {

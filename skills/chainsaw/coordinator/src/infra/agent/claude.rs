@@ -109,9 +109,14 @@ impl TranscriptFormat for Claude {
     )
   }
 
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize {
+  fn context_peak(
+    &self,
+    transcript: &Path,
+    from_offset: u64,
+    to_offset: Option<u64>,
+  ) -> ContextSize {
     ContextSize::tokens(
-      read_lossy(transcript, start, end)
+      read_lossy(transcript, from_offset, to_offset)
         .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
         .unwrap_or_default(),
     )

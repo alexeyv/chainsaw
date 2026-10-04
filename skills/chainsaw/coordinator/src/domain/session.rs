@@ -177,7 +177,9 @@ impl<'r> Session<'r> {
     if over_limit_at.is_some_and(|over| over < started_at) {
       bail!("over_limit_at cannot precede started_at");
     }
-    // A stopped session's transcript may since have been cleaned up.
+    // Live session must have a readable transcript file. A stopped session
+    // remembers where its transcript was (and likely still is), but it also
+    // may not be there anymore.
     let transcript = agent.transcript_at(&transcript);
     if stopped_at.is_none() {
       transcript.check_readable().with_context(|| {

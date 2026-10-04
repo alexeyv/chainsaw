@@ -159,7 +159,7 @@ impl Transcript for SilentTranscript {
     Ok(ContextSize::UNKNOWN)
   }
 
-  fn context_peak(&self, _start: u64, _end: Option<u64>) -> Result<ContextSize> {
+  fn context_peak(&self, _from_offset: u64, _to_offset: Option<u64>) -> Result<ContextSize> {
     Ok(ContextSize::UNKNOWN)
   }
 
