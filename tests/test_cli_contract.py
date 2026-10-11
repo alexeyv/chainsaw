@@ -365,6 +365,52 @@ class VerificationContractTests(SupervisorContractCase):
         self.assertIn("forced-commentary", state.stdout)
         self.assertIn("commentator ingestion was missed after restart", state.stdout)
 
+    def test_forced_commit_replaces_the_commit_an_implementer_amended(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        sha = self.commit_file()
+        self.assert_success(self.cli(
+            "task", "record-commit", str(task), sha, "--force", "--reason",
+            "marker was missed",
+        ))
+        self.git("commit", "--amend", "-m", "feat: fixture change, reworded")
+        amended = self.head()
+        self.assertNotEqual(amended, sha)
+
+        result = self.assert_success(self.cli(
+            "task", "record-commit", str(task), amended, "--force", "--reason",
+            "implementer amended its commit",
+        ))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn(
+            f"task {task} commit re-recorded by force: {amended} (was {sha})",
+            result.stdout,
+        )
+        self.assertEqual(self.recorded_commit(task), amended)
+        self.assertIn(f"{task} committed_unverified", state.stdout)
+        self.assertIn("implementer amended its commit", state.stdout)
+
+    def test_forced_commit_refuses_to_re_record_the_commit_a_task_already_has(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        sha = self.commit_file()
+        self.assert_success(self.cli(
+            "task", "record-commit", str(task), sha, "--force", "--reason",
+            "marker was missed",
+        ))
+
+        result = self.cli(
+            "task", "record-commit", str(task), sha, "--force", "--reason",
+            "recorded twice",
+        )
+
+        self.assert_failure(result, f"task {task} already has commit {sha}")
+
     def test_forced_commit_requires_valid_new_task_commit_evidence(self):
         task = self.new_task()
         self.launch()
@@ -509,14 +555,39 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "commit carries an attribution trailer")
 
-    def test_accept_rejects_a_commit_that_is_not_head(self):
+    def test_accept_takes_a_commit_the_branch_has_moved_past(self):
         task, task_sha = self.prepare_committed_task()
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
         self.assertNotEqual(task_sha, self.head())
 
+        result = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"task {task} accepted: checks passed at {task_sha[:10]}", result.stdout)
+
+    def test_accept_rejects_a_commit_that_is_not_on_the_branch(self):
+        task, task_sha = self.prepare_committed_task()
+        self.git("reset", "--hard", "HEAD~1")
+        self.commit_file("other.txt", "other\n", "feat: the branch went another way")
+        self.assertNotEqual(task_sha, self.head())
+
         result = self.cli("accept", str(task))
 
-        self.assert_failure(result, "commit is not HEAD")
+        self.assert_failure(result, "commit is not on the branch")
+
+    def test_accept_overlooks_the_dirt_of_the_next_task_in_flight(self):
+        task, task_sha = self.prepare_committed_task()
+        self.assert_success(self.cli(
+            "task", "record-commit", str(task), task_sha, "--force", "--reason",
+            "marker was missed",
+        ))
+        following = self.new_task(text="Second task.", files="second.txt")
+        self.launch("replacement")
+        self.assert_success(self.dispatch(following, "replacement"))
+        (self.run_dir / "second.txt").write_text("in progress\n")
+
+        result = self.assert_success(self.cli("accept", str(task)))
+
+        self.assertIn(f"task {task} accepted: checks passed at {task_sha[:10]}", result.stdout)
 
     def test_accept_retries_a_commit_marker_after_clean_head_advance(self):
         task = self.new_task()

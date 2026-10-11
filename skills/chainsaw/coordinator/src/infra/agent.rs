@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 use serde_json::Value;
 
@@ -113,14 +113,36 @@ fn start_with_prompt(
   session: StartSession<'_>,
   prompt: &str,
 ) -> Result<Launched> {
+  start_with_prompt_within(agent, runtime, session, prompt, TRANSCRIPT_TIMEOUT)
+}
+
+/// A session whose agent begins no transcript within `timeout` is abandoned:
+/// the runtime closes its pane and forgets it, since nothing the supervisor
+/// could drive is in there, and the failure says so.
+fn start_with_prompt_within(
+  agent: &dyn Agent,
+  runtime: &dyn SessionRuntime,
+  session: StartSession<'_>,
+  prompt: &str,
+  timeout: Duration,
+) -> Result<Launched> {
   let mut args = session.args.to_vec();
   args.extend(["--".to_owned(), prompt.to_owned()]);
   let run_dir = session.run_dir;
+  let session_id = session.id;
   let started = runtime.start(StartSession {
     args: &args,
     ..session
   })?;
-  let transcript = transcript_within(agent, run_dir, &started.external_id, TRANSCRIPT_TIMEOUT)?;
+  let transcript = match transcript_within(agent, run_dir, &started.external_id, timeout) {
+    Ok(transcript) => transcript,
+    Err(error) => {
+      return Err(match runtime.abandon(session_id, &started.pane_id) {
+        Ok(()) => anyhow!("{error}; its pane was closed"),
+        Err(abandoning) => anyhow!("{error}; and its pane could not be closed: {abandoning}"),
+      });
+    }
+  };
   Ok(Launched {
     started,
     transcript,

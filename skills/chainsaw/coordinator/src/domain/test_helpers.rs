@@ -43,6 +43,10 @@ impl SessionRuntime for FakeSessionRuntime {
   fn wait(&self, _session_id: &str, _timeout: Duration) -> Result<()> {
     self.reach()
   }
+
+  fn abandon(&self, _session_id: &str, _pane_id: &str) -> Result<()> {
+    self.reach()
+  }
 }
 
 impl FakeSessionRuntime {
@@ -165,10 +169,13 @@ pub fn agent() -> &'static dyn Agent {
 }
 
 /// A runtime that starts every session it is asked to, under the external id
-/// `external-<name>`, and remembers the flags each was started with.
+/// `external-<name>`, and remembers the flags each was started with and the
+/// sessions it was told to abandon, by name and pane.
 #[derive(Default)]
 pub struct RecordingSessionRuntime {
   pub started_args: RefCell<Vec<Vec<String>>>,
+  pub abandoned: RefCell<Vec<[String; 2]>>,
+  pub refuses_to_abandon: bool,
 }
 
 impl SessionRuntime for RecordingSessionRuntime {
@@ -194,6 +201,17 @@ impl SessionRuntime for RecordingSessionRuntime {
   }
 
   fn wait(&self, _session_id: &str, _timeout: Duration) -> Result<()> {
+    Ok(())
+  }
+
+  fn abandon(&self, session_id: &str, pane_id: &str) -> Result<()> {
+    if self.refuses_to_abandon {
+      bail!("the recording runtime keeps {pane_id}");
+    }
+    self
+      .abandoned
+      .borrow_mut()
+      .push([session_id.to_owned(), pane_id.to_owned()]);
     Ok(())
   }
 }

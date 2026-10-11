@@ -147,8 +147,9 @@ working on, and dispatch the next task as quickly as possible. Then go back to y
 **accepted** — terminal state, successful ending.
 Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
 Trigger the transition thus: `$SUP accept <task-id>`
-This checks the commit is in git, carries no attribution trailer, is HEAD, and left the
-tree clean. It does not re-derive whether the quality gate ran — the implementer's
+This checks the commit is in git, carries no attribution trailer, and is on the branch.
+A dirty tree fails it only while no other task is dispatched or in flight: once the next
+implementer is working, the dirt is its. It does not re-derive whether the quality gate ran — the implementer's
 contract is to run it before it commits, and proving that again from the transcript
 only costs wall time.
 If you eventually decide to accept the task bypassing validations:
@@ -167,7 +168,10 @@ it misses one, remedy only that failure with `$SUP task record-commit <task-id> 
 --force --reason "..."` or `$SUP task record-commentary <task-id> --force --reason
 "..."`; do not use these commands to skip evidence or lifecycle stages. The commit must
 exist in the run repository, descend from the task's base head, and belong to no other
-task. The supervisor records the reason in the run timeline.
+task. The supervisor records the reason in the run timeline. On a task already
+`committed_unverified`, `record-commit --force` replaces the recorded sha, for an
+implementer that amended its commit after the coordinator recorded it; the commentator
+is then woken on the replacement.
 
 ## Writing a task
 

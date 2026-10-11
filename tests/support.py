@@ -137,6 +137,14 @@ class SupervisorContractCase(unittest.TestCase):
             self._state_dirs[run_dir] = Path(result.stdout.strip())
         return self._state_dirs[run_dir]
 
+    def recorded_commit(self, task_id):
+        """The commit sha the supervisor has on record for `task_id`."""
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+            (sha,) = database.execute(
+                "select commit_sha from tasks where id=?", (task_id,)
+            ).fetchone()
+        return sha
+
     def write_supervisor_db(self, sql, *params):
         """Move a durable fact the CLI cannot, such as a timestamp into the past."""
         with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:

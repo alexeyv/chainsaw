@@ -62,6 +62,9 @@ case "$1 $2" in
   printf '{"result":{"delivered":true}}\n' ;;
 'agent wait')
   printf '{"result":{"status":"idle"}}\n' ;;
+'pane close')
+  if [ "$3" = pane-stuck ]; then printf 'no such pane\n' >&2; exit 1; fi
+  printf '{"result":{"closed":true}}\n' ;;
 *)
   printf 'unsupported: %s\n' "$*" >&2; exit 2 ;;
 esac
@@ -455,5 +458,29 @@ mod wait {
       herdr.calls()[0],
       ["agent", "wait", "worker", "--timeout", "30000"]
     );
+  }
+}
+
+mod abandon {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let herdr = FakeHerdr::new();
+    let runtime = herdr.runtime(Some("ws-1"), "tab-1");
+
+    runtime.abandon("worker", "pane-7").unwrap();
+
+    assert_eq!(herdr.calls(), [["pane", "close", "pane-7"]]);
+  }
+
+  #[test]
+  fn should_fail_when_herdr_cannot_close_the_pane() {
+    let herdr = FakeHerdr::new();
+    let runtime = herdr.runtime(Some("ws-1"), "tab-1");
+
+    let error = runtime.abandon("worker", "pane-stuck").unwrap_err();
+
+    assert_eq!(error.to_string(), "herdr failed: no such pane");
   }
 }

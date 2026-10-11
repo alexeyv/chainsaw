@@ -4,7 +4,7 @@ use rusqlite::Transaction;
 
 use super::{
   abort, accept, advance, all, create, dispatch, get, predecessor, record_commentary_delivery,
-  record_commentary_request, record_commit, take_flight, tasks_for_session,
+  record_commentary_request, record_commit, replace_commit, take_flight, tasks_for_session,
 };
 use crate::domain::test_helpers::{format_task, format_tasks, format_time, within};
 use crate::domain::{ContextSize, Task, TaskState};
@@ -629,6 +629,82 @@ mod record_commit {
       error.to_string(),
       "task 1 is already committed_unverified with commit Some(\"first123\"), not Some(\"second456\")"
     );
+    Ok(())
+  }
+}
+
+mod replace_commit {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "amended")?;
+    record_commit(&transaction, task.id(), "first123", None)?;
+    record_commentary_request(&transaction, task.id())?;
+    record_commentary_delivery(&transaction, task.id())?;
+
+    let task = replace_commit(&transaction, task.id(), "amended456")?;
+    transaction.commit()?;
+
+    assert_eq!(task.state(), TaskState::CommittedUnverified);
+    assert_eq!(task.commit_sha(), Some("amended456"));
+    assert!(task.awaits_commentary());
+    assert_eq!(task.commentary_requested_at(), None);
+    assert_eq!(row_count(&db, "task_events")?, 3);
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_task_has_no_commit_yet() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "uncommitted")?;
+
+    let error = replace_commit(&transaction, task.id(), "amended456").unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is dispatched, not committed_unverified"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_task_is_already_accepted() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "accepted")?;
+    record_commit(&transaction, task.id(), "first123", None)?;
+    accept(&transaction, task.id(), "checks passed")?;
+
+    let error = replace_commit(&transaction, task.id(), "amended456").unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(
+      error.to_string(),
+      "task 1 is accepted, not committed_unverified"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_commit_is_the_one_recorded() -> Result<()> {
+    let mut db = database();
+    session_row(&db, 7)?;
+    let transaction = db.transaction()?;
+    let task = dispatched(&transaction, "same")?;
+    record_commit(&transaction, task.id(), "first123", None)?;
+
+    let error = replace_commit(&transaction, task.id(), "first123").unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(error.to_string(), "task 1 already has commit first123");
     Ok(())
   }
 }

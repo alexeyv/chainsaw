@@ -47,4 +47,7 @@ pub trait SessionRuntime {
   fn prompt(&self, session_id: &str, text: &str) -> Result<()>;
   fn interrupt(&self, session_id: &str) -> Result<()>;
   fn wait(&self, session_id: &str, timeout: Duration) -> Result<()>;
+  /// Closes the pane of a session whose agent never began and forgets the
+  /// session, so the next start of that name does not pile up on it.
+  fn abandon(&self, session_id: &str, pane_id: &str) -> Result<()>;
 }

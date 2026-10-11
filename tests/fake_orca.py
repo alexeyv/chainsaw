@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import json  # noqa: E402
+import re  # noqa: E402
 import shlex  # noqa: E402
 import time  # noqa: E402
 
@@ -35,6 +36,7 @@ def main(argv):
         ("terminal", "split"): terminal_split,
         ("terminal", "wait"): terminal_wait,
         ("terminal", "send"): terminal_send,
+        ("terminal", "close"): terminal_close,
     }
     handler = handlers.get(tuple(argv[:2]))
     if handler is None:
@@ -60,6 +62,17 @@ def terminal_split(flags):
             current, flags["--command"], split_from=flags["--terminal"],
         )
     reply({"split": {"handle": handle, "tabId": tab_id}})
+    return 0
+
+
+def terminal_close(flags):
+    handle = flags["--terminal"]
+    with state() as current:
+        if handle not in current["agents"]:
+            return refuse("terminal_handle_stale", f"no terminal {handle}")
+        del current["agents"][handle]
+        agents.record(current, "close", handle)
+    reply({"close": {"closed": True}})
     return 0
 
 
@@ -129,7 +142,7 @@ def open_terminal(current, command, title=None, split_from=None):
     agent = agents.new_agent(kind, run_dir, session_id)
     current["agents"][handle] = agent
     agents.open_transcript(current, agent, args)
-    details = {"kind": kind, "program": program, "args": args}
+    details = {"kind": kind, "program": program, "args": args, "command": command}
     if title is not None:
         details["title"] = title
     if split_from is not None:
@@ -141,7 +154,7 @@ def open_terminal(current, command, title=None, split_from=None):
 def launched(command):
     """The program behind the shell command the supervisor hands a terminal:
     `cd RUN_DIR && exec PROGRAM [--session-id ID] ARGS...`."""
-    words = shlex.split(command)
+    words = shlex.split(ansi_c_unquoted(command))
     if words[:1] != ["cd"] or words[2:4] != ["&&", "exec"] or len(words) < 5:
         raise SystemExit(f"fake orca cannot run {command!r}")
     run_dir, program, args = words[1], words[4], words[5:]
@@ -149,6 +162,36 @@ def launched(command):
     if args[:1] == ["--session-id"]:
         session_id, args = args[1], args[2:]
     return run_dir, program, session_id, args
+
+
+ANSI_C_QUOTED = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+ANSI_C_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "'": "'"}
+
+
+def ansi_c_unquoted(command):
+    """`command` with every `$'...'` word, which the supervisor uses for a word
+    spanning lines, as the shell would read it, re-quoted for shlex."""
+    def decode(match):
+        text, body = [], match.group(1)
+        index = 0
+        while index < len(body):
+            character = body[index]
+            if character != "\\":
+                text.append(character)
+                index += 1
+            elif body[index + 1] in ANSI_C_ESCAPES:
+                text.append(ANSI_C_ESCAPES[body[index + 1]])
+                index += 2
+            elif body[index + 1] == "x":
+                text.append(chr(int(body[index + 2:index + 4], 16)))
+                index += 4
+            elif body[index + 1] == "u":
+                text.append(chr(int(body[index + 2:index + 6], 16)))
+                index += 6
+            else:
+                raise SystemExit(f"fake orca cannot read {match.group(0)!r}")
+        return shlex.quote("".join(text))
+    return ANSI_C_QUOTED.sub(decode, command)
 
 
 # --- plumbing

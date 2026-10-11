@@ -32,6 +32,7 @@ def main(argv):
         ("agent", "prompt"): agent_prompt,
         ("agent", "send-keys"): agent_send_keys,
         ("agent", "wait"): agent_wait,
+        ("pane", "close"): pane_close,
     }
     handler = handlers.get(tuple(command))
     if handler is None:
@@ -56,6 +57,14 @@ def pane_split(arguments):
     with state() as current:
         pane_id, _ = new_pane(current, flags["--cwd"])
     reply({"pane": {"pane_id": pane_id}})
+    return 0
+
+
+def pane_close(arguments):
+    (pane_id,) = arguments
+    with state() as current:
+        agents.record(current, "close", pane_id)
+    reply({"closed": True})
     return 0
 
 

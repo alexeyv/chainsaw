@@ -213,6 +213,27 @@ pub fn record_commit(
   )
 }
 
+/// Replace the commit recorded on a committed, unverified task with the one
+/// that stands for it now: an implementer that amends its commit leaves the
+/// recorded sha unreachable. The task's state does not move, so no task event
+/// is written; the caller records why in the run's timeline. The commentary
+/// stamps are cleared, since they were about the commit that is gone.
+pub fn replace_commit(transaction: &Transaction<'_>, id: i64, commit_sha: &str) -> Result<Task> {
+  let current = get(transaction, id)?.with_context(|| format!("task {id} is missing"))?;
+  if current.state() != TaskState::CommittedUnverified {
+    bail!("task {id} is {}, not committed_unverified", current.state());
+  }
+  if current.commit_sha() == Some(commit_sha) {
+    bail!("task {id} already has commit {commit_sha}");
+  }
+  transaction.execute(
+    "update tasks set commit_sha=?, commentary_requested_at=null, commentary_delivered_at=null
+     where id=?",
+    params![commit_sha, id],
+  )?;
+  get(transaction, id)?.with_context(|| format!("task {id} disappeared while recommitting"))
+}
+
 pub fn accept(transaction: &Transaction<'_>, id: i64, reason: &str) -> Result<Task> {
   advance(
     transaction,

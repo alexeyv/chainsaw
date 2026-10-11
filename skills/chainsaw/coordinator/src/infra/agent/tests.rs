@@ -120,6 +120,57 @@ mod start_with_prompt {
   }
 }
 
+mod start_with_prompt_within {
+  use super::*;
+
+  #[test]
+  fn should_abandon_the_session_when_its_agent_writes_no_transcript() {
+    let transcript = Transcript::unwritten();
+    let runtime = RecordingSessionRuntime::default();
+
+    let error = start_with_prompt_within(
+      &writing(&transcript),
+      &runtime,
+      start_request("worker", Path::new("/run"), &[]),
+      "Read the brief.",
+      Duration::ZERO,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "fake-agent session external-worker wrote no transcript within 0 seconds; its pane was closed"
+    );
+    assert_eq!(
+      *runtime.abandoned.borrow(),
+      [["worker".to_owned(), "pane-worker".to_owned()]]
+    );
+  }
+
+  #[test]
+  fn should_say_so_when_the_pane_cannot_be_closed_either() {
+    let transcript = Transcript::unwritten();
+    let runtime = RecordingSessionRuntime {
+      refuses_to_abandon: true,
+      ..RecordingSessionRuntime::default()
+    };
+
+    let error = start_with_prompt_within(
+      &writing(&transcript),
+      &runtime,
+      start_request("worker", Path::new("/run"), &[]),
+      "Read the brief.",
+      Duration::ZERO,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "fake-agent session external-worker wrote no transcript within 0 seconds; and its pane could not be closed: the recording runtime keeps pane-worker"
+    );
+  }
+}
+
 mod transcript_within {
   use super::*;
 

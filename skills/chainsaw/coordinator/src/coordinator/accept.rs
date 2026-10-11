@@ -45,12 +45,15 @@ pub(super) fn cmd_task_record_commit(
     bail!("supervisor: no task {task_id}");
   };
   let reason = forced_remedy_reason("task record-commit", force, reason)?;
-  if !matches!(task.state(), TaskState::Dispatched | TaskState::InFlight) {
-    bail!(
-      "supervisor: task {task_id} is {}, not awaiting a coordinator-recorded commit",
-      task.state()
-    );
-  }
+  // A committed task takes a replacement: the implementer amended its commit
+  // after the coordinator recorded it, and the recorded sha is gone.
+  let replacing = match task.state() {
+    TaskState::Dispatched | TaskState::InFlight => None,
+    TaskState::CommittedUnverified => task.commit_sha().map(str::to_owned),
+    state => {
+      bail!("supervisor: task {task_id} is {state}, not awaiting a coordinator-recorded commit")
+    }
+  };
   let Some(commit_sha) = run.repo().canonical_commit(sha)? else {
     bail!("supervisor: commit {sha} does not exist in the run repository");
   };
@@ -77,7 +80,10 @@ pub(super) fn cmd_task_record_commit(
         "supervisor: commit {sha} does not descend from task {task_id}'s base_head as a new commit"
       );
     }
-    task::record_commit(tx, task_id, sha, Some(reason))?;
+    match &replacing {
+      Some(_) => task::replace_commit(tx, task_id, sha)?,
+      None => task::record_commit(tx, task_id, sha, Some(reason))?,
+    };
     run_event::create(
       tx,
       RunEventKind::ForcedCommit,
@@ -85,7 +91,12 @@ pub(super) fn cmd_task_record_commit(
     )?;
     Ok(())
   })?;
-  println!("task {task_id} commit recorded by force: {sha}");
+  match replacing {
+    Some(previous) => {
+      println!("task {task_id} commit re-recorded by force: {sha} (was {previous})");
+    }
+    None => println!("task {task_id} commit recorded by force: {sha}"),
+  }
   Ok(())
 }
 
@@ -191,15 +202,19 @@ fn accept_through_the_gate(run: &Run, store: &Store, task_id: i64) -> Result<()>
         if has_attribution_trailer(&commit.message) {
           problems.push("commit carries an attribution trailer".to_owned());
         }
-        if !run.repo().head()?.starts_with(&commit.sha) {
-          problems.push("commit is not HEAD".to_owned());
+        let head = run.repo().head()?;
+        if !head.starts_with(&commit.sha) && !run.repo().is_ancestor(&commit.sha, &head)? {
+          problems.push("commit is not on the branch".to_owned());
         }
       }
     }
   } else {
     problems.push("no new commit since the task was dispatched".to_owned());
   }
-  if !run.repo().is_clean()? {
+  // The next task is dispatched before the previous one is judged, so by now
+  // the tree is dirty with the next implementer's work. Leftovers of this
+  // task's own work can only be told apart while no other task is in it.
+  if !run.repo().is_clean()? && !another_task_working(store, task_id)? {
     problems.push("tree is dirty".to_owned());
   }
   // The implementer runs the quality gate before it commits; that is its
@@ -209,7 +224,11 @@ fn accept_through_the_gate(run: &Run, store: &Store, task_id: i64) -> Result<()>
       .as_deref()
       .context("accepted task unexpectedly has no commit")?;
     store.write(|tx| {
-      task::record_commit(tx, task_id, sha, None)?;
+      // A commit the coordinator recorded, by itself or by force, stands;
+      // one the gate found in the transcript is recorded here.
+      if task.commit_sha().is_none() {
+        task::record_commit(tx, task_id, sha, None)?;
+      }
       task::accept(tx, task_id, &format!("checks passed at {sha}"))?;
       Ok(())
     })?;
@@ -221,6 +240,13 @@ fn accept_through_the_gate(run: &Run, store: &Store, task_id: i64) -> Result<()>
     println!(" - {problem}");
   }
   Err(anyhow!(""))
+}
+
+/// Whether a task other than `task_id` is dispatched or in flight.
+fn another_task_working(store: &Store, task_id: i64) -> Result<bool> {
+  Ok(store.read(task::all)?.iter().any(|other| {
+    other.id() != task_id && matches!(other.state(), TaskState::Dispatched | TaskState::InFlight)
+  }))
 }
 
 fn head_advanced_cleanly(run: &Run, base_head: Option<&str>) -> Result<bool> {

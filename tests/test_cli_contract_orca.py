@@ -217,6 +217,14 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         self.assertEqual(start["split_from"], "term-lead")
         self.assertNotIn("title", start)
 
+    def test_a_prompt_spanning_lines_is_typed_on_one_line(self):
+        name = self.start_commentator()
+
+        start = self.operations_on(name)[0]
+        self.assertEqual(start["operation"], "start")
+        self.assertNotIn("\n", start["command"])
+        self.assertEqual(self.launch_prompt(name).count("\n"), 2)
+
     def test_the_registry_beside_the_database_maps_names_to_terminals(self):
         self.launch("first")
         self.launch("second")

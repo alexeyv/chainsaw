@@ -143,11 +143,23 @@ impl OrcaSessionRuntime {
   fn remember(&self, name: &str, terminal: Terminal) -> Result<()> {
     let mut registry = self.registry()?;
     registry.insert(name.to_owned(), terminal);
+    self.save(&registry)
+  }
+
+  fn forget(&self, name: &str) -> Result<()> {
+    let mut registry = self.registry()?;
+    registry.remove(name);
+    self.save(&registry)
+  }
+
+  /// Writes the registry whole, through a rename, so a reader never sees it
+  /// half written.
+  fn save(&self, registry: &BTreeMap<String, Terminal>) -> Result<()> {
     if let Some(parent) = self.registry.parent() {
       fs::create_dir_all(parent)?;
     }
     let temporary = self.registry.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(&registry)?)?;
+    fs::write(&temporary, serde_json::to_vec_pretty(registry)?)?;
     fs::rename(&temporary, &self.registry)?;
     Ok(())
   }
@@ -221,8 +233,12 @@ impl SessionRuntime for OrcaSessionRuntime {
     let run_dir = session.run_dir.to_string_lossy();
     let command = format!(
       "cd {} && exec {}",
-      shell_words::quote(&run_dir),
-      shell_words::join(&words)
+      quote_on_one_line(&run_dir),
+      words
+        .iter()
+        .map(|word| quote_on_one_line(word))
+        .collect::<Vec<_>>()
+        .join(" ")
     );
     let since = SystemTime::now();
     let (opened, key) = match session.kind {
@@ -354,6 +370,42 @@ impl SessionRuntime for OrcaSessionRuntime {
     thread::sleep(self.turn_end_settle);
     Ok(())
   }
+
+  fn abandon(&self, session_id: &str, pane_id: &str) -> Result<()> {
+    self.request(&["terminal", "close", "--terminal", pane_id, "--json"])?;
+    self.forget(session_id)
+  }
+}
+
+/// `word` quoted so the shell reads it back whole from one line. Orca types
+/// the startup command into the pane's shell, and types text spanning lines
+/// as a bracketed paste, which a shell that never switched bracketed paste
+/// on, such as macOS's bash 3.2, reads as text. So a word with a line break
+/// or another control character in it goes in ANSI-C quotes, which bash and
+/// zsh read back to the original; any other word is quoted the usual way.
+fn quote_on_one_line(word: &str) -> String {
+  if !word.chars().any(char::is_control) {
+    return shell_words::quote(word).into_owned();
+  }
+  let mut quoted = String::from("$'");
+  for character in word.chars() {
+    match character {
+      '\\' => quoted.push_str("\\\\"),
+      '\'' => quoted.push_str("\\'"),
+      '\n' => quoted.push_str("\\n"),
+      '\r' => quoted.push_str("\\r"),
+      '\t' => quoted.push_str("\\t"),
+      control if control.is_ascii_control() => {
+        quoted.push_str(&format!("\\x{:02x}", control as u32));
+      }
+      control if control.is_control() => {
+        quoted.push_str(&format!("\\u{:04x}", control as u32));
+      }
+      other => quoted.push(other),
+    }
+  }
+  quoted.push('\'');
+  quoted
 }
 
 /// A fresh version 4 UUID, for an agent that takes its session id on the

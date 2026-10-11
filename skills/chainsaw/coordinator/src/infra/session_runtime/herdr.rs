@@ -176,6 +176,18 @@ impl SessionRuntime for HerdrSessionRuntime {
       .run(&["agent", "wait", session_id, "--timeout", &timeout_ms])?;
     Ok(())
   }
+
+  fn abandon(&self, _session_id: &str, pane_id: &str) -> Result<()> {
+    let output = self.cli.run(&["pane", "close", pane_id])?;
+    if !output.status.success() {
+      bail!(
+        "{} failed: {}",
+        self.cli.name,
+        String::from_utf8_lossy(&output.stderr).trim()
+      );
+    }
+    Ok(())
+  }
 }
 
 /// Herdr's agent states, as `agent wait --until` lists them: idle, working,

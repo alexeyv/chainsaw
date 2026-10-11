@@ -57,6 +57,11 @@ case "$1 $2" in
   esac ;;
 'terminal send')
   printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' ;;
+'terminal close')
+  case "$handle" in
+  term-gone) printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale handle"}}\n'; exit 1 ;;
+  *) printf '{"ok":true,"result":{"close":{"closed":true}}}\n' ;;
+  esac ;;
 *)
   printf 'unsupported: %s\n' "$*" >&2; exit 2 ;;
 esac
@@ -258,6 +263,31 @@ mod start {
       orca.calls()[0][7],
       format!(
         "cd '/tmp/my run' && exec claude --session-id {} --append-system-prompt 'be terse'",
+        started.external_id
+      )
+    );
+  }
+
+  #[test]
+  fn should_type_a_prompt_spanning_lines_on_one_line() {
+    let orca = FakeOrca::new();
+    let args = ["--", "Read the role prompt.\nRun directory: /tmp/run"].map(str::to_owned);
+
+    let started = orca
+      .runtime()
+      .start(StartSession {
+        id: "commentator",
+        run_dir: Path::new("/tmp/run"),
+        kind: SessionKind::Commentator,
+        agent: AgentKind::Claude,
+        args: &args,
+      })
+      .unwrap();
+
+    assert_eq!(
+      orca.calls()[0][7],
+      format!(
+        "cd /tmp/run && exec claude --session-id {} -- $'Read the role prompt.\\nRun directory: /tmp/run'",
         started.external_id
       )
     );
@@ -610,6 +640,63 @@ mod wait {
       .unwrap_err();
 
     assert_eq!(error.to_string(), "orca: no session named worker");
+  }
+}
+
+mod abandon {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    let orca = FakeOrca::new();
+    let runtime = orca.registered("worker", "term-7");
+
+    runtime.abandon("worker", "term-7").unwrap();
+
+    assert_eq!(
+      orca.calls(),
+      [["terminal", "close", "--terminal", "term-7", "--json"]]
+    );
+    assert_eq!(
+      runtime.terminal_of("worker").unwrap_err().to_string(),
+      "orca: no session named worker"
+    );
+  }
+
+  #[test]
+  fn should_fail_and_keep_the_session_when_orca_refuses() {
+    let orca = FakeOrca::new();
+    let runtime = orca.registered("worker", "term-gone");
+
+    let error = runtime.abandon("worker", "term-gone").unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "orca refused: stale handle (terminal_handle_stale)"
+    );
+    assert!(runtime.terminal_of("worker").is_ok());
+  }
+}
+
+mod quote_on_one_line {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(quote_on_one_line("--model"), "--model");
+  }
+
+  #[test]
+  fn should_quote_a_word_with_spaces_the_usual_way() {
+    assert_eq!(quote_on_one_line("be terse"), "'be terse'");
+  }
+
+  #[test]
+  fn should_keep_a_word_spanning_lines_on_one_line() {
+    assert_eq!(
+      quote_on_one_line("it's\tone\\two\r\nthree\x07"),
+      "$'it\\'s\\tone\\\\two\\r\\nthree\\x07'"
+    );
   }
 }
 
