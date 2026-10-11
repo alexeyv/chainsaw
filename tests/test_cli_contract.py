@@ -942,7 +942,10 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         result = self.cli("calibrate", str(task))
 
-        self.assert_failure(result, "No such file or directory")
+        transcript = self.session_transcript("worker")
+        self.assert_failure(
+            result, f"supervisor: cannot read transcript {transcript}: No such file or directory"
+        )
 
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"

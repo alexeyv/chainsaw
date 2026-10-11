@@ -76,7 +76,15 @@ impl Transcript for TranscriptFile {
   }
 
   fn check_readable(&self) -> Result<()> {
-    File::open(&self.path)?;
+    // The top of the error is all the lead sees, so it carries the cause; the
+    // cause stays underneath for whoever wants its kind.
+    File::open(&self.path).map_err(|error| {
+      let message = format!(
+        "supervisor: cannot read transcript {}: {error}",
+        self.path.display()
+      );
+      anyhow::Error::new(error).context(message)
+    })?;
     Ok(())
   }
 
