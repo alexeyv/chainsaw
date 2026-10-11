@@ -177,20 +177,7 @@ impl<'r> Session<'r> {
     if over_limit_at.is_some_and(|over| over < started_at) {
       bail!("over_limit_at cannot precede started_at");
     }
-    // Live session must have a readable transcript file. A stopped session
-    // remembers where its transcript was (and likely still is), but it also
-    // may not be there anymore.
-    let transcript = agent.transcript_at(&transcript);
-    if stopped_at.is_none() {
-      transcript.check_readable().with_context(|| {
-        format!(
-          "supervisor: transcript of {name} is gone from {}",
-          transcript.path().display()
-        )
-      })?;
-    }
-
-    Ok(Self {
+    let session = Self {
       runtime,
       agent,
       id,
@@ -206,8 +193,21 @@ impl<'r> Session<'r> {
       last_growth,
       kicked_at,
       over_limit_at,
-      transcript,
-    })
+      transcript: agent.transcript_at(&transcript),
+    };
+    // Live session must have a readable transcript file. A stopped session
+    // remembers where its transcript was (and likely still is),
+    // but doesn't blow up if it's not
+    if session.is_live() {
+      session.transcript.check_readable().with_context(|| {
+        format!(
+          "supervisor: transcript of {} is gone from {}",
+          session.name,
+          session.transcript.path().display()
+        )
+      })?;
+    }
+    Ok(session)
   }
 
   /// What the runtime says the session is doing, or None when it has no such
