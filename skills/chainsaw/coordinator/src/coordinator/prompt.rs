@@ -39,6 +39,9 @@ pub(super) fn cmd_prompt(
   let Some(session) = store.read(|tx| run.session_named(tx, name))? else {
     bail!("supervisor: no session {name}; launch it first");
   };
+  if !session.is_live() {
+    bail!("supervisor: {name} is stopped; launch it again first");
+  }
   // Only the prompt's opening is matched in the transcript.
   let opening: String = text.chars().take(80).collect();
   let prompt_id = store

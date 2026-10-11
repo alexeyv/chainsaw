@@ -128,6 +128,15 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         self.assertEqual(self.prompts_to("worker"), ["busy but silent"] * 3)
         self.assertEqual(result.stderr.count("resending"), 2)
 
+    def test_prompt_refuses_a_stopped_session(self):
+        self.launch()
+        self.stop_session("worker")
+
+        result = self.cli("prompt", "worker", "anyone there?")
+
+        self.assert_failure(result, "supervisor: worker is stopped; launch it again first")
+        self.assertEqual(self.prompts_to("worker"), [])
+
     def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
         task = self.new_task()
         commentator = self.start_commentator()
