@@ -12,3 +12,4 @@ chainsaw.local.toml
 skills/**/target/
 _bmad/
 _bmad-output/
+.air/
