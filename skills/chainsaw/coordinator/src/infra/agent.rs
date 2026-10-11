@@ -1,9 +1,9 @@
 //! The agents a session can run: Claude Code, OpenAI Codex or the Cursor
 //! Agent CLI. Which one a session runs is recorded on the session. Each reads
 //! its own transcript format, and what reading a JSONL transcript takes is
-//! shared here, along with the transcript an agent opens on its format.
+//! shared here; the transcript an agent hands a session is in
+//! `transcript_file`.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,10 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 use serde_json::Value;
 
-use super::transcript_monitor::transcript_size;
-use crate::domain::{
-  Agent, AgentKind, ContextSize, Launched, PromptState, SessionRuntime, StartSession, Transcript,
-};
+use crate::domain::{Agent, AgentKind, Launched, SessionRuntime, StartSession};
 
 /// How long a new session has to begin its transcript before its start fails.
 const TRANSCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -26,10 +23,12 @@ const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
 mod claude;
 mod codex;
 mod cursor;
+mod transcript_file;
 
 pub use claude::Claude;
 pub use codex::Codex;
 pub use cursor::Cursor;
+use transcript_file::{TranscriptFormat, transcript_file};
 
 /// The implementation of a named agent.
 pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
@@ -37,95 +36,6 @@ pub fn implementing(kind: AgentKind) -> &'static dyn Agent {
     AgentKind::Claude => &Claude,
     AgentKind::Codex => &Codex,
     AgentKind::Cursor => &Cursor,
-  }
-}
-
-/// How an agent reads a transcript in its own format, handed the file.
-trait TranscriptFormat: Sync {
-  fn context_size(&self, transcript: &Path) -> ContextSize;
-  fn context_before(&self, transcript: &Path, offset: u64) -> ContextSize;
-  fn context_peak(
-    &self,
-    transcript: &Path,
-    from_offset: u64,
-    to_offset: Option<u64>,
-  ) -> ContextSize;
-  fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
-  fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
-  fn commit_candidates(&self, transcript: &Path, offset: u64, head: &str) -> Vec<String>;
-}
-
-/// A session's transcript file, read in its agent's format.
-struct TranscriptFile {
-  format: &'static dyn TranscriptFormat,
-  path: PathBuf,
-}
-
-/// The transcript at `path` in `format`.
-fn transcript_file(format: &'static dyn TranscriptFormat, path: &Path) -> Box<dyn Transcript> {
-  Box::new(TranscriptFile {
-    format,
-    path: path.to_owned(),
-  })
-}
-
-impl Transcript for TranscriptFile {
-  fn path(&self) -> &Path {
-    &self.path
-  }
-
-  fn check_readable(&self) -> Result<()> {
-    // The top of the error is all the lead sees, so it carries the cause; the
-    // cause stays underneath for whoever wants its kind.
-    File::open(&self.path).map_err(|error| {
-      let message = format!(
-        "supervisor: cannot read transcript {}: {error}",
-        self.path.display()
-      );
-      anyhow::Error::new(error).context(message)
-    })?;
-    Ok(())
-  }
-
-  fn size(&self) -> Result<u64> {
-    self.check_readable()?;
-    Ok(transcript_size(&self.path))
-  }
-
-  fn context_size(&self) -> Result<ContextSize> {
-    self.check_readable()?;
-    Ok(self.format.context_size(&self.path))
-  }
-
-  fn context_before(&self, offset: u64) -> Result<ContextSize> {
-    self.check_readable()?;
-    Ok(self.format.context_before(&self.path, offset))
-  }
-
-  fn context_peak(&self, from_offset: u64, to_offset: Option<u64>) -> Result<ContextSize> {
-    self.check_readable()?;
-    Ok(self.format.context_peak(&self.path, from_offset, to_offset))
-  }
-
-  fn prompt_state(&self, offset: u64, prompt: &str) -> Result<PromptState> {
-    self.check_readable()?;
-    Ok(self.format.prompt_state(&self.path, offset, prompt))
-  }
-
-  fn latest_assistant_text(&self) -> Result<Option<String>> {
-    self.check_readable()?;
-    Ok(self.format.latest_assistant_text(&self.path))
-  }
-
-  fn output_mentions(&self, text: &str) -> Result<bool> {
-    self.check_readable()?;
-    Ok(self.format.output_mentions(&self.path, text))
-  }
-
-  fn commit_candidates(&self, offset: u64, head: &str) -> Result<Vec<String>> {
-    self.check_readable()?;
-    Ok(self.format.commit_candidates(&self.path, offset, head))
   }
 }
 

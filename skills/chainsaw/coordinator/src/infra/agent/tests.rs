@@ -12,10 +12,10 @@ use crate::domain::test_helpers::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A transcript path nothing has written yet, removed when dropped.
-struct Transcript(PathBuf);
+pub(super) struct Transcript(PathBuf);
 
 impl Transcript {
-  fn unwritten() -> Self {
+  pub(super) fn unwritten() -> Self {
     Self(std::env::temp_dir().join(format!(
       "chainsaw-agent-transcript-{}-{}.jsonl",
       std::process::id(),
@@ -23,7 +23,7 @@ impl Transcript {
     )))
   }
 
-  fn written() -> Self {
+  pub(super) fn written() -> Self {
     let transcript = Self::unwritten();
     transcript.write();
     transcript
@@ -33,7 +33,7 @@ impl Transcript {
     fs::write(&self.0, "").unwrap();
   }
 
-  fn path(&self) -> PathBuf {
+  pub(super) fn path(&self) -> PathBuf {
     self.0.clone()
   }
 }
@@ -48,33 +48,6 @@ fn writing(transcript: &Transcript) -> FakeAgent {
   FakeAgent {
     transcript: Some(transcript.path()),
     vanished: false,
-  }
-}
-
-mod check_readable {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = Transcript::written();
-
-    transcript_file(&Claude, &transcript.path())
-      .check_readable()
-      .unwrap();
-  }
-
-  #[test]
-  fn should_fail_when_the_file_is_gone() {
-    let transcript = Transcript::unwritten();
-
-    let error = transcript_file(&Claude, &transcript.path())
-      .check_readable()
-      .unwrap_err();
-
-    assert_eq!(
-      error.downcast::<std::io::Error>().unwrap().kind(),
-      std::io::ErrorKind::NotFound
-    );
   }
 }
 
