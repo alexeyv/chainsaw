@@ -136,7 +136,7 @@ pub enum Command {
     #[arg(long, default_value_t = 120_000)]
     interval_ms: u64,
   },
-  /// Print measured context use.
+  /// Print measured context use of every live session, or of the named one.
   Context { name: Option<String> },
   /// Open or close a human-wait interval.
   HumanWait { action: HumanWaitAction },

@@ -894,6 +894,17 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertEqual(result.stdout, "worker\t33\n")
 
+    def test_context_without_a_name_reports_live_sessions_only(self):
+        self.launch("worker")
+        self.launch("retired")
+        self.append_usage("worker", input_tokens=33)
+        self.append_usage("retired", input_tokens=44)
+        self.stop_session_and_remove_transcript("retired")
+
+        result = self.assert_success(self.cli("context"))
+
+        self.assertEqual(result.stdout, "worker\t33\n")
+
     def test_calibration_reports_git_and_task_context_cost(self):
         task = self.new_task(lines=20)
         self.launch()

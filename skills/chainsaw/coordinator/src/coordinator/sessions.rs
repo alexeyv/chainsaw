@@ -156,11 +156,16 @@ fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, Path
   Ok(transcripts)
 }
 
+/// The named session's context, or every live session's: a stopped session
+/// holds no context, and its transcript may be gone.
 pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Result<()> {
   for session in store
     .read(|tx| run.sessions(tx))?
     .into_iter()
-    .filter(|session| name.is_none_or(|name| session.name() == name))
+    .filter(|session| match name {
+      Some(name) => session.name() == name,
+      None => session.is_live(),
+    })
   {
     println!(
       "{}\t{}",
