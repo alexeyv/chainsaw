@@ -46,6 +46,7 @@ impl Drop for Transcript {
 
 fn writing(transcript: &Transcript) -> FakeAgent {
   FakeAgent {
+    kind: AgentKind::Claude,
     transcript: Some(transcript.path()),
     vanished: false,
   }

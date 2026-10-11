@@ -157,6 +157,9 @@ impl<'r> Session<'r> {
     require_nonblank("name", &name)?;
     require_nonblank("external_session_id", &external_session_id)?;
     require_optional_nonblank("launched_head", launched_head.as_deref())?;
+    if agent.kind() != agent_kind {
+      bail!("agent {} cannot serve a {agent_kind} session", agent.kind());
+    }
     if transcript.as_os_str().is_empty() {
       bail!("transcript cannot be blank");
     }

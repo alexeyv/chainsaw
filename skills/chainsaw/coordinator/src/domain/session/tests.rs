@@ -1,6 +1,7 @@
 use crate::domain::test_helpers::{
-  FakeSessionRuntime, SessionSpec, build_session, build_session_on, build_session_with, created_at,
-  format_session, launched_implementer, runtime, timestamp, vanished_agent, working_implementer,
+  FakeSessionRuntime, SessionSpec, agent, build_session, build_session_on, build_session_with,
+  created_at, format_session, launched_implementer, runtime, timestamp, vanished_agent,
+  working_implementer,
 };
 use crate::domain::{AgentKind, ContextSize, Role, SessionStatus};
 
@@ -253,6 +254,21 @@ can_latch_over_limit: false"#
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "transcript cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_the_agent_is_not_of_the_sessions_kind() {
+    let spec = SessionSpec {
+      agent: AgentKind::Codex,
+      ..working_implementer()
+    };
+
+    let error = build_session_with(spec, runtime(), agent()).unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "agent claude cannot serve a codex session"
+    );
   }
 
   #[test]

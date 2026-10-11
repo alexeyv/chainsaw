@@ -16,12 +16,17 @@ use super::{
   transcript_file,
 };
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession, Transcript,
+  Agent, AgentKind, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+  Transcript,
 };
 
 pub struct Codex;
 
 impl Agent for Codex {
+  fn kind(&self) -> AgentKind {
+    AgentKind::Codex
+  }
+
   fn program(&self) -> &'static str {
     "codex"
   }

@@ -68,25 +68,44 @@ pub fn runtime() -> &'static dyn SessionRuntime {
   &IDLE_RUNTIME
 }
 
-/// An agent that has written nothing but, when it names one, the transcript
-/// at `transcript` once that file exists: no context, no prompt seen. Its
-/// transcripts read without a file, unless they have `vanished`.
+/// An agent of `kind` that has written nothing but, when it names one, the
+/// transcript at `transcript` once that file exists: no context, no prompt
+/// seen. Its transcripts read without a file, unless they have `vanished`.
 pub struct FakeAgent {
+  pub kind: AgentKind,
   pub transcript: Option<PathBuf>,
   pub vanished: bool,
 }
 
 static SILENT_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Claude,
+  transcript: None,
+  vanished: false,
+};
+
+static SILENT_CODEX_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Codex,
+  transcript: None,
+  vanished: false,
+};
+
+static SILENT_CURSOR_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Cursor,
   transcript: None,
   vanished: false,
 };
 
 static VANISHED_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Claude,
   transcript: None,
   vanished: true,
 };
 
 impl Agent for FakeAgent {
+  fn kind(&self) -> AgentKind {
+    self.kind
+  }
+
   fn start(
     &self,
     _runtime: &dyn SessionRuntime,
@@ -180,14 +199,18 @@ impl Transcript for SilentTranscript {
   }
 }
 
-/// The agent every fixture session borrows.
+/// The agent every fixture session borrows: the silent Claude.
 pub fn agent() -> &'static dyn Agent {
   &SILENT_AGENT
 }
 
-/// The fixture agent, whatever kind is asked for.
-pub fn agent_for(_kind: AgentKind) -> &'static dyn Agent {
-  agent()
+/// The silent fixture agent of `kind`.
+pub fn agent_for(kind: AgentKind) -> &'static dyn Agent {
+  match kind {
+    AgentKind::Claude => &SILENT_AGENT,
+    AgentKind::Codex => &SILENT_CODEX_AGENT,
+    AgentKind::Cursor => &SILENT_CURSOR_AGENT,
+  }
 }
 
 /// An agent whose every transcript is gone.
@@ -710,7 +733,8 @@ pub fn build_session(spec: SessionSpec) -> Result<Session<'static>> {
 
 /// A session driven by `runtime` instead of the fixture's idle one.
 pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Result<Session<'_>> {
-  build_session_with(spec, runtime, agent())
+  let agent = agent_for(spec.agent);
+  build_session_with(spec, runtime, agent)
 }
 
 /// A session reading its transcript through `agent` instead of the fixture's.

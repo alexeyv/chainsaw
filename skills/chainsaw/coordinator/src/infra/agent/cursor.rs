@@ -21,7 +21,7 @@ use super::{
   text_of, transcript_file,
 };
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
+  Agent, AgentKind, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
   SessionStatus, StartSession, Transcript,
 };
 
@@ -33,6 +33,10 @@ const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the t
 pub struct Cursor;
 
 impl Agent for Cursor {
+  fn kind(&self) -> AgentKind {
+    AgentKind::Cursor
+  }
+
   /// The CLI's own name: `cursor` on PATH opens the IDE.
   fn program(&self) -> &'static str {
     "cursor-agent"

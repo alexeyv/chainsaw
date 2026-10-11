@@ -14,12 +14,17 @@ use super::{
   transcript_file,
 };
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession, Transcript,
+  Agent, AgentKind, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+  Transcript,
 };
 
 pub struct Claude;
 
 impl Agent for Claude {
+  fn kind(&self) -> AgentKind {
+    AgentKind::Claude
+  }
+
   fn program(&self) -> &'static str {
     "claude"
   }

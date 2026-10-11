@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 
-use super::{SessionKind, SessionRuntime, StartSession, StartedSession, Transcript};
+use super::{AgentKind, SessionKind, SessionRuntime, StartSession, StartedSession, Transcript};
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +42,10 @@ pub struct Launched {
 }
 
 pub trait Agent {
+  /// The kind this agent implements; a session of that kind is the only one
+  /// it serves.
+  fn kind(&self) -> AgentKind;
+
   /// Starts a session through `runtime` with `prompt` as its first prompt,
   /// and returns once the agent has begun writing its transcript, or fails
   /// when it has not within a minute.
