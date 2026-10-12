@@ -1546,7 +1546,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         process = subprocess.Popen(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
         )
-        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.communicate, timeout=5)
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
@@ -1595,7 +1595,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         process = subprocess.Popen(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
         )
-        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.communicate, timeout=5)
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
