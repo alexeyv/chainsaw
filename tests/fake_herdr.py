@@ -69,6 +69,10 @@ def pane_close(arguments):
 
 
 def agent_start(arguments):
+    # Herdr on Windows types the start into a shell line, so it refuses these.
+    if any(character in argument for argument in arguments for character in "\n\t\r"):
+        print("invalid_agent_argument", file=sys.stderr)
+        return 1
     name, flags = arguments[0], agents.parse_flags(arguments[1:])
     with state() as current:
         current["sequence"] += 1

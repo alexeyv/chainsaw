@@ -223,7 +223,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         start = self.operations_on(name)[0]
         self.assertEqual(start["operation"], "start")
         self.assertNotIn("\n", start["command"])
-        self.assertEqual(self.launch_prompt(name).count("\n"), 2)
+        self.assertNotIn("\n", self.launch_prompt(name))
 
     def test_the_registry_beside_the_database_maps_names_to_terminals(self):
         self.launch("first")

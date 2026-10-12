@@ -47,6 +47,7 @@ pub(super) fn cmd_launch(
   kind: SessionKind,
   prompt: &str,
 ) -> Result<()> {
+  let prompt = &one_line(prompt);
   let agent = run.settings().launch_agent(kind);
   // The session starts working on its prompt at once, so the tree it was
   // launched on is the one before it starts.
@@ -98,12 +99,24 @@ pub(super) fn cmd_start_commentator(run: &Run, store: &Store, role_prompt: &Path
     &name,
     SessionKind::Commentator,
     &format!(
-      "Read and follow this role prompt entirely: {}\nState directory: {}\nRun directory: {}",
+      "Read and follow this role prompt entirely: {}; State directory: {}; Run directory: {}",
       role_prompt.display(),
       run.state_dir().display(),
       run.dir().display()
     ),
   )
+}
+
+/// `prompt` on one line: Herdr on Windows types a launch prompt into a shell
+/// line and refuses one holding a newline, tab or carriage return. Each
+/// line's pieces are trimmed and joined with a single space.
+fn one_line(prompt: &str) -> String {
+  prompt
+    .split(['\n', '\r', '\t'])
+    .map(str::trim)
+    .filter(|piece| !piece.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
@@ -175,3 +188,6 @@ pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Resul
   }
   Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -44,19 +44,34 @@ mod runtime_named_by {
 
   #[test]
   fn should_work() {
+    assert_eq!(runtime_named_by(false, None).unwrap(), None);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn should_choose_orca_when_inside_an_orca_terminal_only() {
     assert_eq!(
-      runtime_named_by(false, Some("term-1".to_owned())),
+      runtime_named_by(false, Some("term-1".to_owned())).unwrap(),
       Some("term-1".to_owned())
     );
   }
 
   #[test]
   fn should_choose_herdr_when_the_herdr_pane_was_opened_from_an_orca_terminal() {
-    assert_eq!(runtime_named_by(true, Some("term-1".to_owned())), None);
+    assert_eq!(
+      runtime_named_by(true, Some("term-1".to_owned())).unwrap(),
+      None
+    );
   }
 
+  #[cfg(windows)]
   #[test]
-  fn should_choose_herdr_outside_both() {
-    assert_eq!(runtime_named_by(false, None), None);
+  fn should_fail_naming_herdr_when_orca_is_chosen_on_windows() {
+    assert_eq!(
+      runtime_named_by(false, Some("term-1".to_owned()))
+        .unwrap_err()
+        .to_string(),
+      "supervisor: Orca is not supported on Windows; run chainsaw from a Herdr pane"
+    );
   }
 }

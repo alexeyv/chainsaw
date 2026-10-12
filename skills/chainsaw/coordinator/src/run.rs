@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Transaction;
 
 use chrono::{DateTime, Utc};
@@ -196,24 +196,30 @@ fn state_dir_name(canonical_run_dir: &Path) -> String {
 }
 
 /// The runtime the supervisor was started under: Herdr inside a Herdr pane,
-/// Orca inside an Orca terminal. A Herdr pane opened from an Orca terminal
-/// sees both and is a Herdr pane. Outside both, Herdr, which then refuses to
-/// start a session. The tests put a `herdr` of their own on PATH.
+/// Orca inside an Orca terminal, except on Windows, where Orca is refused. A
+/// Herdr pane opened from an Orca terminal sees both and is a Herdr pane.
+/// Outside both, Herdr, which then refuses to start a session. The tests put a
+/// `herdr` of their own on PATH.
 fn runtime_from_environment(state_dir: &Path) -> Result<Box<dyn SessionRuntime>> {
   Ok(
     match runtime_named_by(
       env::var_os("HERDR_WORKSPACE_ID").is_some(),
       env::var("ORCA_TERMINAL_HANDLE").ok(),
-    ) {
+    )? {
       Some(terminal) => Box::new(OrcaSessionRuntime::from_environment(state_dir, terminal)?),
       None => Box::new(HerdrSessionRuntime::from_environment()),
     },
   )
 }
 
-/// The Orca terminal to drive sessions from, or None for Herdr.
-fn runtime_named_by(inside_herdr: bool, orca_terminal: Option<String>) -> Option<String> {
-  orca_terminal.filter(|_| !inside_herdr)
+/// The Orca terminal to drive sessions from, or None for Herdr. Herdr is the
+/// only runtime on Windows, so Orca is refused there.
+fn runtime_named_by(inside_herdr: bool, orca_terminal: Option<String>) -> Result<Option<String>> {
+  let orca_terminal = orca_terminal.filter(|_| !inside_herdr);
+  if cfg!(windows) && orca_terminal.is_some() {
+    bail!("supervisor: Orca is not supported on Windows; run chainsaw from a Herdr pane");
+  }
+  Ok(orca_terminal)
 }
 
 #[cfg(test)]

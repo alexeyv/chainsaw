@@ -79,6 +79,11 @@ class TaskContractTests(SupervisorContractCase):
 
 
 class PromptAndDispatchContractTests(SupervisorContractCase):
+    def test_a_multi_line_reading_turn_starts_the_session_on_one_line(self):
+        self.launch(prompt="Read the fixture files.\n\t1. Then stop.\r\n")
+
+        self.assertEqual(self.launch_prompt("worker"), "Read the fixture files. 1. Then stop.")
+
     def test_prompt_wait_prints_the_agent_reply(self):
         self.launch()
         self.update_runtime_state(reply_on_prompt="fixture reply")
@@ -1224,8 +1229,8 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         prompt = self.launch_prompt(commentator)
         prefix = "State directory: "
         announced = next(
-            line.removeprefix(prefix)
-            for line in prompt.splitlines() if line.startswith(prefix)
+            part.removeprefix(prefix)
+            for part in prompt.split("; ") if part.startswith(prefix)
         )
 
         self.assertTrue(
