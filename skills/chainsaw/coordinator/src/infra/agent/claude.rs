@@ -63,19 +63,16 @@ impl Agent for Claude {
     newest_transcript_in(&Self::transcripts_dir(canonical_run_dir).ok()?, since)
   }
 
-  /// Under the run directory when Claude Code agrees about the working
-  /// directory, otherwise wherever it was found under the projects directory.
+  /// Under the run directory's project folder when Claude Code named it as
+  /// chainsaw does, otherwise whichever project folder holds a file named
+  /// after the session. The lead's id comes from the human, so a session
+  /// resumed from elsewhere can have a stale copy in another folder.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf> {
-    let under_run_dir = Self::transcript_under(canonical_run_dir, external_session_id).ok()?;
-    if under_run_dir.is_file() {
-      return Some(under_run_dir);
-    }
-    let filename = under_run_dir.file_name()?.to_owned();
-    fs::read_dir(under_run_dir.parent()?.parent()?)
-      .ok()?
-      .filter_map(std::result::Result::ok)
-      .map(|entry| entry.path().join(&filename))
-      .find(|path| path.is_file())
+    transcript_of(
+      &Self::projects_dir().ok()?,
+      canonical_run_dir,
+      external_session_id,
+    )
   }
 
   fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
@@ -187,22 +184,37 @@ impl TranscriptFormat for Claude {
 
 /// Where Claude Code writes.
 impl Claude {
-  /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
-  fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
+  /// Where Claude Code keeps one transcripts folder per working directory.
+  fn projects_dir() -> Result<PathBuf> {
     let home = env::var_os("HOME").context("HOME is not set")?;
-    Ok(
-      PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(transcripts_dir_name(canonical_run_dir)),
-    )
+    Ok(PathBuf::from(home).join(".claude").join("projects"))
   }
 
-  /// The transcript of a session started in `run_dir`, under that
-  /// directory's transcripts, whether or not it exists yet.
-  fn transcript_under(canonical_run_dir: &Path, external_session_id: &str) -> Result<PathBuf> {
-    Ok(Self::transcripts_dir(canonical_run_dir)?.join(format!("{external_session_id}.jsonl")))
+  /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
+  fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
+    Ok(Self::projects_dir()?.join(transcripts_dir_name(canonical_run_dir)))
   }
+}
+
+/// The transcript of `external_session_id` in the run directory's project
+/// folder under `projects`, else in any project folder directly under it.
+fn transcript_of(
+  projects: &Path,
+  canonical_run_dir: &Path,
+  external_session_id: &str,
+) -> Option<PathBuf> {
+  let filename = format!("{external_session_id}.jsonl");
+  let under_run_dir = projects
+    .join(transcripts_dir_name(canonical_run_dir))
+    .join(&filename);
+  if under_run_dir.is_file() {
+    return Some(under_run_dir);
+  }
+  fs::read_dir(projects)
+    .ok()?
+    .filter_map(std::result::Result::ok)
+    .map(|entry| entry.path().join(&filename))
+    .find(|path| path.is_file())
 }
 
 /// The session whose transcript directly under `dir` was written last, at or
@@ -224,12 +236,16 @@ fn newest_transcript_in(dir: &Path, since: SystemTime) -> Option<String> {
 }
 
 /// Claude Code names a session's transcripts directory after its cwd, replacing
-/// both separators and dots with dashes: `/Users/alex/src/ui.wt/run` becomes
-/// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
-/// dots looked for transcripts in a directory holding none (run of
-/// 2026-08-28).
+/// every character but ASCII letters and digits with a dash:
+/// `/Users/alex/src/ui.wt/run` becomes `-Users-alex-src-ui-wt-run`, `/x/.bare`
+/// becomes `-x--bare`, and `C:\x\y_z` becomes `C--x-y-z`. Dashing only
+/// separators and dots missed run directories holding `_` or spaces.
 fn transcripts_dir_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
+  canonical_run_dir
+    .to_string_lossy()
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    .collect()
 }
 
 fn usage_of_line(line: &str) -> Option<u64> {
