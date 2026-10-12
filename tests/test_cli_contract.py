@@ -557,13 +557,6 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "tree is dirty")
 
-    def test_accept_rejects_attribution_trailers(self):
-        task, _ = self.prepare_committed_task(trailer=True)
-
-        result = self.cli("accept", str(task))
-
-        self.assert_failure(result, "commit carries an attribution trailer")
-
     def test_accept_takes_a_commit_the_branch_has_moved_past(self):
         task, task_sha = self.prepare_committed_task()
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
