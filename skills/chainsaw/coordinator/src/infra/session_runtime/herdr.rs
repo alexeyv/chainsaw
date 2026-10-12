@@ -201,5 +201,6 @@ fn status_named(status: &str) -> SessionStatus {
   }
 }
 
-#[cfg(test)]
+// The tests drive shell-script fakes.
+#[cfg(all(test, unix))]
 mod tests;

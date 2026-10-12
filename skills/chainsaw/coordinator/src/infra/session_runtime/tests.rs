@@ -7,19 +7,20 @@ mod run {
 
   #[test]
   fn should_work() {
-    let cli = Cli::new("echo", "echo");
+    // git runs on every platform chainsaw does, as chainsaw itself needs it.
+    let cli = Cli::new("git", "git");
 
-    let output = cli.run(&["hello"]).unwrap();
+    let output = cli.run(&["--version"]).unwrap();
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("git version "));
   }
 
   #[test]
   fn should_capture_the_output_when_the_program_fails() {
-    let cli = Cli::new("false", "false");
+    let cli = Cli::new("git", "git");
 
-    let output = cli.run(&[]).unwrap();
+    let output = cli.run(&["no-such-command"]).unwrap();
 
     assert!(!output.status.success());
   }

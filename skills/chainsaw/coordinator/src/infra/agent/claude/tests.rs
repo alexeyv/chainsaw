@@ -414,7 +414,9 @@ mod newest_transcript_in {
   fn should_work() {
     let dir = TranscriptsDir::holding(&["older"]);
     let older = dir.path().join("older.jsonl");
-    fs::File::open(&older)
+    fs::File::options()
+      .write(true)
+      .open(&older)
       .unwrap()
       .set_modified(a_minute_ago())
       .unwrap();

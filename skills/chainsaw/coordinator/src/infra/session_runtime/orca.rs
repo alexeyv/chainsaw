@@ -428,5 +428,6 @@ fn mint_session_id() -> Result<String> {
   ))
 }
 
-#[cfg(test)]
+// The tests drive shell-script fakes.
+#[cfg(all(test, unix))]
 mod tests;
