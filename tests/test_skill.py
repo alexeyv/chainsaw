@@ -35,6 +35,26 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(os.access(wrapper, os.X_OK))
         self.assertTrue(wrapper.read_bytes().startswith(b"#!"))
 
+    @unittest.skipUnless(os.name == "nt", "PowerShell resolves the .exe on Windows")
+    def test_powershell_runs_the_binary_by_its_extensionless_path_with_arguments_intact(self):
+        """On Windows the lead builds once and then calls the binary by the same
+        path as on POSIX; a launcher script would have its arguments re-parsed
+        (a .cmd by cmd.exe, a .ps1 by PowerShell, which splits `a,b`)."""
+        binary = CRATE / "target" / "debug" / "chainsaw"
+        script = (
+            f"& '{binary}' --run-dir C:\\no,such state-dir; "
+            f"$first = $LASTEXITCODE; & '{binary}' no-such-command; "
+            "exit ($first * 10 + $LASTEXITCODE)"
+        )
+
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+
+        self.assertIn("cannot resolve run directory C:\\no,such\n", result.stderr)
+        self.assertEqual(result.returncode, 12, result.stderr)
+
     def test_tracks_no_compiled_binaries(self):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", str(SKILL)],

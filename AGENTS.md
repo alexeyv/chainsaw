@@ -18,6 +18,9 @@ Agentic software development process, minimizing downtime between coding session
 ## Running and verifying
 
 - `--run-dir` is a parent flag and must precede the subcommand: `skills/chainsaw/bin/chainsaw --run-dir DIR <subcommand>`
+  (on Windows, with no bash: `cargo build --manifest-path skills/chainsaw/coordinator/Cargo.toml`, then
+  `skills/chainsaw/coordinator/target/debug/chainsaw --run-dir DIR <subcommand>`; a `.cmd` or `.ps1`
+  launcher would have its arguments re-parsed)
 - Build the supervisor with `cargo build` in the crate's directory.
 
 ## Quality gate
