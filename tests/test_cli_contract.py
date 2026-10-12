@@ -41,6 +41,37 @@ class TaskContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "task text on stdin is empty")
 
+    def test_task_text_can_come_from_a_file_named_on_the_command_line(self):
+        prompt_file = self.sandbox / "task.md"
+        prompt_file.write_text("Rename the worker; keep \"quotes\" & café.\n", encoding="utf-8")
+
+        created = self.assert_success(self.cli(
+            "task", "new", "--prompt-file", prompt_file, "--files", "worker.py",
+            "--predicted-lines", "5",
+        ))
+        self.launch()
+        self.assert_success(self.dispatch(int(created.stdout)))
+
+        self.assertTrue(any(
+            "Rename the worker; keep \"quotes\" & café." in text
+            for text in self.prompts_to("worker")
+        ))
+
+    def test_an_empty_or_missing_prompt_file_is_refused(self):
+        empty = self.sandbox / "empty.md"
+        empty.write_text(" \n")
+
+        blank = self.cli(
+            "task", "new", "--prompt-file", empty, "--files", "a.py", "--predicted-lines", "5",
+        )
+        missing = self.cli(
+            "task", "new", "--prompt-file", self.sandbox / "absent.md", "--files", "a.py",
+            "--predicted-lines", "5",
+        )
+
+        self.assert_failure(blank, f"task text on {empty} is empty")
+        self.assert_failure(missing, "cannot read task text from")
+
     def test_task_requires_a_file_list_or_file_count(self):
         result = self.cli(
             "task", "new", "--predicted-lines", "5", input_text="Do work.",
@@ -81,6 +112,81 @@ class TaskContractTests(SupervisorContractCase):
         self.assertEqual(retry.stdout.strip(), "2")
         self.assertIn("2 drafted", state.stdout)
         self.assertIn("retry of 1", state.stdout)
+
+
+class NamePaneContractTests(SupervisorContractCase):
+    """The lead names its own pane and tab through the supervisor, which also
+    proves it runs inside a runtime, with no shell variables in the command."""
+
+    def test_names_the_herdr_pane_and_tab_it_runs_in(self):
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [
+                (operation["operation"], operation["session_id"], operation["name"])
+                for operation in self.runtime_operations()
+            ],
+            [("rename", "pane-lead", "lead"), ("rename-tab", "tab-0", "lead")],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows refuses Orca")
+    def test_names_the_herdr_pane_when_an_orca_terminal_is_also_visible(self):
+        self.env.update({"ORCA_TERMINAL_HANDLE": "term-lead", "ORCA_TAB_ID": "tab-0"})
+
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [
+                (operation["operation"], operation["session_id"], operation["name"])
+                for operation in self.runtime_operations()
+            ],
+            [("rename", "pane-lead", "lead"), ("rename-tab", "tab-0", "lead")],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows refuses Orca")
+    def test_refuses_an_orca_terminal_on_windows(self):
+        for variable in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+            self.env.pop(variable)
+        self.env.update({"ORCA_TERMINAL_HANDLE": "term-lead", "ORCA_TAB_ID": "tab-0"})
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: Orca is not supported on Windows")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_outside_herdr_and_orca(self):
+        self.env.pop("HERDR_WORKSPACE_ID")
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_a_herdr_pane_it_cannot_name(self):
+        self.env.pop("HERDR_PANE_ID")
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_when_the_herdr_pane_id_is_empty(self):
+        self.env["HERDR_PANE_ID"] = ""
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_when_the_herdr_tab_id_is_empty(self):
+        self.env["HERDR_TAB_ID"] = ""
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
 
 
 class PromptAndDispatchContractTests(SupervisorContractCase):

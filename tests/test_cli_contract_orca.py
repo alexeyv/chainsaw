@@ -211,6 +211,16 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         self.assertEqual(external_id, "session-worker-1")
         self.assertEqual(self.session_state("worker")["session_id"], external_id)
 
+    def test_name_pane_retitles_the_leads_own_terminal(self):
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [(operation["operation"], operation["session_id"], operation["title"])
+             for operation in self.runtime_operations()],
+            [("rename", "term-lead", "lead")],
+        )
+
     def test_the_commentator_splits_the_leads_own_terminal(self):
         commentator = self.start_commentator()
 

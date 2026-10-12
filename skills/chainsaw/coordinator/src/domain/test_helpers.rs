@@ -47,6 +47,10 @@ impl SessionRuntime for FakeSessionRuntime {
   fn abandon(&self, _session_id: &str, _pane_id: &str) -> Result<()> {
     self.reach()
   }
+
+  fn name_own_pane(&self, _name: &str) -> Result<()> {
+    self.reach()
+  }
 }
 
 impl FakeSessionRuntime {
@@ -262,6 +266,10 @@ impl SessionRuntime for RecordingSessionRuntime {
       .abandoned
       .borrow_mut()
       .push([session_id.to_owned(), pane_id.to_owned()]);
+    Ok(())
+  }
+
+  fn name_own_pane(&self, _name: &str) -> Result<()> {
     Ok(())
   }
 }

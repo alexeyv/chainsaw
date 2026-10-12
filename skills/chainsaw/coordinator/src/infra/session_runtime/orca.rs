@@ -375,6 +375,19 @@ impl SessionRuntime for OrcaSessionRuntime {
     self.request(&["terminal", "close", "--terminal", pane_id, "--json"])?;
     self.forget(session_id)
   }
+
+  fn name_own_pane(&self, name: &str) -> Result<()> {
+    self.request(&[
+      "terminal",
+      "rename",
+      "--terminal",
+      &self.terminal,
+      "--title",
+      name,
+      "--json",
+    ])?;
+    Ok(())
+  }
 }
 
 /// `word` quoted so the shell reads it back whole from one line. Orca types

@@ -188,6 +188,7 @@ class SupervisorContractCase(unittest.TestCase):
             return {
                 "HERDR_WORKSPACE_ID": "workspace-1",
                 "HERDR_TAB_ID": "tab-0",
+                "HERDR_PANE_ID": "pane-lead",
                 "FAKE_HERDR_STATE": str(self.runtime_state_path),
             }
         return {

@@ -33,6 +33,8 @@ def main(argv):
         ("agent", "send-keys"): agent_send_keys,
         ("agent", "wait"): agent_wait,
         ("pane", "close"): pane_close,
+        ("agent", "rename"): agent_rename,
+        ("tab", "rename"): tab_rename,
     }
     handler = handlers.get(tuple(command))
     if handler is None:
@@ -65,6 +67,22 @@ def pane_close(arguments):
     with state() as current:
         agents.record(current, "close", pane_id)
     reply({"closed": True})
+    return 0
+
+
+def agent_rename(arguments):
+    target, name = arguments
+    with state() as current:
+        agents.record(current, "rename", target, name=name)
+    reply({"renamed": True})
+    return 0
+
+
+def tab_rename(arguments):
+    tab_id, label = arguments
+    with state() as current:
+        agents.record(current, "rename-tab", tab_id, name=label)
+    reply({"renamed": True})
     return 0
 
 
