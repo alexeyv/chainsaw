@@ -50,6 +50,24 @@ pub fn recent(
   rows.map(|row| materialize(row?)).collect()
 }
 
+/// Every event of `kind` newer than the event `after_id`, oldest first.
+pub fn after(
+  transaction: &Transaction<'_>,
+  kind: RunEventKind,
+  after_id: i64,
+) -> Result<Vec<RunEvent>> {
+  let mut statement = transaction.prepare(
+    "
+      select id, kind, detail, created_at
+      from run_events
+      where kind = ?1 and id > ?2
+      order by id
+      ",
+  )?;
+  let rows = statement.query_map(params![kind.as_str(), after_id], run_event_row)?;
+  rows.map(|row| materialize(row?)).collect()
+}
+
 fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventRow> {
   Ok(RunEventRow {
     id: row.get("id")?,

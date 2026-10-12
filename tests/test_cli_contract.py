@@ -7,11 +7,14 @@ a replacement executable by setting CHAINSAW_SUPERVISOR_COMMAND.
 
 import json
 import os
+import signal
 import sqlite3
+import sys
 import threading
 import subprocess
 import time
-from contextlib import closing
+import unittest
+from contextlib import closing, suppress
 from pathlib import Path
 
 from tests.support import READING_TURN, SupervisorContractCase
@@ -1145,6 +1148,135 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn("the daemon will exit", result.stdout)
         self.assertEqual(daemon.returncode, 0)
+
+    def test_a_detached_daemon_keeps_polling_after_the_command_returns(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid \d+\n$")
+        first = self.next_daemon_seen_at(None)
+
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+
+    @unittest.skipIf(os.name == "nt", "the Windows pane lifecycle is checked by hand")
+    def test_a_detached_daemon_keeps_polling_after_its_terminal_is_torn_down(self):
+        self.begin_lead_transcript("session-lead")
+        command = [
+            *self.supervisor_command, "--run-dir", str(self.run_dir),
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        ]
+        self.stop_detached_daemons_later()
+        # The terminal: a session of its own whose leader outlives the command,
+        # as a shell does.
+        terminal = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess, sys, time;"
+             " subprocess.run(sys.argv[1:], check=True); time.sleep(60)",
+             *command],
+            text=True, encoding="utf-8", stdout=subprocess.PIPE, env=self.env,
+            start_new_session=True,
+        )
+        self.addCleanup(terminal.stdout.close)
+        self.addCleanup(terminal.wait, 10)
+        self.addCleanup(terminal.kill)
+        started = terminal.stdout.readline()
+        self.assertRegex(started, r"^daemon started, pid \d+\n$")
+
+        os.killpg(terminal.pid, signal.SIGHUP)
+        with suppress(ProcessLookupError):
+            os.killpg(terminal.pid, signal.SIGKILL)
+        terminal.wait(timeout=10)
+        seen =self.next_daemon_seen_at(None)
+
+        self.assertGreater(self.next_daemon_seen_at(seen), seen)
+
+    def test_a_detached_daemon_finds_its_start_behind_another_daemons(self):
+        self.begin_lead_transcript("session-lead")
+        self.assert_success(self.cli("state"))
+        # Another daemon's start lands right after this one's, as when two
+        # are started together.
+        self.write_supervisor_db(
+            "create trigger foreign_start after insert on run_events"
+            " when new.kind = 'daemon-start' and new.detail != 'pid 0'"
+            " begin insert into run_events(kind, detail, created_at)"
+            " values ('daemon-start', 'pid 0', new.created_at); end"
+        )
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid [1-9]\d*\n$")
+
+    def test_a_detached_daemon_whose_first_poll_waits_on_a_prompt_reports_its_start(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.begin_lead_transcript("session-lead")
+        wake = f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+
+        self.stop_detached_daemons_later()
+
+        # Held by another prompt for longer than `--detach` waits.
+        with self.prompt_lock_held():
+            started = self.cli(
+                "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+                "--poll-interval-ms", "10", timeout=60,
+            )
+            woken_while_held = wake in self.prompts_to(commentator)
+
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid \d+\n$")
+        self.assertFalse(woken_while_held)
+        self.wait_for_state(f"commentary-wake task {task} {sha[:10]}")
+
+    def test_a_detached_daemon_that_cannot_register_the_lead_fails_the_command(self):
+        self.stop_detached_daemons_later()
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-missing",
+        )
+
+        self.assert_failure(result, "lead session session-missing has no claude transcript")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_that_dies_on_its_first_poll_fails_the_command(self):
+        self.launch()
+        self.append_text("worker", "fixture work started")
+        transcript = self.session_transcript("worker")
+        transcript.unlink()
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, f"supervisor: transcript of worker is gone from {transcript}")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_that_cannot_run_git_fails_the_command(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+        # Only the fakes: no git.
+        self.env["PATH"] = str(self.sandbox / "bin")
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, "failed to run git")
+        self.assertIn("the daemon exited", result.stderr)
 
     def test_human_wait_open_and_close_are_visible_in_state(self):
         self.assert_success(self.cli("human-wait", "start"))

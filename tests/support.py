@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import threading
 import time
 import unittest
 import zipfile
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from functools import cache
 from pathlib import Path
 
@@ -74,6 +75,53 @@ def windows_launcher(script):
         )
     shebang = f'#!"{sys.executable}"\r\n'.encode()
     return launcher + shebang + archive.getvalue()
+
+
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = ctypes.c_void_p
+    _kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, wintypes.UINT)
+    _kernel32.TerminateProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+    _SYNCHRONIZE = 0x0010_0000
+    _PROCESS_TERMINATE = 0x0001
+    _WAIT_OBJECT_0 = 0
+
+
+def process_exits(pid, timeout_ms=10_000):
+    """Whether a process that said it is exiting is gone within the timeout.
+    Windows will not remove the sandbox while the process still holds its
+    files; elsewhere its last word is enough."""
+    if os.name != "nt":
+        return True
+    handle = _kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not handle:
+        return True
+    try:
+        return _kernel32.WaitForSingleObject(handle, timeout_ms) == _WAIT_OBJECT_0
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def kill_process(pid):
+    """Kill a process that is not this one's child, if it is still there."""
+    if os.name != "nt":
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        return
+    handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
+    if handle:
+        try:
+            _kernel32.TerminateProcess(handle, 1)
+        finally:
+            _kernel32.CloseHandle(handle)
 
 
 class SupervisorContractCase(unittest.TestCase):
@@ -538,12 +586,8 @@ class SupervisorContractCase(unittest.TestCase):
         registers with the transcript its agent is already writing, so one is begun
         for it unless the case says otherwise or has written its own."""
         session_id = session_id or f"session-{lead}"
-        kind = agent or "claude"
-        written = list(fake_agent.transcripts_root(kind, self.home).rglob(f"*{session_id}.jsonl"))
-        if lead_transcript and not written:
-            log = fake_agent.transcript_for(kind, self.run_dir, session_id, home=self.home)
-            log.parent.mkdir(parents=True, exist_ok=True)
-            log.touch()
+        if lead_transcript:
+            self.begin_lead_transcript(session_id, agent or "claude")
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
                    *(["--agent", agent] if agent else []),
@@ -577,6 +621,86 @@ class SupervisorContractCase(unittest.TestCase):
 
         self.addCleanup(cleanup)
         return process
+
+    def begin_lead_transcript(self, session_id, kind="claude"):
+        """The transcript the lead's agent is writing, unless the case wrote its own."""
+        if not list(fake_agent.transcripts_root(kind, self.home).rglob(f"*{session_id}.jsonl")):
+            log = fake_agent.transcript_for(kind, self.run_dir, session_id, home=self.home)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.touch()
+
+    def next_daemon_seen_at(self, previous, timeout=10):
+        """The daemon's next poll stamp after `previous` (None: its first)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.supervisor_db() as database:
+                (seen,) = database.execute(
+                    "select daemon_seen_at from run where id=1"
+                ).fetchone()
+            if seen is not None and seen != previous:
+                return seen
+            time.sleep(0.05)
+        self.fail(f"the daemon has not polled since {previous}")
+
+    @contextmanager
+    def prompt_lock_held(self):
+        """Hold the lock every prompt is sent under, as a prompt in flight does."""
+        with (self.state_dir / "chainsaw-supervisor.db.prompt-lock").open("a+") as lock:
+            fake_agent.lock(lock)
+            try:
+                yield
+            finally:
+                fake_agent.unlock(lock)
+
+    def stop_detached_daemons_later(self):
+        """Stop, at cleanup, every daemon whose start is recorded from now on.
+        A daemon `daemon --detach` starts is not this test's child, so it is
+        found by its start event, whether the command returned, failed or timed
+        out, and must have exited before the sandbox is removed."""
+        # ponytail: a daemon that never recorded its start is not found.
+        database = self.state_dir / "chainsaw-supervisor.db"
+        boundary = 0
+        if database.exists():
+            with self.supervisor_db() as connection:
+                (boundary,) = connection.execute(
+                    "select coalesce(max(id), 0) from run_events"
+                ).fetchone()
+        self.addCleanup(self._stop_daemons_started_after, boundary)
+
+    def _stop_daemons_started_after(self, boundary):
+        if not (self.state_dir / "chainsaw-supervisor.db").exists():
+            return
+        # `pid 0` is a case's stand-in for another daemon.
+        started = self._daemon_pids("daemon-start", boundary) - {0}
+        if not started:
+            return
+        try:
+            stop = self.cli("stop")
+            said = f"exit {stop.returncode}:\n{stop.stdout}{stop.stderr}"
+        except subprocess.TimeoutExpired:
+            said = "it timed out"
+        deadline = time.monotonic() + 10
+        while not started <= self._daemon_pids("daemon-exit", boundary):
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        exited = self._daemon_pids("daemon-exit", boundary)
+        stuck = sorted(pid for pid in started if pid not in exited or not process_exits(pid))
+        for pid in stuck:
+            kill_process(pid)
+        if stuck:
+            self.fail(
+                f"detached daemons {stuck} did not exit after stop; killed if still running;"
+                f" stop gave {said}"
+            )
+
+    def _daemon_pids(self, kind, boundary):
+        with self.supervisor_db() as database:
+            return {
+                int(detail.removeprefix("pid ")) for (detail,) in database.execute(
+                    "select detail from run_events where kind=? and id>?", (kind, boundary)
+                )
+            }
 
     def wait_for_state(self, text, timeout=12):
         deadline = time.monotonic() + timeout

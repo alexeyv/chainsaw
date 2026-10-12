@@ -35,6 +35,10 @@ pub enum Command {
     agent: AgentKind,
     #[arg(long, default_value_t = 5_000, hide = true)]
     poll_interval_ms: u64,
+    /// Run in a process of its own, cut off from this terminal, and return once
+    /// it has registered the lead.
+    #[arg(long)]
+    detach: bool,
   },
   /// Start the run's commentator session.
   StartCommentator {

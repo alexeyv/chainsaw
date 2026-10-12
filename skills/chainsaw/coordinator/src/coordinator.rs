@@ -144,11 +144,13 @@ fn duration_text(seconds: i64) -> String {
 
 fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
   match command {
+    Command::Daemon { detach: true, .. } => daemon::detach(run, store),
     Command::Daemon {
       lead,
       session_id,
       agent,
       poll_interval_ms,
+      detach: false,
     } => daemon::start(
       run,
       store,
