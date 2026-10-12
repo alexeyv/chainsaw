@@ -32,6 +32,19 @@ Run the complete gate from the repository root, in this order:
 python3 -B -m unittest discover -s tests -q
 ```
 
+On Windows, in PowerShell 7, where `python3` may be the Store stub, run the same cargo
+steps and then the Python suite from a `.venv` made once with `uv venv .venv`. The
+supervisor binary is `target\debug\chainsaw.exe`. The fakes become `.exe` files built
+from distlib's `t64.exe` launcher, which pip vendors in the base interpreter, and the
+Orca contract module is skipped:
+
+```powershell
+Push-Location skills/chainsaw/coordinator
+cargo fmt --check && cargo clippy --quiet --all-targets --all-features --locked -- -D warnings && cargo test --quiet --locked
+Pop-Location
+.venv\Scripts\python -B -m unittest discover -s tests -q
+```
+
 How tests should be written is in `tests/AGENTS.md`.
 
 - Every failing automatic test is a show stopper, even if unrelated to work at hand. Fix or escalate, never ignore.

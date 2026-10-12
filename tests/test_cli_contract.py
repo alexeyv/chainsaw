@@ -6,10 +6,12 @@ a replacement executable by setting CHAINSAW_SUPERVISOR_COMMAND.
 """
 
 import json
+import os
 import sqlite3
 import threading
 import subprocess
 import time
+from contextlib import closing
 from pathlib import Path
 
 from tests.support import READING_TURN, SupervisorContractCase
@@ -185,7 +187,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         flight_state = self.wait_for_state(f"{task} in_flight")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             recorded_offset, base_head = database.execute(
                 "select transcript_offset, base_head from tasks where id=?", (task,),
             ).fetchone()
@@ -950,9 +952,9 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         result = self.cli("calibrate", str(task))
 
         transcript = self.session_transcript("worker")
-        self.assert_failure(
-            result, f"supervisor: cannot read transcript {transcript}: No such file or directory"
-        )
+        gone = ("The system cannot find the file specified" if os.name == "nt"
+                else "No such file or directory")
+        self.assert_failure(result, f"supervisor: cannot read transcript {transcript}: {gone}")
 
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"
@@ -1164,8 +1166,26 @@ class BusySessionContractTests(SupervisorContractCase):
         self.set_agent_status("worker", "busy")
         log = self.session_transcript("worker")
         seen_while_busy = []
+        release_failures = []
+
+        def queue_seen():
+            with self.supervisor_db() as database:
+                return database.execute(
+                    "select 1 from run_events where kind='prompt-queued' and detail='worker'"
+                ).fetchone() is not None
 
         def release():
+            # Not before the supervisor has seen the prompt queued: on a slow
+            # host it gets there later than the timer fires, and a session gone
+            # idle first has already taken the prompt when it looks.
+            deadline = time.monotonic() + 10
+            while not queue_seen():
+                if time.monotonic() > deadline:
+                    release_failures.append(
+                        "the supervisor did not record prompt-queued for worker within 10 s"
+                    )
+                    break
+                time.sleep(0.05)
             entries = [json.loads(line) for line in log.read_text().splitlines()]
             seen_while_busy.append(any(
                 entry.get("type") == "user"
@@ -1178,10 +1198,12 @@ class BusySessionContractTests(SupervisorContractCase):
         timer.start()
         self.addCleanup(timer.cancel)
 
-        self.assert_success(self.cli(
-            "prompt", "worker", "queued while busy", "--wait"
-        ))
-        timer.join(timeout=5)
+        result = self.cli("prompt", "worker", "queued while busy", "--wait")
+        timer.join(timeout=15)
+
+        self.assertFalse(timer.is_alive(), "the release timer did not finish")
+        self.assertEqual(release_failures, [])
+        self.assert_success(result)
 
         entries = [json.loads(line) for line in log.read_text().splitlines()]
         enqueues = [
@@ -1247,6 +1269,14 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
             (self.state_dir / "chainsaw-supervisor.db").is_file(),
             f"no database under {self.state_dir}",
         )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows resolves home from USERPROFILE")
+    def test_supervisor_state_is_stored_under_userprofile_when_home_points_elsewhere(self):
+        decoy = self.sandbox / "decoy-home"
+        decoy.mkdir()
+        self.env["HOME"] = str(decoy)
+
+        self.assertEqual(self.state_dir.parent, self.home / ".chainsaw" / "runs")
 
     def test_transcripts_dir_still_names_the_state_directory_for_an_older_lead(self):
         """A lead started from the previous skill asks for `transcripts-dir`."""
@@ -1466,7 +1496,7 @@ class StandingWarningTests(SupervisorContractCase):
         # The latch is journaled after the reading `past` waited for, so it is
         # only certain to be in the tail once the daemon has exited.
         after = self.assert_success(self.cli("state"))
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead'",
             ).fetchall()
@@ -1494,7 +1524,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         relaunched.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1512,7 +1542,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1770,7 +1800,7 @@ class SettingsContractTests(SupervisorContractCase):
         fresh = self.cli("state")
 
         self.assertEqual(self.prompts_to(commentator).count(wake), 1, self.daemon_report())
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             states = [
                 state for (state,) in connection.execute(
                     "select state from task_events where task_id=? order by id", (task_id,),
@@ -1949,7 +1979,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
             "prompt-taken worker: session went busy before its transcript showed the prompt",
             state.stdout,
         )
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             (seen_at,) = database.execute(
                 "select seen_at from prompts order by id desc limit 1"
             ).fetchone()
@@ -2009,7 +2039,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         state = self.wait_for_state(f"{task} committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             base_head, offset = database.execute(
                 "select base_head, transcript_offset from tasks where id=?", (task,),
             ).fetchone()

@@ -1,6 +1,7 @@
 target/
 dist/
 __pycache__/
+.venv/
 _planning/
 .grok/
 .claude/

@@ -9,9 +9,13 @@ such as learning a session id it was never told, is proven at the end.
 """
 
 import json
-import sqlite3
+import os
+import unittest
 
-import tests.test_cli_contract as herdr
+if os.name == "nt":
+    raise unittest.SkipTest("the supervisor refuses Orca on Windows")
+
+import tests.test_cli_contract as herdr  # noqa: E402
 from tests.support import SupervisorContractCase
 
 #: How long the supervisor gives a terminal to prove itself idle in one probe.
@@ -153,7 +157,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
     runtime = "orca"
 
     def external_session_id(self, name):
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             (external_id,) = database.execute(
                 "select external_session_id from sessions where name=? and stopped_at is null",
                 (name,),
