@@ -295,6 +295,13 @@ class SupervisorContractCase(unittest.TestCase):
     def head(self):
         return self.git("rev-parse", "HEAD").stdout.strip()
 
+    def use_a_repository_with_no_commits(self):
+        """Point git at a freshly initialized repository over the run directory."""
+        git_dir = self.sandbox / "empty.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True, env=self.env)
+        self.env["GIT_DIR"] = str(git_dir)
+        self.env["GIT_WORK_TREE"] = str(self.run_dir)
+
     def commit_file(self, path="work.txt", content="changed\n", message="feat: fixture change"):
         target = self.run_dir / path
         target.parent.mkdir(parents=True, exist_ok=True)

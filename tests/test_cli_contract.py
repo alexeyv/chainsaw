@@ -1384,6 +1384,79 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assert_failure(result, "failed to run git")
         self.assertIn("the daemon exited", result.stderr)
 
+    def test_a_detached_daemon_in_a_repository_git_refuses_fails_the_command(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+        self.env["GIT_DIR"] = str(self.sandbox / "missing.git")
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, "not a git repository")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_starts_in_a_repository_with_no_commits(self):
+        self.use_a_repository_with_no_commits()
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+
+        self.assert_success(started)
+        first = self.next_daemon_seen_at(None)
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+
+    def test_a_task_is_dispatched_in_a_repository_with_no_commits(self):
+        self.use_a_repository_with_no_commits()
+        task = self.new_task()
+        self.launch()
+
+        result = self.dispatch(task)
+
+        self.assert_success(result)
+        self.assertIn(f"task {task} dispatched to worker", result.stdout)
+
+    def test_a_session_launched_before_the_first_commit_is_told_to_read_its_files(self):
+        self.use_a_repository_with_no_commits()
+        task = self.new_task()
+        self.launch()
+        self.commit_file("first.txt")
+
+        self.assert_success(self.dispatch(task))
+
+        self.assertIn(
+            "These files changed since your session started; read them first: first.txt",
+            self.prompts_to("worker")[-1],
+        )
+
+    def test_a_task_is_dispatched_after_the_repository_moves_to_an_orphan_branch(self):
+        task = self.new_task()
+        self.launch()
+        self.git("checkout", "-q", "--orphan", "fresh")
+
+        result = self.dispatch(task)
+
+        self.assert_success(result)
+        self.assertNotIn("changed since your session started", self.prompts_to("worker")[-1])
+
+    def test_the_daemon_keeps_polling_when_the_implementer_moves_to_an_orphan_branch(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        self.git("checkout", "-q", "--orphan", "fresh")
+        before = self.next_daemon_seen_at(None)
+        daemon = self.start_daemon()
+        first = self.next_daemon_seen_at(before)
+
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+        self.assertIsNone(daemon.poll(), self.daemon_report())
+
     def test_human_wait_open_and_close_are_visible_in_state(self):
         self.assert_success(self.cli("human-wait", "start"))
 

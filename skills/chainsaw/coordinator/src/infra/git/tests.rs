@@ -23,6 +23,16 @@ impl Fixture {
     Self { dir }
   }
 
+  /// A directory whose `.git` file points at a missing git directory, so
+  /// every git command in it fails.
+  fn refused() -> Self {
+    let suffix = NEXT_REPO.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("chainsaw-git-{}-{suffix}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(".git"), "gitdir: missing\n").unwrap();
+    Self { dir }
+  }
+
   fn repo(&self) -> Repo {
     Repo::new(&self.dir)
   }
@@ -76,6 +86,37 @@ mod head {
 
     assert_eq!(fixture.repo().head()?, sha);
     Ok(())
+  }
+
+  #[test]
+  fn should_be_the_name_head_when_there_is_no_commit_yet() -> Result<()> {
+    let fixture = Fixture::new();
+
+    assert_eq!(fixture.repo().head()?, "HEAD");
+    Ok(())
+  }
+
+  #[test]
+  fn should_be_the_name_head_on_an_orphan_branch() -> Result<()> {
+    let fixture = Fixture::new();
+    fixture.commit("a.txt", "a", "first");
+    git(&fixture.dir, &["checkout", "-q", "--orphan", "fresh"]);
+
+    assert_eq!(fixture.repo().head()?, "HEAD");
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_with_gits_message_when_git_refuses_the_repository() {
+    let fixture = Fixture::refused();
+
+    let error = fixture.repo().head().unwrap_err().to_string();
+
+    assert!(
+      error.starts_with("git rev-parse -q --verify HEAD failed: "),
+      "{error}"
+    );
+    assert!(error.contains("not a git repository"), "{error}");
   }
 }
 
@@ -256,6 +297,18 @@ mod head_advanced_cleanly_from {
     assert!(!fixture.repo().head_advanced_cleanly_from(&base)?);
     Ok(())
   }
+
+  #[test]
+  fn should_be_false_when_head_has_moved_to_an_orphan_branch() -> Result<()> {
+    let fixture = Fixture::new();
+    let base = fixture.commit("a.txt", "a", "first");
+    git(&fixture.dir, &["checkout", "-q", "--orphan", "fresh"]);
+    git(&fixture.dir, &["rm", "-q", "-r", "--cached", "."]);
+    fs::remove_file(fixture.dir.join("a.txt"))?;
+
+    assert!(!fixture.repo().head_advanced_cleanly_from(&base)?);
+    Ok(())
+  }
 }
 
 mod status {
@@ -281,6 +334,19 @@ mod status {
     assert_eq!(fixture.repo().status()?, "");
     assert!(fixture.repo().is_clean()?);
     Ok(())
+  }
+
+  #[test]
+  fn should_fail_with_gits_message_when_git_refuses_the_repository() {
+    let fixture = Fixture::refused();
+
+    let error = fixture.repo().status().unwrap_err().to_string();
+
+    assert!(
+      error.starts_with("git status --porcelain failed: "),
+      "{error}"
+    );
+    assert!(error.contains("not a git repository"), "{error}");
   }
 }
 

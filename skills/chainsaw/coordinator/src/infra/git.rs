@@ -5,7 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+
+/// What `Repo::head` gives while HEAD is unborn.
+pub const UNBORN_HEAD: &str = "HEAD";
 
 /// One commit as `git log` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,9 +30,19 @@ impl Repo {
     }
   }
 
-  /// The full id HEAD points at.
+  /// The full id HEAD points at, or the name `HEAD` itself while HEAD is
+  /// unborn (no commit yet, or an orphan branch), as git printed it before
+  /// reads failed on its exit status. Git resolves that name to the first
+  /// commit once there is one, so a base recorded before it still works.
   pub fn head(&self) -> Result<String> {
-    self.stdout(&["rev-parse", "HEAD"])
+    let args = ["rev-parse", "-q", "--verify", "HEAD"];
+    let output = self.run(&args)?;
+    // `--verify -q` exits 1 and says nothing only when HEAD names no commit;
+    // a repository git refuses exits 128 with its reason.
+    if output.status.code() == Some(1) && output.stderr.is_empty() {
+      return Ok(UNBORN_HEAD.to_owned());
+    }
+    checked(&args, &output)
   }
 
   /// Whether `sha` names an object in the repository.
@@ -135,6 +148,17 @@ impl Repo {
     )
   }
 
+  /// Every file in the tree `rev` names.
+  pub fn files_at(&self, rev: &str) -> Result<Vec<String>> {
+    Ok(
+      self
+        .stdout(&["ls-tree", "-r", "--name-only", rev])?
+        .lines()
+        .map(str::to_owned)
+        .collect(),
+    )
+  }
+
   fn run(&self, args: &[&str]) -> Result<Output> {
     Command::new("git")
       .arg("-C")
@@ -145,8 +169,20 @@ impl Repo {
   }
 
   fn stdout(&self, args: &[&str]) -> Result<String> {
-    Ok(text(&self.run(args)?))
+    checked(args, &self.run(args)?)
   }
+}
+
+/// `output`'s stdout, or an error with git's stderr when `git args` failed.
+fn checked(args: &[&str], output: &Output) -> Result<String> {
+  if !output.status.success() {
+    bail!(
+      "git {} failed: {}",
+      args.join(" "),
+      String::from_utf8_lossy(&output.stderr).trim()
+    );
+  }
+  Ok(text(output))
 }
 
 fn text(output: &Output) -> String {
