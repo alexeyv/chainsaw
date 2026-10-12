@@ -199,8 +199,8 @@ impl Cursor {
   /// `CURSOR_CONFIG_DIR` moves only `cli-config.json` and chats; transcripts
   /// stay under the home directory (verified on 2026.08.11).
   fn projects_dir() -> Result<PathBuf> {
-    let home = env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".cursor").join("projects"))
+    let home = env::home_dir().context("cannot find the home directory")?;
+    Ok(home.join(".cursor").join("projects"))
   }
 }
 

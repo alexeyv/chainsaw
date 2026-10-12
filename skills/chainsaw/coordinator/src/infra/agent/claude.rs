@@ -186,8 +186,8 @@ impl TranscriptFormat for Claude {
 impl Claude {
   /// Where Claude Code keeps one transcripts folder per working directory.
   fn projects_dir() -> Result<PathBuf> {
-    let home = env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".claude").join("projects"))
+    let home = env::home_dir().context("cannot find the home directory")?;
+    Ok(home.join(".claude").join("projects"))
   }
 
   /// Where Claude Code keeps transcripts of sessions started in `run_dir`.

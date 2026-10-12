@@ -33,7 +33,9 @@ fn global_file() -> Result<Option<PathBuf>> {
   }
   let config_home = match env::var_os("XDG_CONFIG_HOME") {
     Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-    _ => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".config"),
+    _ => env::home_dir()
+      .context("cannot find the home directory")?
+      .join(".config"),
   };
   Ok(Some(config_home.join("chainsaw").join(FILE_NAME)))
 }

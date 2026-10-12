@@ -177,7 +177,9 @@ impl Codex {
   fn sessions_dir() -> Result<PathBuf> {
     let home = match env::var_os("CODEX_HOME") {
       Some(codex_home) => PathBuf::from(codex_home),
-      None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".codex"),
+      None => env::home_dir()
+        .context("cannot find the home directory")?
+        .join(".codex"),
     };
     Ok(home.join("sessions"))
   }
@@ -253,7 +255,7 @@ fn session_of_rollout_in(rollout: &Path, run_dir: &Path) -> Option<String> {
     return None;
   }
   let cwd = meta.pointer("/payload/cwd").and_then(Value::as_str)?;
-  let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
+  let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd));
   if cwd != run_dir {
     return None;
   }

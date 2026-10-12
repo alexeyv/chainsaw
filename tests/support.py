@@ -82,6 +82,7 @@ class SupervisorContractCase(unittest.TestCase):
             self.env.pop(variable, None)
         self.env.update({
             "HOME": str(self.home),
+            "USERPROFILE": str(self.home),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "GIT_AUTHOR_NAME": "Chainsaw Tests",
             "GIT_AUTHOR_EMAIL": "chainsaw-tests@example.invalid",

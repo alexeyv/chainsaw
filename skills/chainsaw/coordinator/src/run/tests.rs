@@ -25,6 +25,18 @@ mod state_dir_name {
   fn should_replace_a_dot_that_starts_a_component() {
     assert_eq!(state_dir_name(Path::new("/x/.bare")), "-x--bare");
   }
+
+  #[cfg(windows)]
+  #[test]
+  fn should_replace_the_colon_and_backslashes_when_the_run_directory_is_on_windows() {
+    assert_eq!(state_dir_name(Path::new(r"C:\x\y")), "C--x-y");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn should_keep_colons_and_backslashes_when_the_run_directory_is_on_posix() {
+    assert_eq!(state_dir_name(Path::new(r"/tmp/a:b\c")), r"-tmp-a:b\c");
+  }
 }
 
 mod runtime_named_by {
