@@ -226,13 +226,14 @@ fn newest_transcript_in(dir: &Path, since: SystemTime) -> Option<String> {
     .and_then(|(_, path)| Some(path.file_stem()?.to_str()?.to_owned()))
 }
 
-/// Claude Code names a session's transcripts directory after its cwd, replacing
-/// both separators and dots with dashes: `/Users/alex/src/ui.wt/run` becomes
-/// `-Users-alex-src-ui-wt-run`, and `/x/.bare` becomes `-x--bare`. Keeping the
-/// dots looked for transcripts in a directory holding none (run of
-/// 2026-08-28).
+/// Claude Code's folder name for a cwd: every character but ASCII letters and
+/// digits becomes `-`.
 fn transcripts_dir_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
+  canonical_run_dir
+    .to_string_lossy()
+    .chars()
+    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    .collect()
 }
 
 fn usage_of_line(line: &str) -> Option<u64> {

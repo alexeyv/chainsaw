@@ -161,7 +161,7 @@ def transcript_for(kind, run_dir, session_id, home=None):
     `run_dir`, under `home` (the fake's own when unnamed)."""
     home = Path(home or os.environ["HOME"])
     if kind == "claude":
-        project = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
+        project = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(run_dir))
         return home / ".claude" / "projects" / project / f"{session_id}.jsonl"
     if kind == "codex":
         now = datetime.now(timezone.utc)

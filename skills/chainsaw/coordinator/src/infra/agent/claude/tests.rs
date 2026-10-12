@@ -360,6 +360,14 @@ mod transcripts_dir_name {
   }
 
   #[test]
+  fn should_dash_underscores_and_spaces() {
+    assert_eq!(
+      transcripts_dir_name(Path::new("/my src/run_1")),
+      "-my-src-run-1"
+    );
+  }
+
+  #[test]
   fn should_dash_dots_when_the_run_directory_is_dotted() {
     assert_eq!(
       transcripts_dir_name(Path::new("/Users/alex/src/ui.wt/run")),
