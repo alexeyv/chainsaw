@@ -6,10 +6,15 @@ a replacement executable by setting CHAINSAW_SUPERVISOR_COMMAND.
 """
 
 import json
+import os
+import signal
 import sqlite3
+import sys
 import threading
 import subprocess
 import time
+import unittest
+from contextlib import closing, suppress
 from pathlib import Path
 
 from tests.support import READING_TURN, SupervisorContractCase
@@ -35,6 +40,37 @@ class TaskContractTests(SupervisorContractCase):
         )
 
         self.assert_failure(result, "task text on stdin is empty")
+
+    def test_task_text_can_come_from_a_file_named_on_the_command_line(self):
+        prompt_file = self.sandbox / "task.md"
+        prompt_file.write_text("Rename the worker; keep \"quotes\" & café.\n", encoding="utf-8")
+
+        created = self.assert_success(self.cli(
+            "task", "new", "--prompt-file", prompt_file, "--files", "worker.py",
+            "--predicted-lines", "5",
+        ))
+        self.launch()
+        self.assert_success(self.dispatch(int(created.stdout)))
+
+        self.assertTrue(any(
+            "Rename the worker; keep \"quotes\" & café." in text
+            for text in self.prompts_to("worker")
+        ))
+
+    def test_an_empty_or_missing_prompt_file_is_refused(self):
+        empty = self.sandbox / "empty.md"
+        empty.write_text(" \n")
+
+        blank = self.cli(
+            "task", "new", "--prompt-file", empty, "--files", "a.py", "--predicted-lines", "5",
+        )
+        missing = self.cli(
+            "task", "new", "--prompt-file", self.sandbox / "absent.md", "--files", "a.py",
+            "--predicted-lines", "5",
+        )
+
+        self.assert_failure(blank, f"task text on {empty} is empty")
+        self.assert_failure(missing, "cannot read task text from")
 
     def test_task_requires_a_file_list_or_file_count(self):
         result = self.cli(
@@ -78,7 +114,87 @@ class TaskContractTests(SupervisorContractCase):
         self.assertIn("retry of 1", state.stdout)
 
 
+class NamePaneContractTests(SupervisorContractCase):
+    """The lead names its own pane and tab through the supervisor, which also
+    proves it runs inside a runtime, with no shell variables in the command."""
+
+    def test_names_the_herdr_pane_and_tab_it_runs_in(self):
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [
+                (operation["operation"], operation["session_id"], operation["name"])
+                for operation in self.runtime_operations()
+            ],
+            [("rename", "pane-lead", "lead"), ("rename-tab", "tab-0", "lead")],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows refuses Orca")
+    def test_names_the_herdr_pane_when_an_orca_terminal_is_also_visible(self):
+        self.env.update({"ORCA_TERMINAL_HANDLE": "term-lead", "ORCA_TAB_ID": "tab-0"})
+
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [
+                (operation["operation"], operation["session_id"], operation["name"])
+                for operation in self.runtime_operations()
+            ],
+            [("rename", "pane-lead", "lead"), ("rename-tab", "tab-0", "lead")],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows refuses Orca")
+    def test_refuses_an_orca_terminal_on_windows(self):
+        for variable in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
+            self.env.pop(variable)
+        self.env.update({"ORCA_TERMINAL_HANDLE": "term-lead", "ORCA_TAB_ID": "tab-0"})
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: Orca is not supported on Windows")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_outside_herdr_and_orca(self):
+        self.env.pop("HERDR_WORKSPACE_ID")
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_a_herdr_pane_it_cannot_name(self):
+        self.env.pop("HERDR_PANE_ID")
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_when_the_herdr_pane_id_is_empty(self):
+        self.env["HERDR_PANE_ID"] = ""
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+    def test_refuses_when_the_herdr_tab_id_is_empty(self):
+        self.env["HERDR_TAB_ID"] = ""
+
+        result = self.cli("name-pane", "lead")
+
+        self.assert_failure(result, "supervisor: must run inside a Herdr pane")
+        self.assertFalse(self.runtime_state_path.exists())
+
+
 class PromptAndDispatchContractTests(SupervisorContractCase):
+    def test_a_multi_line_reading_turn_starts_the_session_on_one_line(self):
+        self.launch(prompt="Read the fixture files.\n\t1. Then stop.\r\n")
+
+        self.assertEqual(self.launch_prompt("worker"), "Read the fixture files. 1. Then stop.")
+
     def test_prompt_wait_prints_the_agent_reply(self):
         self.launch()
         self.update_runtime_state(reply_on_prompt="fixture reply")
@@ -180,7 +296,7 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         flight_state = self.wait_for_state(f"{task} in_flight")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             recorded_offset, base_head = database.execute(
                 "select transcript_offset, base_head from tasks where id=?", (task,),
             ).fetchone()
@@ -945,9 +1061,9 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         result = self.cli("calibrate", str(task))
 
         transcript = self.session_transcript("worker")
-        self.assert_failure(
-            result, f"supervisor: cannot read transcript {transcript}: No such file or directory"
-        )
+        gone = ("The system cannot find the file specified" if os.name == "nt"
+                else "No such file or directory")
+        self.assert_failure(result, f"supervisor: cannot read transcript {transcript}: {gone}")
 
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"
@@ -1139,6 +1255,208 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assertIn("the daemon will exit", result.stdout)
         self.assertEqual(daemon.returncode, 0)
 
+    def test_a_detached_daemon_keeps_polling_after_the_command_returns(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid \d+\n$")
+        first = self.next_daemon_seen_at(None)
+
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+
+    @unittest.skipIf(os.name == "nt", "the Windows pane lifecycle is checked by hand")
+    def test_a_detached_daemon_keeps_polling_after_its_terminal_is_torn_down(self):
+        self.begin_lead_transcript("session-lead")
+        command = [
+            *self.supervisor_command, "--run-dir", str(self.run_dir),
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        ]
+        self.stop_detached_daemons_later()
+        # The terminal: a session of its own whose leader outlives the command,
+        # as a shell does.
+        terminal = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess, sys, time;"
+             " subprocess.run(sys.argv[1:], check=True); time.sleep(60)",
+             *command],
+            text=True, encoding="utf-8", stdout=subprocess.PIPE, env=self.env,
+            start_new_session=True,
+        )
+        self.addCleanup(terminal.stdout.close)
+        self.addCleanup(terminal.wait, 10)
+        self.addCleanup(terminal.kill)
+        started = terminal.stdout.readline()
+        self.assertRegex(started, r"^daemon started, pid \d+\n$")
+
+        os.killpg(terminal.pid, signal.SIGHUP)
+        with suppress(ProcessLookupError):
+            os.killpg(terminal.pid, signal.SIGKILL)
+        terminal.wait(timeout=10)
+        seen =self.next_daemon_seen_at(None)
+
+        self.assertGreater(self.next_daemon_seen_at(seen), seen)
+
+    def test_a_detached_daemon_finds_its_start_behind_another_daemons(self):
+        self.begin_lead_transcript("session-lead")
+        self.assert_success(self.cli("state"))
+        # Another daemon's start lands right after this one's, as when two
+        # are started together.
+        self.write_supervisor_db(
+            "create trigger foreign_start after insert on run_events"
+            " when new.kind = 'daemon-start' and new.detail != 'pid 0'"
+            " begin insert into run_events(kind, detail, created_at)"
+            " values ('daemon-start', 'pid 0', new.created_at); end"
+        )
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid [1-9]\d*\n$")
+
+    def test_a_detached_daemon_whose_first_poll_waits_on_a_prompt_reports_its_start(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.begin_lead_transcript("session-lead")
+        wake = f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+
+        self.stop_detached_daemons_later()
+
+        # Held by another prompt for longer than `--detach` waits.
+        with self.prompt_lock_held():
+            started = self.cli(
+                "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+                "--poll-interval-ms", "10", timeout=60,
+            )
+            woken_while_held = wake in self.prompts_to(commentator)
+
+        self.assert_success(started)
+        self.assertRegex(started.stdout, r"^daemon started, pid \d+\n$")
+        self.assertFalse(woken_while_held)
+        self.wait_for_state(f"commentary-wake task {task} {sha[:10]}")
+
+    def test_a_detached_daemon_that_cannot_register_the_lead_fails_the_command(self):
+        self.stop_detached_daemons_later()
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-missing",
+        )
+
+        self.assert_failure(result, "lead session session-missing has no claude transcript")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_that_dies_on_its_first_poll_fails_the_command(self):
+        self.launch()
+        self.append_text("worker", "fixture work started")
+        transcript = self.session_transcript("worker")
+        transcript.unlink()
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, f"supervisor: transcript of worker is gone from {transcript}")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_that_cannot_run_git_fails_the_command(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+        # Only the fakes: no git.
+        self.env["PATH"] = str(self.sandbox / "bin")
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, "failed to run git")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_in_a_repository_git_refuses_fails_the_command(self):
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+        self.env["GIT_DIR"] = str(self.sandbox / "missing.git")
+
+        result = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10",
+        )
+
+        self.assert_failure(result, "not a git repository")
+        self.assertIn("the daemon exited", result.stderr)
+
+    def test_a_detached_daemon_starts_in_a_repository_with_no_commits(self):
+        self.use_a_repository_with_no_commits()
+        self.begin_lead_transcript("session-lead")
+        self.stop_detached_daemons_later()
+
+        started = self.cli(
+            "daemon", "--detach", "--lead", "lead", "--session-id", "session-lead",
+            "--poll-interval-ms", "10", timeout=60,
+        )
+
+        self.assert_success(started)
+        first = self.next_daemon_seen_at(None)
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+
+    def test_a_task_is_dispatched_in_a_repository_with_no_commits(self):
+        self.use_a_repository_with_no_commits()
+        task = self.new_task()
+        self.launch()
+
+        result = self.dispatch(task)
+
+        self.assert_success(result)
+        self.assertIn(f"task {task} dispatched to worker", result.stdout)
+
+    def test_a_session_launched_before_the_first_commit_is_told_to_read_its_files(self):
+        self.use_a_repository_with_no_commits()
+        task = self.new_task()
+        self.launch()
+        self.commit_file("first.txt")
+
+        self.assert_success(self.dispatch(task))
+
+        self.assertIn(
+            "These files changed since your session started; read them first: first.txt",
+            self.prompts_to("worker")[-1],
+        )
+
+    def test_a_task_is_dispatched_after_the_repository_moves_to_an_orphan_branch(self):
+        task = self.new_task()
+        self.launch()
+        self.git("checkout", "-q", "--orphan", "fresh")
+
+        result = self.dispatch(task)
+
+        self.assert_success(result)
+        self.assertNotIn("changed since your session started", self.prompts_to("worker")[-1])
+
+    def test_the_daemon_keeps_polling_when_the_implementer_moves_to_an_orphan_branch(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        self.git("checkout", "-q", "--orphan", "fresh")
+        before = self.next_daemon_seen_at(None)
+        daemon = self.start_daemon()
+        first = self.next_daemon_seen_at(before)
+
+        self.assertGreater(self.next_daemon_seen_at(first), first)
+        self.assertIsNone(daemon.poll(), self.daemon_report())
+
     def test_human_wait_open_and_close_are_visible_in_state(self):
         self.assert_success(self.cli("human-wait", "start"))
 
@@ -1159,8 +1477,26 @@ class BusySessionContractTests(SupervisorContractCase):
         self.set_agent_status("worker", "busy")
         log = self.session_transcript("worker")
         seen_while_busy = []
+        release_failures = []
+
+        def queue_seen():
+            with self.supervisor_db() as database:
+                return database.execute(
+                    "select 1 from run_events where kind='prompt-queued' and detail='worker'"
+                ).fetchone() is not None
 
         def release():
+            # Not before the supervisor has seen the prompt queued: on a slow
+            # host it gets there later than the timer fires, and a session gone
+            # idle first has already taken the prompt when it looks.
+            deadline = time.monotonic() + 10
+            while not queue_seen():
+                if time.monotonic() > deadline:
+                    release_failures.append(
+                        "the supervisor did not record prompt-queued for worker within 10 s"
+                    )
+                    break
+                time.sleep(0.05)
             entries = [json.loads(line) for line in log.read_text().splitlines()]
             seen_while_busy.append(any(
                 entry.get("type") == "user"
@@ -1173,10 +1509,12 @@ class BusySessionContractTests(SupervisorContractCase):
         timer.start()
         self.addCleanup(timer.cancel)
 
-        self.assert_success(self.cli(
-            "prompt", "worker", "queued while busy", "--wait"
-        ))
-        timer.join(timeout=5)
+        result = self.cli("prompt", "worker", "queued while busy", "--wait")
+        timer.join(timeout=15)
+
+        self.assertFalse(timer.is_alive(), "the release timer did not finish")
+        self.assertEqual(release_failures, [])
+        self.assert_success(result)
 
         entries = [json.loads(line) for line in log.read_text().splitlines()]
         enqueues = [
@@ -1224,8 +1562,8 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
         prompt = self.launch_prompt(commentator)
         prefix = "State directory: "
         announced = next(
-            line.removeprefix(prefix)
-            for line in prompt.splitlines() if line.startswith(prefix)
+            part.removeprefix(prefix)
+            for part in prompt.split("; ") if part.startswith(prefix)
         )
 
         self.assertTrue(
@@ -1242,6 +1580,14 @@ class DottedRunDirectoryContractTests(SupervisorContractCase):
             (self.state_dir / "chainsaw-supervisor.db").is_file(),
             f"no database under {self.state_dir}",
         )
+
+    @unittest.skipUnless(os.name == "nt", "only Windows resolves home from USERPROFILE")
+    def test_supervisor_state_is_stored_under_userprofile_when_home_points_elsewhere(self):
+        decoy = self.sandbox / "decoy-home"
+        decoy.mkdir()
+        self.env["HOME"] = str(decoy)
+
+        self.assertEqual(self.state_dir.parent, self.home / ".chainsaw" / "runs")
 
     def test_transcripts_dir_still_names_the_state_directory_for_an_older_lead(self):
         """A lead started from the previous skill asks for `transcripts-dir`."""
@@ -1273,7 +1619,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         process = subprocess.Popen(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
         )
-        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.communicate, timeout=5)
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
@@ -1322,7 +1668,7 @@ class WatchTranscriptsContractTests(SupervisorContractCase):
         process = subprocess.Popen(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env,
         )
-        self.addCleanup(process.wait, timeout=5)
+        self.addCleanup(process.communicate, timeout=5)
         self.addCleanup(process.kill)
 
         time.sleep(0.1)
@@ -1461,7 +1807,7 @@ class StandingWarningTests(SupervisorContractCase):
         # The latch is journaled after the reading `past` waited for, so it is
         # only certain to be in the tail once the daemon has exited.
         after = self.assert_success(self.cli("state"))
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead'",
             ).fetchall()
@@ -1489,7 +1835,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         relaunched.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1507,7 +1853,7 @@ class StandingWarningTests(SupervisorContractCase):
         self.wait_for_state("context  270000")
         self.assert_success(self.cli("stop"))
         restarted.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             events = database.execute(
                 "select detail from run_events where kind='stop-lead' order by rowid",
             ).fetchall()
@@ -1765,7 +2111,7 @@ class SettingsContractTests(SupervisorContractCase):
         fresh = self.cli("state")
 
         self.assertEqual(self.prompts_to(commentator).count(wake), 1, self.daemon_report())
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             states = [
                 state for (state,) in connection.execute(
                     "select state from task_events where task_id=? order by id", (task_id,),
@@ -1944,7 +2290,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
             "prompt-taken worker: session went busy before its transcript showed the prompt",
             state.stdout,
         )
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             (seen_at,) = database.execute(
                 "select seen_at from prompts order by id desc limit 1"
             ).fetchone()
@@ -2004,7 +2350,7 @@ class CursorImplementerContractTests(SupervisorContractCase):
         state = self.wait_for_state(f"{task} committed_unverified")
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             base_head, offset = database.execute(
                 "select base_head, transcript_offset from tasks where id=?", (task,),
             ).fetchone()

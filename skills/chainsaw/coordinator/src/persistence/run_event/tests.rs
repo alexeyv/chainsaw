@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use super::{create, recent};
+use super::{after, create, recent};
 use crate::domain::{RunEvent, RunEventKind};
 use crate::persistence::test_fixture::{database, row_count};
 
@@ -169,6 +169,47 @@ mod recent {
 
     let transaction = db.transaction()?;
     let events = recent(&transaction, &[], 5)?;
+    transaction.commit()?;
+
+    assert_eq!(events, Vec::<RunEvent>::new());
+    Ok(())
+  }
+}
+
+mod after {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    create(&transaction, RunEventKind::DaemonStart, "pid 1")?;
+    create(&transaction, RunEventKind::DaemonStart, "pid 2")?;
+    create(&transaction, RunEventKind::Kick, "implementer-1")?;
+    create(&transaction, RunEventKind::DaemonStart, "pid 3")?;
+    transaction.commit()?;
+
+    let transaction = db.transaction()?;
+    let events = after(&transaction, RunEventKind::DaemonStart, 1)?;
+    transaction.commit()?;
+
+    assert_eq!(
+      format_run_events(&events),
+      "2 daemon-start pid 2\n4 daemon-start pid 3"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn should_return_nothing_when_no_event_of_the_kind_is_newer() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    create(&transaction, RunEventKind::DaemonStart, "pid 1")?;
+    create(&transaction, RunEventKind::Kick, "implementer-1")?;
+    transaction.commit()?;
+
+    let transaction = db.transaction()?;
+    let events = after(&transaction, RunEventKind::DaemonStart, 1)?;
     transaction.commit()?;
 
     assert_eq!(events, Vec::<RunEvent>::new());

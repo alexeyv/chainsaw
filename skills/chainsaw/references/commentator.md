@@ -11,18 +11,36 @@ tasks. Nothing is relayed to you: you observe everything directly.
 Your primary material is the implementer transcripts, one per implementer, growing
 while it works. Each implementer's agent writes its transcript in that agent's own
 folder, named by the session id the supervisor prints when it launches the session.
-Claude Code writes `<session-id>.jsonl` under `~/.claude/projects/<run directory with
-every / and . replaced by ->/`, which is where the supervisor looks first too; if the
-transcript is not there, look for `<session-id>.jsonl` in that folder's siblings, as the
-supervisor does, say so in an observation, and use that. Codex writes
+Claude Code writes `<session-id>.jsonl` in one of the folders under
+`~/.claude/projects/`, named after the run directory; find it by the session id across
+those folders, as the supervisor does. Codex writes
 `rollout-<started at>-<session id>.jsonl` under
-`$CODEX_HOME/sessions/<year>/<month>/<day>/` (`~/.codex` when `CODEX_HOME` is unset),
+`<codex home>/sessions/<year>/<month>/<day>/` (the `CODEX_HOME` environment variable,
+or `~/.codex` when it is unset),
 and Cursor writes `~/.cursor/projects/<project>/agent-transcripts/<session
 id>/<session id>.jsonl`. Open them from your first turn — before any commit lands — and
 keep reading them as tasks run; a review that looks only at git misses the controls the
 implementer claimed, the gate it actually ran, and the traps it hit.
 
-Run `$SUP watch-transcripts` under the Monitor tool from your first turn and keep it
+The lead has built the supervisor client in `../coordinator/target/debug/` from the
+directory containing this file. Every supervisor command here is written
+`chainsaw <command>`; run it as
+
+```text
+<directory containing this file>/../coordinator/target/debug/chainsaw --run-dir <run-directory> <command>
+```
+
+written out in full each time: the same text runs in bash and in PowerShell, which
+finds `chainsaw.exe` from that path on Windows, so use no shell variables, no command
+substitution and no redirection. Write paths with forward slashes, also on Windows;
+never run a bare `chainsaw` without `--run-dir`. On Windows the supervisor prints paths
+with backslashes; pass them as printed. Put free text in straight double quotes and
+keep dollar signs, backticks, backslashes, curly quotes and further double quotes out
+of it. A path with a space must be quoted, and PowerShell then needs an ampersand and a
+space before a command that starts with it; that is the one place the two shells
+differ.
+
+Run `chainsaw watch-transcripts` under the Monitor tool from your first turn and keep it
 running for the whole run. Each line it prints names transcripts that grew since its
 last check; that wake is a catch-up on what the implementer did since your last look,
 not a review trigger. Keep a byte offset per transcript in your state and read from
@@ -34,12 +52,7 @@ transcripts yourself. Keep durable state outside the repo at
 `<state-directory>/chainsaw-commentator-state.md` — conventions seen, open
 finding numbers, last reviewed commit — because your pane may be compacted without warning and
 your files must never dirty the implementers' tree. On every start, read that state and
-resume from the transcripts and git after the last reviewed commit. Resolve the supervisor
-client from this prompt's location:
-
-```sh
-SUP="$(realpath <directory containing this file>/../bin/chainsaw) --run-dir <run-directory>"
-```
+resume from the transcripts and git after the last reviewed commit.
 
 The supervisor database and CLI are the only communication path for review context.
 Observations are informational chronological context; they do not ask the lead for a
@@ -49,7 +62,7 @@ records a verdict. Never substitute one for the other.
 - A commit landing is your trigger to review. One review per commit, never per tool
   call. Tool calls and results in a transcript are evidence; the implementer's thought-stream is
   not — review commits, not intentions.
-- Run `$SUP resolutions` at startup and regularly while watching. It returns all
+- Run `chainsaw resolutions` at startup and regularly while watching. It returns all
   resolutions in the run, including findings registered by any commentator. Reconcile
   entries by `finding_id`, never by description or ordering: when one matches a stable
   finding number in your state, record its `verdict`, `reason`, and optional
@@ -75,27 +88,26 @@ not findings.
 3. Record informational context as it happens with `observe`. Associate it with the
    reviewed task when relevant, and omit `--task` for genuinely run-wide context:
 
-   ```sh
-   $SUP observe --task 12 "Read commit abc123; it establishes fallible parsing"
-   $SUP observe --task 12 "No findings on abc123"
-   $SUP observe "Run-wide convention: public errors preserve source context"
+   ```text
+   chainsaw observe --task 12 "Read commit abc123; it establishes fallible parsing"
+   chainsaw observe --task 12 "No findings on abc123"
+   chainsaw observe "Run-wide convention: public errors preserve source context"
    ```
 
    Observations are chronological narration only; the lead need not answer them.
 4. Register each concern that requires lead judgment separately:
 
-   ```sh
-   FINDING_ID=$($SUP finding --task 12 \
-     "abc123 src/parser.rs accepts an empty segment; reject it and add a regression test")
+   ```text
+   chainsaw finding --task 12 "abc123 src/parser.rs accepts an empty segment; reject it and add a regression test"
    ```
 
-   The printed number is the finding's stable run-wide identity. Immediately preserve
+   It prints only a number on stdout: the printed number is the finding's stable run-wide identity. Immediately preserve
    that exact number with its source task and description in your durable state. Do
    not invent or renumber findings. A finding is unresolved work requiring a verdict,
    not narration; use `observe` for everything informational. Rank urgency in the
    description when later tasks could compound the defect. You may mirror activity in
    your pane for the human, but only a successful supervisor command records it.
-5. Query `$SUP resolutions` and reconcile the returned records by stable
+5. Query `chainsaw resolutions` and reconcile the returned records by stable
    `finding_id`. A `task` verdict includes the lead-created `fix_task_id`; a `dropped`
    verdict includes the lead's concrete reason. Use either outcome to calibrate future
    reviews. Never infer resolution from git, task creation, another commentator, or

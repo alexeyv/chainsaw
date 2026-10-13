@@ -273,6 +273,107 @@ mod commit_candidates {
   }
 }
 
+mod transcript_of {
+  use super::*;
+
+  const SESSION: &str = "0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e";
+  const RUN_DIR: &str = "/Users/alex/my src/run_1";
+
+  /// A projects directory that is removed when dropped.
+  struct ProjectsDir(PathBuf);
+
+  impl ProjectsDir {
+    /// Holds the transcript of `SESSION` in a folder named `folder`.
+    fn holding_session_in(folder: &str) -> Self {
+      static NEXT: AtomicU64 = AtomicU64::new(0);
+      let path = std::env::temp_dir().join(format!(
+        "chainsaw-claude-projects-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+      ));
+      let projects = Self(path);
+      projects.hold_session_in(folder);
+      projects
+    }
+
+    /// Also holds the transcript of `SESSION` in a folder named `folder`.
+    fn hold_session_in(&self, folder: &str) {
+      fs::create_dir_all(self.0.join(folder)).unwrap();
+      fs::write(self.0.join(folder).join(format!("{SESSION}.jsonl")), "").unwrap();
+    }
+
+    fn path(&self) -> &Path {
+      &self.0
+    }
+  }
+
+  impl Drop for ProjectsDir {
+    fn drop(&mut self) {
+      let _ = fs::remove_dir_all(&self.0);
+    }
+  }
+
+  #[test]
+  fn should_work() {
+    let folder = transcripts_dir_name(Path::new(RUN_DIR));
+    let projects = ProjectsDir::holding_session_in(&folder);
+
+    assert_eq!(
+      transcript_of(projects.path(), Path::new(RUN_DIR), SESSION),
+      Some(
+        projects
+          .path()
+          .join(&folder)
+          .join(format!("{SESSION}.jsonl"))
+      )
+    );
+  }
+
+  #[test]
+  fn should_find_the_session_whatever_its_folder_is_named() {
+    let projects = ProjectsDir::holding_session_in("named-by-some-other-rule");
+
+    assert_eq!(
+      transcript_of(projects.path(), Path::new(RUN_DIR), SESSION),
+      Some(
+        projects
+          .path()
+          .join("named-by-some-other-rule")
+          .join(format!("{SESSION}.jsonl"))
+      )
+    );
+  }
+
+  #[test]
+  fn should_find_nothing_for_another_session() {
+    let projects = ProjectsDir::holding_session_in("-run");
+
+    assert_eq!(
+      transcript_of(projects.path(), Path::new(RUN_DIR), "another-session"),
+      None
+    );
+  }
+
+  #[test]
+  fn should_prefer_the_run_directorys_folder_when_another_holds_the_session_too() {
+    let folder = transcripts_dir_name(Path::new(RUN_DIR));
+    // Sorts before the run directory's folder, so a scan in name order
+    // comes to it first.
+    let projects = ProjectsDir::holding_session_in("-A-resumed-elsewhere");
+    projects.hold_session_in(&folder);
+
+    assert_eq!(
+      transcript_of(projects.path(), Path::new(RUN_DIR), SESSION),
+      Some(
+        projects
+          .path()
+          .join(&folder)
+          .join(format!("{SESSION}.jsonl"))
+      )
+    );
+  }
+}
+
 mod newest_transcript_in {
   use super::*;
 
@@ -313,7 +414,9 @@ mod newest_transcript_in {
   fn should_work() {
     let dir = TranscriptsDir::holding(&["older"]);
     let older = dir.path().join("older.jsonl");
-    fs::File::open(&older)
+    fs::File::options()
+      .write(true)
+      .open(&older)
       .unwrap()
       .set_modified(a_minute_ago())
       .unwrap();
@@ -361,6 +464,19 @@ mod transcripts_dir_name {
       transcripts_dir_name(Path::new("/Users/alex/src/run")),
       "-Users-alex-src-run"
     );
+  }
+
+  #[test]
+  fn should_dash_underscores_and_spaces() {
+    assert_eq!(
+      transcripts_dir_name(Path::new("/Users/alex/my src/run_1")),
+      "-Users-alex-my-src-run-1"
+    );
+  }
+
+  #[test]
+  fn should_dash_a_windows_drive_and_backslashes() {
+    assert_eq!(transcripts_dir_name(Path::new(r"C:\x\y_z")), "C--x-y-z");
   }
 
   #[test]

@@ -33,6 +33,8 @@ def main(argv):
         ("agent", "send-keys"): agent_send_keys,
         ("agent", "wait"): agent_wait,
         ("pane", "close"): pane_close,
+        ("agent", "rename"): agent_rename,
+        ("tab", "rename"): tab_rename,
     }
     handler = handlers.get(tuple(command))
     if handler is None:
@@ -68,7 +70,27 @@ def pane_close(arguments):
     return 0
 
 
+def agent_rename(arguments):
+    target, name = arguments
+    with state() as current:
+        agents.record(current, "rename", target, name=name)
+    reply({"renamed": True})
+    return 0
+
+
+def tab_rename(arguments):
+    tab_id, label = arguments
+    with state() as current:
+        agents.record(current, "rename-tab", tab_id, name=label)
+    reply({"renamed": True})
+    return 0
+
+
 def agent_start(arguments):
+    # Herdr on Windows types the start into a shell line, so it refuses these.
+    if any(character in argument for argument in arguments for character in "\n\t\r"):
+        print("invalid_agent_argument", file=sys.stderr)
+        return 1
     name, flags = arguments[0], agents.parse_flags(arguments[1:])
     with state() as current:
         current["sequence"] += 1

@@ -3,12 +3,15 @@
 //! aborted when it will not produce an accepted commit. Also how the
 //! supervisor tells which commit, if any, a task's implementer made.
 
+use std::fs;
 use std::io::Read;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
 use super::{cmd_prompt, daemon_prompt, record_run_event, session_name, task_session};
 use crate::domain::{RunEventKind, Session, Task, TaskState};
+use crate::infra::git::UNBORN_HEAD;
 use crate::persistence::store::Store;
 use crate::persistence::{run_event, task};
 use crate::run::Run;
@@ -37,8 +40,10 @@ fn last_task_on(store: &Store, session_id: i64) -> Result<Option<Task>> {
   )
 }
 
-/// What `task new` was given on its command line; the task text comes on stdin.
+/// What `task new` was given on its command line; the task text comes from
+/// `prompt_file`, or on stdin without one.
 pub(super) struct NewTaskOptions<'a> {
+  pub(super) prompt_file: Option<&'a Path>,
   pub(super) predicted_files: Option<i64>,
   pub(super) predicted_lines: i64,
   pub(super) retry_of_task_id: Option<i64>,
@@ -48,16 +53,25 @@ pub(super) struct NewTaskOptions<'a> {
 
 pub(super) fn cmd_task_new(run: &Run, store: &Store, options: NewTaskOptions<'_>) -> Result<()> {
   let NewTaskOptions {
+    prompt_file,
     mut predicted_files,
     predicted_lines,
     retry_of_task_id,
     files,
     reason,
   } = options;
-  let mut text = String::new();
-  std::io::stdin().read_to_string(&mut text)?;
+  let text = match prompt_file {
+    Some(path) => fs::read_to_string(path)
+      .with_context(|| format!("supervisor: cannot read task text from {}", path.display()))?,
+    None => {
+      let mut text = String::new();
+      std::io::stdin().read_to_string(&mut text)?;
+      text
+    }
+  };
   if text.trim().is_empty() {
-    bail!("supervisor: task text on stdin is empty");
+    let source = prompt_file.map_or("stdin".into(), |path| path.display().to_string());
+    bail!("supervisor: task text on {source} is empty");
   }
   let active_retry = match retry_of_task_id {
     Some(retry_of_task_id) => {
@@ -215,10 +229,19 @@ pub(super) fn cmd_dispatch(
 /// The session may have read the tree before its task arrived; name what moved
 /// since it started so it rereads that first. Empty when nothing has.
 fn files_changed_since_launch(run: &Run, session: &Session) -> Result<String> {
-  let Some(head) = session.launched_head() else {
+  let Some(launched) = session.launched_head() else {
     return Ok(String::new());
   };
-  let files = run.repo().files_changed(head, "HEAD")?;
+  let repo = run.repo();
+  let files = if repo.head()? == UNBORN_HEAD {
+    // No commit to compare with, as on an orphan branch.
+    Vec::new()
+  } else if launched != UNBORN_HEAD {
+    repo.files_changed(launched, "HEAD")?
+  } else {
+    // Launched before the first commit: every committed file is new to it.
+    repo.files_at("HEAD")?
+  };
   if files.is_empty() {
     return Ok(String::new());
   }

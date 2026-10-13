@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Transaction;
 
 use chrono::{DateTime, Utc};
@@ -34,8 +34,7 @@ impl Run {
   /// settings files as `--set KEY=VALUE` pairs.
   pub fn open(run_dir: &Path, overrides: &[String]) -> Result<Self> {
     let settings = Settings::load(run_dir, overrides)?;
-    let dir = run_dir
-      .canonicalize()
+    let dir = dunce::canonicalize(run_dir)
       .with_context(|| format!("cannot resolve run directory {}", run_dir.display()))?;
     let state_dir = state_dir_for(&dir)?;
     fs::create_dir_all(&state_dir)
@@ -171,42 +170,56 @@ impl Run {
 /// The state directory of the run checked out at `canonical_run_dir`:
 /// `~/.chainsaw/runs/<run directory, munged>/`.
 fn state_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
-  let home = env::var_os("HOME").context("HOME is not set")?;
+  let home = env::home_dir().context("cannot find the home directory")?;
   Ok(
-    PathBuf::from(home)
+    home
       .join(".chainsaw")
       .join("runs")
       .join(state_dir_name(canonical_run_dir)),
   )
 }
 
-/// One flat name per run directory: every `/` and `.` becomes `-`, so
-/// `/Users/alex/src/ui.wt/run` is `-Users-alex-src-ui-wt-run` and `/x/.bare`
-/// is `-x--bare`. Two run directories that differ only in a dot against a
-/// dash share a name; a run is a clean-slate checkout, so none do in practice.
+/// One flat name per run directory: every `/` and `.` becomes `-`, and on
+/// Windows every `\` and `:` too, so `/Users/alex/src/ui.wt/run` is
+/// `-Users-alex-src-ui-wt-run`, `/x/.bare` is `-x--bare` and, on Windows,
+/// `C:\x\y` is `C--x-y`. POSIX keeps `\` and `:`, which are ordinary name
+/// characters there, so its names stay what they were. Two run directories
+/// that differ only in one of those characters against a dash share a name; a
+/// run is a clean-slate checkout, so none do in practice.
 fn state_dir_name(canonical_run_dir: &Path) -> String {
-  canonical_run_dir.to_string_lossy().replace(['/', '.'], "-")
+  let dashed: &[char] = if cfg!(windows) {
+    &['/', '.', '\\', ':']
+  } else {
+    &['/', '.']
+  };
+  canonical_run_dir.to_string_lossy().replace(dashed, "-")
 }
 
 /// The runtime the supervisor was started under: Herdr inside a Herdr pane,
-/// Orca inside an Orca terminal. A Herdr pane opened from an Orca terminal
-/// sees both and is a Herdr pane. Outside both, Herdr, which then refuses to
-/// start a session. The tests put a `herdr` of their own on PATH.
+/// Orca inside an Orca terminal, except on Windows, where Orca is refused. A
+/// Herdr pane opened from an Orca terminal sees both and is a Herdr pane.
+/// Outside both, Herdr, which then refuses to start a session. The tests put a
+/// `herdr` of their own on PATH.
 fn runtime_from_environment(state_dir: &Path) -> Result<Box<dyn SessionRuntime>> {
   Ok(
     match runtime_named_by(
       env::var_os("HERDR_WORKSPACE_ID").is_some(),
       env::var("ORCA_TERMINAL_HANDLE").ok(),
-    ) {
+    )? {
       Some(terminal) => Box::new(OrcaSessionRuntime::from_environment(state_dir, terminal)?),
       None => Box::new(HerdrSessionRuntime::from_environment()),
     },
   )
 }
 
-/// The Orca terminal to drive sessions from, or None for Herdr.
-fn runtime_named_by(inside_herdr: bool, orca_terminal: Option<String>) -> Option<String> {
-  orca_terminal.filter(|_| !inside_herdr)
+/// The Orca terminal to drive sessions from, or None for Herdr. Herdr is the
+/// only runtime on Windows, so Orca is refused there.
+fn runtime_named_by(inside_herdr: bool, orca_terminal: Option<String>) -> Result<Option<String>> {
+  let orca_terminal = orca_terminal.filter(|_| !inside_herdr);
+  if cfg!(windows) && orca_terminal.is_some() {
+    bail!("supervisor: Orca is not supported on Windows; run chainsaw from a Herdr pane");
+  }
+  Ok(orca_terminal)
 }
 
 #[cfg(test)]

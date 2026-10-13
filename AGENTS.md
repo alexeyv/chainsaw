@@ -18,6 +18,9 @@ Agentic software development process, minimizing downtime between coding session
 ## Running and verifying
 
 - `--run-dir` is a parent flag and must precede the subcommand: `skills/chainsaw/bin/chainsaw --run-dir DIR <subcommand>`
+  (on Windows, with no bash: `cargo build --manifest-path skills/chainsaw/coordinator/Cargo.toml`, then
+  `skills/chainsaw/coordinator/target/debug/chainsaw --run-dir DIR <subcommand>`; a `.cmd` or `.ps1`
+  launcher would have its arguments re-parsed)
 - Build the supervisor with `cargo build` in the crate's directory.
 
 ## Quality gate
@@ -30,6 +33,19 @@ Run the complete gate from the repository root, in this order:
   cargo clippy --quiet --all-targets --all-features --locked -- -D warnings &&
   cargo test --quiet --locked)
 python3 -B -m unittest discover -s tests -q
+```
+
+On Windows, in PowerShell 7, where `python3` may be the Store stub, run the same cargo
+steps and then the Python suite from a `.venv` made once with `uv venv .venv`. The
+supervisor binary is `target\debug\chainsaw.exe`. The fakes become `.exe` files built
+from distlib's `t64.exe` launcher, which pip vendors in the base interpreter, and the
+Orca contract module is skipped:
+
+```powershell
+Push-Location skills/chainsaw/coordinator
+cargo fmt --check && cargo clippy --quiet --all-targets --all-features --locked -- -D warnings && cargo test --quiet --locked
+Pop-Location
+.venv\Scripts\python -B -m unittest discover -s tests -q
 ```
 
 How tests should be written is in `tests/AGENTS.md`.

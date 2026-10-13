@@ -4,10 +4,13 @@
 //! compacts the commentator, and notes the lead crossing its stop threshold.
 
 use std::collections::HashMap;
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use super::{LEAD_STOP_TOKENS, daemon_prompt, new_commit_for, record_run_event};
@@ -24,6 +27,140 @@ const COMMENTATOR_COMPACT_TOKENS: u64 = 150_000;
 /// A session whose transcript has not grown for this long while its runtime
 /// reports it idle is kicked.
 const STALE_SECONDS: f64 = 600.0;
+/// Where a detached daemon's stderr goes, in the state directory.
+const LOG_FILE_NAME: &str = "chainsaw-daemon.log";
+/// How long `daemon --detach` waits for the daemon to register the lead and
+/// read every transcript once.
+const DETACH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Starts this same command again without `--detach`, as a process of its own
+/// that outlives the terminal it was started from, and returns once that
+/// daemon has registered the lead and read every transcript once.
+pub(super) fn detach(run: &Run, store: &Store) -> Result<()> {
+  let log_path = run.state_dir().join(LOG_FILE_NAME);
+  let log = OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(&log_path)
+    .with_context(|| format!("cannot open {}", log_path.display()))?;
+  let written_before = log.metadata()?.len() as usize;
+  let mut command = Command::new(env::current_exe()?);
+  command
+    .args(env::args_os().skip(1).filter(|arg| arg != "--detach"))
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(log);
+  detached(&mut command)?;
+  // A pid can come back, so only a start newer than this one counts; another
+  // daemon started alongside may have written its own start after ours.
+  let earlier = store
+    .read(|tx| run_event::recent(tx, &[RunEventKind::DaemonStart], 1))?
+    .first()
+    .map_or(0, |event| event.id());
+  let mut child = command.spawn().context("cannot start the daemon")?;
+  let started = format!("pid {}", child.id());
+  let deadline = Instant::now() + DETACH_TIMEOUT;
+  loop {
+    // Exit first, so a daemon that recorded its start and has already died
+    // since is not reported started. One that dies between the two checks
+    // still is.
+    if let Some(status) = child.try_wait()? {
+      let exited = format!("supervisor: the daemon exited ({status}) before it started");
+      // The exit is the news; what the daemon said is added only if readable.
+      let said = fs::read(&log_path)
+        .ok()
+        .map(|log| {
+          String::from_utf8_lossy(log.get(written_before..).unwrap_or_default()).into_owned()
+        })
+        .unwrap_or_default();
+      let said = said.trim_end();
+      bail!(
+        "{}",
+        if said.is_empty() {
+          exited
+        } else {
+          format!("{said}\n{exited}")
+        }
+      );
+    }
+    if store
+      .read(|tx| run_event::after(tx, RunEventKind::DaemonStart, earlier))?
+      .iter()
+      .any(|event| event.detail() == started)
+    {
+      println!("daemon started, {started}");
+      return Ok(());
+    }
+    if Instant::now() > deadline {
+      // Stopped, so that a retry cannot meet a late one still starting.
+      let stopped = match child.kill() {
+        Ok(()) => String::new(),
+        Err(error) => format!(", and could not be stopped: {error}"),
+      };
+      bail!(
+        "supervisor: the daemon ({started}) has not started after {}s{stopped}; see {}",
+        DETACH_TIMEOUT.as_secs(),
+        log_path.display()
+      );
+    }
+    thread::sleep(Duration::from_millis(50));
+  }
+}
+
+/// A console of its own with no window: closing the pane's console does not
+/// reach the daemon, and the console programs it runs (herdr, git) share the
+/// hidden one instead of each opening a window, as they would under
+/// DETACHED_PROCESS.
+///
+/// std passes every inheritable handle to the child, and this process's own
+/// standard handles are the caller's pipes, inherited. Left inheritable, the
+/// daemon would hold them open and the caller would wait for the end of this
+/// command's output for as long as the daemon runs. std has no safe way to
+/// clear the flag, hence the one unsafe call in the crate.
+// ponytail: the three standard handles only; another inheritable handle a
+// caller leaks into this process still reaches the daemon.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn detached(command: &mut Command) -> Result<()> {
+  use std::ffi::c_void;
+  use std::io;
+  use std::os::windows::io::AsRawHandle;
+  use std::os::windows::process::CommandExt;
+
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  const HANDLE_FLAG_INHERIT: u32 = 0x1;
+  #[link(name = "kernel32")]
+  unsafe extern "system" {
+    fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+  }
+
+  for handle in [
+    io::stdin().as_raw_handle(),
+    io::stdout().as_raw_handle(),
+    io::stderr().as_raw_handle(),
+  ] {
+    // A process without a console has no standard handles: nothing to clear.
+    if handle.is_null() {
+      continue;
+    }
+    // SAFETY: the call only changes a flag on a handle value this process holds.
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+      return Err(io::Error::last_os_error())
+        .context("cannot keep this terminal's handles from the daemon");
+    }
+  }
+  command.creation_flags(CREATE_NO_WINDOW);
+  Ok(())
+}
+
+/// A process group of its own, so the terminal's hangup and interrupt, which go
+/// to its foreground group, do not reach the daemon.
+#[cfg(unix)]
+fn detached(command: &mut Command) -> Result<()> {
+  use std::os::unix::process::CommandExt;
+  command.process_group(0);
+  Ok(())
+}
 
 pub(super) fn start(
   run: &Run,
@@ -34,17 +171,10 @@ pub(super) fn start(
   poll_interval: Duration,
 ) -> Result<()> {
   register_lead(run, store, lead, lead_session_id, lead_agent)?;
-  store.write(|tx| {
-    run_record::clear_stop_request(tx)?;
-    run_event::create(
-      tx,
-      RunEventKind::DaemonStart,
-      &format!("pid {}", std::process::id()),
-    )?;
-    Ok(())
-  })?;
+  store.write(run_record::clear_stop_request)?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut compacting = false;
+  let mut start_recorded = false;
   loop {
     // One write transaction per poll: read the stop request, then stamp the poll.
     let stopping = store.write(|tx| {
@@ -58,20 +188,36 @@ pub(super) fn start(
       break;
     }
     let timestamp = Utc::now();
+    let mut readings = Vec::new();
     for session in store
       .read(|tx| run.sessions(tx))?
       .into_iter()
       .filter(Session::is_live)
     {
-      let name = session.name();
       let transcript = session.transcript();
       let size = transcript.size()?;
       let context = transcript.context_size()?;
-      let grew = sizes.get(name).copied() != Some(size);
-      sizes.insert(name.to_owned(), size);
+      let grew = sizes.get(session.name()).copied() != Some(size);
+      sizes.insert(session.name().to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
+      readings.push((session, context));
+    }
+    // Recorded once every transcript has been read on the first poll, and git
+    // has run, so that `--detach` reports a start only for a daemon that can
+    // read what it observes, and before any prompt, which can take longer
+    // than `--detach` waits.
+    if !start_recorded {
+      run.repo().head()?;
+      record_run_event(
+        store,
+        RunEventKind::DaemonStart,
+        &format!("pid {}", std::process::id()),
+      )?;
+      start_recorded = true;
+    }
+    for (session, context) in readings {
+      let transcript = session.transcript();
       let quiet = session.quiet_seconds(timestamp) as f64;
-
       match session.role() {
         Role::Implementer => {
           observe_implementer(run, store, &session, transcript, quiet)?;

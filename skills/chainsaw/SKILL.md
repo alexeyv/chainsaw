@@ -11,37 +11,47 @@ the commentator's findings — not implementation detail.
 
 ## Setup
 
-1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`) or Orca
-   (`test -n "${ORCA_TERMINAL_HANDLE:-}"`); if neither, stop and say so. The supervisor
-   opens sessions through whichever one it finds itself in.
-2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no
-   session has ever started. The check itself needs the supervisor client, so it is in
-   the next step.
-3. Resolve the role path and the supervisor client from this file's own location, not
-   the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
-   and `SUPERVISOR=$(realpath <dir of this SKILL.md>/bin/chainsaw)`. The wrapper builds
-   the supervisor on first use, so no separate cargo step is needed. Define the client
-   invocation once — `--run-dir` comes before the subcommand:
-   `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
-   Now the clean-slate check: `$SUP state-dir` prints where the supervisor keeps this
-   run's state, outside the run tree. That directory must hold nothing but the database
-   the supervisor has just created, and `$SUP state` must list no sessions and no
-   tasks. If either shows an earlier run, tell the human and stop.
-   First name your pane and tab: under Herdr `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`,
-   under Orca `orca terminal rename --title lead`.
-   Then start the supervisor once, as a background process:
-   `$SUP daemon --lead lead --session-id <your-session-id> --agent <your-agent> &`.
+Every command here runs the same in bash and in PowerShell, so write each one out in
+full: no shell variables, no command substitution, no redirection, no pipes, no
+ampersand to background a process or chain commands. `<skill>` is the directory
+holding this SKILL.md, as an absolute path. Write every path with forward slashes,
+also on Windows. On Windows the supervisor prints paths with backslashes; pass them
+as printed. Put free text in straight double quotes and keep dollar signs, backticks,
+backslashes, curly quotes and further double quotes out of it. A path with a space
+must be quoted, and PowerShell then needs an ampersand and a space before a command
+that starts with it; that is the one place the two shells differ.
+
+1. Build the supervisor from this skill's own sources, not the run directory:
+   `cargo build --quiet --manifest-path <skill>/coordinator/Cargo.toml`.
+   Every supervisor command below is written `chainsaw <command>`; run it as
+   `<skill>/coordinator/target/debug/chainsaw --run-dir <run-dir> <command>`
+   (`--run-dir` comes before the subcommand; on Windows the same path finds
+   `chainsaw.exe`). Never run a bare `chainsaw`: without `--run-dir` it acts on
+   whatever directory you are in.
+2. `chainsaw name-pane lead` names your pane `lead` (and, under Herdr, your tab). It
+   fails outside Herdr and Orca; if it does, stop and say so. The supervisor opens
+   sessions through whichever one it finds itself in.
+3. Check your inputs: a spec and a clean-slate run directory — a checkout in which no
+   session has ever started. `chainsaw state-dir` prints where the supervisor keeps
+   this run's state, outside the run tree. That directory must hold nothing but the
+   database the supervisor has just created, and `chainsaw state` must list no
+   sessions and no tasks. If either shows an earlier run, tell the human and stop.
+   Then start the supervisor's daemon once:
+   `chainsaw daemon --detach --lead lead --session-id <your-session-id> --agent <your-agent>`.
+   It returns once the daemon has registered you, printing its pid, and keeps running
+   when your pane closes; if the daemon cannot start, the command fails with why.
    `--agent` is the agent you are running on: `claude`, `codex` or `cursor`. The
    session id is your own, as that agent names it; it names your transcript, which the
    daemon reads to measure your context. Under Claude Code it is the UUID that names
    your scratchpad directory (the path ends in `<uuid>/scratchpad`). Under Codex it is
    the UUID that ends the name of your rollout, the newest file under
-   `$CODEX_HOME/sessions/<year>/<month>/<day>/` (`~/.codex` when `CODEX_HOME` is
-   unset) named `rollout-<started at>-<session id>.jsonl` and started in the run
-   directory. Under Cursor it is the directory that holds your transcript,
+   `<codex home>/sessions/<year>/<month>/<day>/` (the `CODEX_HOME` environment
+   variable, or `~/.codex` when it is unset) named
+   `rollout-<started at>-<session id>.jsonl` and started in the run directory. Under
+   Cursor it is the directory that holds your transcript,
    `~/.cursor/projects/<project>/agent-transcripts/<session id>/`.
-4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
-   from yours.
+4. `chainsaw start-commentator --role-prompt <skill>/references/commentator.md` starts
+   the commentator in a pane split from yours.
 
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. Optional TOML files tune
@@ -65,7 +75,7 @@ the name the supervisor launched it under. Never headless, never a sub-agent.
 Human steering in any pane is authoritative and overrides this loop.
 
 You and the commentator must never send or receive messages to each other - only
-through supervisor CLI ($SUP).
+through the supervisor CLI (`chainsaw`).
 
 
 ## Review protocol
@@ -82,9 +92,9 @@ have different semantics:
 Start with observation cursor `0` and an empty map of unresolved findings keyed by
 finding id. Poll run-wide so no task's review is omitted:
 
-```sh
-$SUP poll --after-observation 0
-$SUP poll --after-observation "$OBSERVATION_CURSOR"
+```text
+chainsaw poll --after-observation 0
+chainsaw poll --after-observation <OBSERVATION_CURSOR>
 ```
 
 The JSON response contains `observation_cursor`, `observations`, and `findings`. After
@@ -96,18 +106,16 @@ succeeds; findings are returned again on every poll while unresolved by design.
 
 Resolve a finding you reject with a concrete verdict reason:
 
-```sh
-$SUP resolve 17 --verdict dropped --reason "Already enforced by the parser invariant"
+```text
+chainsaw resolve 17 --verdict dropped --reason "Already enforced by the parser invariant"
 ```
 
 When a finding requires work, create the fix task first, preserve the task number
 printed by `task new`, and only then resolve the stable finding number with that task:
 
-```sh
-FIX_TASK=$($SUP task new --files src/parser.rs,tests/parser.rs \
-  --predicted-lines 35 < fix-task.md)
-$SUP resolve 17 --verdict task --fix-task "$FIX_TASK" \
-  --reason "The parser accepts an invalid empty segment"
+```text
+chainsaw task new --prompt-file <state-dir>/fix-task.md --files src/parser.rs,tests/parser.rs --predicted-lines 35
+chainsaw resolve 17 --verdict task --fix-task <the printed task number> --reason "The parser accepts an invalid empty segment"
 ```
 
 If `resolve` fails, the finding is still unresolved. The database is authoritative;
@@ -124,12 +132,12 @@ Normally, a task progresses through five states.
 
 It can also become aborted from any of these states.
 
-**drafted** — the task exists and its prompt is frozen. `$SUP task new` creates a `drafted` task.
+**drafted** — the task exists and its prompt is frozen. `chainsaw task new` creates a `drafted` task.
 Nothing has been sent to an implementer yet. If you decide to reshape the task, you abort it,
 and draft another.
 
 **dispatched** — implementer session received the task prompt, but its transcript has
-not grown since. You trigger this: `$SUP dispatch <task-id> --to implementer-<n>
+not grown since. You trigger this: `chainsaw dispatch <task-id> --to implementer-<n>
 [--reason "..."]`. The supervisor records where the transcript and the git revision
 stood when the prompt was sent: the task's work is measured from there, so a commit
 that lands before the transcript shows the prompt is still the task's.
@@ -146,26 +154,26 @@ working on, and dispatch the next task as quickly as possible. Then go back to y
 
 **accepted** — terminal state, successful ending.
 Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
-Trigger the transition thus: `$SUP accept <task-id>`
+Trigger the transition thus: `chainsaw accept <task-id>`
 This checks the commit is in git and is on the branch.
 A dirty tree fails it only while no other task is dispatched or in flight: once the next
 implementer is working, the dirt is its. It does not re-derive whether the quality gate ran — the implementer's
 contract is to run it before it commits, and proving that again from the transcript
 only costs wall time.
 If you eventually decide to accept the task bypassing validations:
-`$SUP accept <task-id> --force --reason "..."`
+`chainsaw accept <task-id> --force --reason "..."`
 A reason is required with `--force`, and only meaningful with it.
 
 **aborted** — terminal state, reachable from every other state.
-`$SUP abort <task-id> --reason "..."`. Use it when the implementer
+`chainsaw abort <task-id> --reason "..."`. Use it when the implementer
 failed to deliver, and equally when a commit landed that you have reverted rather than
 kept — a landed commit does not oblige you to accept it.
 
 ### Remedying a coordinator failure
 
 The coordinator normally records commit and commentary-delivery transitions itself. If
-it misses one, remedy only that failure with `$SUP task record-commit <task-id> <sha>
---force --reason "..."` or `$SUP task record-commentary <task-id> --force --reason
+it misses one, remedy only that failure with `chainsaw task record-commit <task-id> <sha>
+--force --reason "..."` or `chainsaw task record-commentary <task-id> --force --reason
 "..."`; do not use these commands to skip evidence or lifecycle stages. The commit must
 exist in the run repository, descend from the task's base head, and belong to no other
 task. The supervisor records the reason in the run timeline. On a task already
@@ -194,13 +202,15 @@ previous commit has landed, reconciling the draft against the actual tree.
    implementer does not rediscover them.
 5. Don't state facts about the code you haven't verified. Say what the implementer
    needs to find out, not what you assume the answer is.
-6. Record it: `$SUP task new --files a.py,b.py --predicted-lines N < task.md` prints
+6. Write the brief to a file in the state directory, never in the run tree, where a
+   stray file dirties the implementer's tree. Record it:
+   `chainsaw task new --prompt-file <state-dir>/task.md --files a.py,b.py --predicted-lines N` prints
    the task id; name the predicted files (the count is derived), so the supervisor can
    judge overlap against the next session's reading list — `--predicted-files N` is the
    fallback
    when the set is genuinely unknown. Never edit a brief in place after dispatch. A
-   dispatched or in-flight task may instead be superseded with `$SUP task new --retry-of
-   <id> --reason "..." ... < task.md`, which aborts and interrupts the old task before
+   dispatched or in-flight task may instead be superseded with `chainsaw task new --retry-of
+   <id> --reason "..." --prompt-file <state-dir>/task.md ...`, which aborts and interrupts the old task before
    creating its replacement.
 
 Anything the spec does not settle is a question for the human, never invented.
@@ -213,7 +223,7 @@ the task, and the reading turn is the half you control. Two budgets, both measur
 before you send anything:
 
 - **The reading list: under 100 kB of file content, aiming at 60–70 kB.** Measure it —
-  `wc -c` the whole files and estimate the ranges; do not eyeball a file count. 100 kB is
+  take the byte size of the whole files and estimate the ranges; do not eyeball a file count. 100 kB is
   where a session is certain to compact mid-task and lose the reading you just paid for;
   60–70 kB leaves the median task room to finish intact.
 - **The task brief: under 2000 tokens.** This is a budget on your summarising, not a
@@ -255,16 +265,16 @@ Neither is do-or-die: both are signals that the task may be too big for one sess
 
 Starting the next implementer is the first priority; a long gap between commits is a
 defect. Measure implementer-busy against wall clock; time waiting on the human is
-measured separately (`$SUP state` shows both).
+measured separately (`chainsaw state` shows both).
 
 1. Start the next implementer and pre-populate it while the current one works. Every
    task gets a fresh session, started on its reading turn:
-   `$SUP launch implementer-<n+1> "<reading turn>"` starts one in its own tab and
+   `chainsaw launch implementer-<n+1> "<reading turn>"` starts one in its own tab and
    returns once the session has begun writing its transcript. The supervisor refuses
    to dispatch a second task to a session that has already taken one. The reading
    turn is:
 
-   ```text
+   ```text prompt
    You are about to be given one task in this repository. This turn is preparation
    only: read, then stop. 1. Read these files entirely: [...]. 2. Read these line
    ranges of these large files: [file, range]. 3. This list is a starting frame,
@@ -283,19 +293,19 @@ measured separately (`$SUP state` shows both).
    will rewrite is read after its commit; large files by line range.
 2. The moment the previous task reaches `committed_unverified`, get the next one
    moving — do not wait for its session to fall idle and do not wait to judge its
-   commit. Dispatch first, then come back and judge the previous task: `$SUP accept
-   <task-id>` runs the checks, and `$SUP accept <task-id> --force --reason "..."`
+   commit. Dispatch first, then come back and judge the previous task: `chainsaw accept
+   <task-id>` runs the checks, and `chainsaw accept <task-id> --force --reason "..."`
    bypasses them.
    Neither one gates this dispatch, and nothing forces you to run either; the task's own
    state name is what tells you it is still outstanding. Dispatch with
-   `$SUP dispatch <task-id> --to implementer-<n>`. It sends the task verbatim and then
+   `chainsaw dispatch <task-id> --to implementer-<n>`. It sends the task verbatim and then
    the implementer's contract, prefixed by "these files changed since your session
    started: [...]" when the tree moved between that session's launch and this dispatch.
    That preamble is unbudgeted and lands on top of the reading turn, so leave room for
    it: the files the in-flight implementer is predicted to change are the files it will
    name. The implementer's contract:
 
-   ```text
+   ```text prompt
    Verify the tree is clean; stop if dirty. Implement only this task. Run the task's
    checks as you work; run the project's quality gate once, immediately before
    committing. Commit without attribution trailers, leave the tree clean, and finish
@@ -312,21 +322,21 @@ measured separately (`$SUP state` shows both).
    derivations that do not depend on the in-flight commit, batch questions for the
    human, draft and pre-populate the next task.
 4. After starting the next implementer, append the calibration record for the previous
-   task: `$SUP calibrate <task-id>` fills actual files/lines from git and wall
+   task: `chainsaw calibrate <task-id>` fills actual files/lines from git and wall
    time and context from the transcript against your prediction. Its context
    figure is that task's own cost — the session's peak during the task minus the
    baseline it carried at dispatch (shown alongside), so the record describes the task
    rather than the session's total. If predictions are far out, size smaller from here
    on.
 5. Progress signals come from the supervisor, never self-reports:
-   `$SUP state` shows each task's state and each session's measured context;
-   `$SUP state --task <task-id>` prints exactly `<task-id> <state>` and nothing else,
+   `chainsaw state` shows each task's state and each session's measured context;
+   `chainsaw state --task <task-id>` prints exactly `<task-id> <state>` and nothing else,
    which is the line to watch for `<task-id> committed_unverified`. Every command you
    run ends with `WARNING:` lines on stderr when a measured fact needs you: your
    context near or past 250k, a commit unjudged for five minutes, no state read for
    two minutes while a task is out, no daemon polling. Act on them when they appear;
    nothing is pushed at you.
-6. `$SUP poll --after-observation "$OBSERVATION_CURSOR"` returns the commentator's new
+6. `chainsaw poll --after-observation <OBSERVATION_CURSOR>` returns the commentator's new
    chronological context and every still-unresolved finding. It narrates on its own
    clock; the supervisor alone wakes it with the commit sha and task id, which is a
    trigger to review from git and the implementer transcript, not a finding or your opinion.
@@ -337,9 +347,9 @@ measured separately (`$SUP state` shows both).
    commit under the finding and the files it touched, so the fix session sees the shape
    the finding is about before it reads the finding.
 7. When an implementer reports failure (gate never green, cannot finish):
-   `$SUP abort <task-id> --reason "<its reason>"` records it and checks the
+   `chainsaw abort <task-id> --reason "<its reason>"` records it and checks the
    tree is clean. Read the reason, adjust the task, and retry with a fresh implementer
-   (`$SUP task new --retry-of <task-id>`). The supervisor counts aborts across the
+   (`chainsaw task new --retry-of <task-id> --reason "..." --prompt-file <state-dir>/task.md --files ... --predicted-lines N`). The supervisor counts aborts across the
    retries; at three it tells you to escalate to the human.
 8. A human-flagged trivial edit (trigger word `trivial:`) you do yourself — edit,
    quality gate, commit — only when no implementer is in flight on that file.
@@ -360,4 +370,4 @@ When the user says to stop OR a supervisor command's output warns that your cont
    exact numbers, done/next derived from git not remembered, the exact observation
    cursor, every unresolved finding keyed by its stable number in full, resolved
    findings and their reasons, open questions, traps hit.
-4. `$SUP stop`.
+4. `chainsaw stop`.

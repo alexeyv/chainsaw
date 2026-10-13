@@ -427,19 +427,21 @@ mod newest_rollout_in {
     let dir = SessionsDir::empty();
     let older = dir.write(
       "2026/09/26/rollout-2026-09-26T00-07-26-older.jsonl",
-      &session_meta_line("older", "/tmp/run"),
+      &session_meta_line("older", "/nonexistent/run"),
     );
-    fs::File::open(&older)
+    fs::File::options()
+      .write(true)
+      .open(&older)
       .unwrap()
       .set_modified(a_minute_ago())
       .unwrap();
     dir.write(
       "2026/09/26/rollout-2026-09-26T00-08-26-newer.jsonl",
-      &session_meta_line("newer", "/tmp/run"),
+      &session_meta_line("newer", "/nonexistent/run"),
     );
 
     assert_eq!(
-      newest_rollout_in(dir.path(), Path::new("/tmp/run"), a_minute_ago(), 4),
+      newest_rollout_in(dir.path(), Path::new("/nonexistent/run"), a_minute_ago(), 4),
       Some("newer".to_owned())
     );
   }
@@ -449,19 +451,21 @@ mod newest_rollout_in {
     let dir = SessionsDir::empty();
     let ours = dir.write(
       "2026/09/26/rollout-2026-09-26T00-07-26-ours.jsonl",
-      &session_meta_line("ours", "/tmp/run"),
+      &session_meta_line("ours", "/nonexistent/run"),
     );
-    fs::File::open(&ours)
+    fs::File::options()
+      .write(true)
+      .open(&ours)
       .unwrap()
       .set_modified(SystemTime::now() - Duration::from_secs(30))
       .unwrap();
     dir.write(
       "2026/09/26/rollout-2026-09-26T00-08-26-theirs.jsonl",
-      &session_meta_line("theirs", "/tmp/elsewhere"),
+      &session_meta_line("theirs", "/nonexistent/elsewhere"),
     );
 
     assert_eq!(
-      newest_rollout_in(dir.path(), Path::new("/tmp/run"), a_minute_ago(), 4),
+      newest_rollout_in(dir.path(), Path::new("/nonexistent/run"), a_minute_ago(), 4),
       Some("ours".to_owned())
     );
   }
@@ -471,13 +475,13 @@ mod newest_rollout_in {
     let dir = SessionsDir::empty();
     dir.write(
       "2026/09/26/rollout-2026-09-26T00-07-26-stale.jsonl",
-      &session_meta_line("stale", "/tmp/run"),
+      &session_meta_line("stale", "/nonexistent/run"),
     );
 
     assert_eq!(
       newest_rollout_in(
         dir.path(),
-        Path::new("/tmp/run"),
+        Path::new("/nonexistent/run"),
         SystemTime::now() + Duration::from_secs(60),
         4
       ),
@@ -490,7 +494,7 @@ mod newest_rollout_in {
     assert_eq!(
       newest_rollout_in(
         Path::new("/nonexistent/sessions"),
-        Path::new("/tmp/run"),
+        Path::new("/nonexistent/run"),
         a_minute_ago(),
         4
       ),
@@ -509,17 +513,18 @@ mod session_of_rollout_in {
       "rollout.jsonl",
       &format!(
         "{}\n{}\n",
-        session_meta_line(SESSION, "/tmp/run"),
+        session_meta_line(SESSION, "/nonexistent/run"),
         user_line("hi")
       ),
     );
 
     assert_eq!(
-      session_of_rollout_in(&rollout, Path::new("/tmp/run")),
+      session_of_rollout_in(&rollout, Path::new("/nonexistent/run")),
       Some(SESSION.to_owned())
     );
   }
 
+  #[cfg(unix)]
   #[test]
   fn should_resolve_the_recorded_directory_before_comparing() {
     let dir = SessionsDir::empty();
@@ -542,10 +547,13 @@ mod session_of_rollout_in {
     let dir = SessionsDir::empty();
     let rollout = dir.write(
       "rollout.jsonl",
-      &session_meta_line(SESSION, "/tmp/elsewhere"),
+      &session_meta_line(SESSION, "/nonexistent/elsewhere"),
     );
 
-    assert_eq!(session_of_rollout_in(&rollout, Path::new("/tmp/run")), None);
+    assert_eq!(
+      session_of_rollout_in(&rollout, Path::new("/nonexistent/run")),
+      None
+    );
   }
 
   #[test]
@@ -553,7 +561,10 @@ mod session_of_rollout_in {
     let dir = SessionsDir::empty();
     let rollout = dir.write("rollout.jsonl", &user_line("hi"));
 
-    assert_eq!(session_of_rollout_in(&rollout, Path::new("/tmp/run")), None);
+    assert_eq!(
+      session_of_rollout_in(&rollout, Path::new("/nonexistent/run")),
+      None
+    );
   }
 
   #[test]
@@ -561,7 +572,10 @@ mod session_of_rollout_in {
     let dir = SessionsDir::holding("rollout.jsonl");
 
     assert_eq!(
-      session_of_rollout_in(&dir.path().join("rollout.jsonl"), Path::new("/tmp/run")),
+      session_of_rollout_in(
+        &dir.path().join("rollout.jsonl"),
+        Path::new("/nonexistent/run")
+      ),
       None
     );
   }

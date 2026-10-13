@@ -59,6 +59,7 @@ fn is_lead_facing(command: &Command) -> bool {
     Command::Daemon { .. }
       | Command::WatchTranscripts { .. }
       | Command::StateDir
+      | Command::NamePane { .. }
       | Command::Context { .. }
       | Command::Stop
   )
@@ -144,11 +145,13 @@ fn duration_text(seconds: i64) -> String {
 
 fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
   match command {
+    Command::Daemon { detach: true, .. } => daemon::detach(run, store),
     Command::Daemon {
       lead,
       session_id,
       agent,
       poll_interval_ms,
+      detach: false,
     } => daemon::start(
       run,
       store,
@@ -157,6 +160,11 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
       agent,
       Duration::from_millis(poll_interval_ms),
     ),
+    Command::NamePane { name } => {
+      run.runtime().name_own_pane(&name)?;
+      println!("named this pane {name}");
+      Ok(())
+    }
     Command::StartCommentator { role_prompt } => cmd_start_commentator(run, store, &role_prompt),
     Command::Launch { name, prompt } => {
       cmd_launch(run, store, &name, SessionKind::Implementer, &prompt)
@@ -169,6 +177,7 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
     } => cmd_prompt(run, store, &name, &text, wait, timeout),
     Command::Task { action } => match action {
       TaskCommand::New {
+        prompt_file,
         files,
         predicted_files,
         predicted_lines,
@@ -178,6 +187,7 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
         run,
         store,
         NewTaskOptions {
+          prompt_file: prompt_file.as_deref(),
           predicted_files,
           predicted_lines,
           retry_of_task_id,

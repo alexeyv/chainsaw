@@ -37,6 +37,7 @@ def main(argv):
         ("terminal", "wait"): terminal_wait,
         ("terminal", "send"): terminal_send,
         ("terminal", "close"): terminal_close,
+        ("terminal", "rename"): terminal_rename,
     }
     handler = handlers.get(tuple(argv[:2]))
     if handler is None:
@@ -73,6 +74,13 @@ def terminal_close(flags):
         del current["agents"][handle]
         agents.record(current, "close", handle)
     reply({"close": {"closed": True}})
+    return 0
+
+
+def terminal_rename(flags):
+    with state() as current:
+        agents.record(current, "rename", flags["--terminal"], title=flags["--title"])
+    reply({"rename": {"handle": flags["--terminal"]}})
     return 0
 
 

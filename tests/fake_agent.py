@@ -11,13 +11,18 @@ busy for a moment after each prompt, as a real agent is. While the state's
 its first reply; what it would have written waits in `held`.
 """
 
-import fcntl
+import errno
 import json
 import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 #: How long an agent is mid-turn after a prompt lands. Long enough for the
 #: supervisor's first probe to find it busy, as it would find a real one.
@@ -101,7 +106,7 @@ def drop_turn_ended(agent):
         return
     lines = path.read_text().splitlines(keepends=True)
     if lines and json.loads(lines[-1]).get("type") == "turn_ended":
-        path.write_text("".join(lines[:-1]))
+        path.write_text("".join(lines[:-1]), newline="")
 
 
 def flush_held(current, agent):
@@ -161,7 +166,7 @@ def transcript_for(kind, run_dir, session_id, home=None):
     `run_dir`, under `home` (the fake's own when unnamed)."""
     home = Path(home or os.environ["HOME"])
     if kind == "claude":
-        project = os.path.realpath(run_dir).replace("/", "-").replace(".", "-")
+        project = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(run_dir))
         return home / ".claude" / "projects" / project / f"{session_id}.jsonl"
     if kind == "codex":
         now = datetime.now(timezone.utc)
@@ -229,7 +234,7 @@ def append_entry(agent, entry):
     transcript."""
     path = Path(agent["transcript"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as transcript:
+    with path.open("a", newline="") as transcript:
         for item in flattened(entry):
             transcript.write(json.dumps(item, separators=(",", ":")) + "\n")
 
@@ -278,16 +283,55 @@ class state:
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = self.path.with_suffix(".lock").open("a+")
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        lock(self.lock)
         self.current = (json.loads(self.path.read_text()) if self.path.exists()
                         else json.loads(json.dumps(self.empty)))
         return self.current
 
     def __exit__(self, exception_type, exception, traceback):
-        if exception is None:
-            temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(self.current, sort_keys=True))
-            temporary.replace(self.path)
-        fcntl.flock(self.lock, fcntl.LOCK_UN)
-        self.lock.close()
+        try:
+            if exception is None:
+                write_atomically(self.path, json.dumps(self.current, sort_keys=True))
+        finally:
+            unlock(self.lock)
+            self.lock.close()
         return False
+
+
+def lock(stream):
+    """Hold an exclusive lock on the open lock file `stream`, waiting as long as
+    it takes. Windows locks a byte range, not the file, so always the first byte."""
+    if os.name != "nt":
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        return
+    stream.seek(0)
+    while True:
+        try:
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError as error:
+            # LK_LOCK gives up after about ten seconds; keep waiting.
+            if error.errno != errno.EDEADLOCK:
+                raise
+
+
+def unlock(stream):
+    if os.name != "nt":
+        fcntl.flock(stream, fcntl.LOCK_UN)
+        return
+    stream.seek(0)
+    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def write_atomically(path, text):
+    """Replace `path` with `text` in one step. Windows refuses to replace a file
+    another process has open, as a test reading the state may, so retry briefly."""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(text)
+    for _ in range(100):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            time.sleep(0.01)
+    temporary.replace(path)

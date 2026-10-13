@@ -35,7 +35,14 @@ pub enum Command {
     agent: AgentKind,
     #[arg(long, default_value_t = 5_000, hide = true)]
     poll_interval_ms: u64,
+    /// Run in a process of its own, cut off from this terminal, and return once
+    /// it has registered the lead.
+    #[arg(long)]
+    detach: bool,
   },
+  /// Name the pane (under Herdr also the tab) this command runs in; fails
+  /// outside Herdr and Orca.
+  NamePane { name: String },
   /// Start the run's commentator session.
   StartCommentator {
     #[arg(long)]
@@ -146,8 +153,11 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
-  /// Create a drafted task from standard input.
+  /// Create a drafted task from a file, or from standard input.
   New {
+    /// The file holding the task text; standard input when omitted.
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
     #[arg(long)]
     files: Option<String>,
     #[arg(long)]

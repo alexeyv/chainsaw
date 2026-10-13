@@ -50,4 +50,7 @@ pub trait SessionRuntime {
   /// Closes the pane of a session whose agent never began and forgets the
   /// session, so the next start of that name does not pile up on it.
   fn abandon(&self, session_id: &str, pane_id: &str) -> Result<()>;
+  /// Names the pane (under Herdr also the tab) the supervisor runs in, so the
+  /// human can tell the lead's apart; refuses outside the runtime.
+  fn name_own_pane(&self, name: &str) -> Result<()>;
 }

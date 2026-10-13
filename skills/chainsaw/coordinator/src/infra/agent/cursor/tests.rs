@@ -373,7 +373,9 @@ mod newest_session_in {
   }
 
   fn age(path: &Path) {
-    fs::File::open(path)
+    fs::File::options()
+      .write(true)
+      .open(path)
       .unwrap()
       .set_modified(a_minute_ago() - Duration::from_secs(60))
       .unwrap();

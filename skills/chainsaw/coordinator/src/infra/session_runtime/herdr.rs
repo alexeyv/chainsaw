@@ -178,7 +178,23 @@ impl SessionRuntime for HerdrSessionRuntime {
   }
 
   fn abandon(&self, _session_id: &str, pane_id: &str) -> Result<()> {
-    let output = self.cli.run(&["pane", "close", pane_id])?;
+    self.order(&["pane", "close", pane_id])
+  }
+
+  fn name_own_pane(&self, name: &str) -> Result<()> {
+    let pane_id = env::var("HERDR_PANE_ID")
+      .ok()
+      .filter(|pane_id| !pane_id.is_empty() && self.workspace.is_some() && !self.tab_id.is_empty())
+      .ok_or_else(|| anyhow!("supervisor: must run inside a Herdr pane"))?;
+    self.order(&["agent", "rename", &pane_id, name])?;
+    self.order(&["tab", "rename", &self.tab_id, name])
+  }
+}
+
+impl HerdrSessionRuntime {
+  /// Runs a command whose reply carries nothing the supervisor needs.
+  fn order(&self, args: &[&str]) -> Result<()> {
+    let output = self.cli.run(args)?;
     if !output.status.success() {
       bail!(
         "{} failed: {}",
@@ -201,5 +217,6 @@ fn status_named(status: &str) -> SessionStatus {
   }
 }
 
-#[cfg(test)]
+// The tests drive shell-script fakes.
+#[cfg(all(test, unix))]
 mod tests;

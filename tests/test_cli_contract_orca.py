@@ -9,9 +9,13 @@ such as learning a session id it was never told, is proven at the end.
 """
 
 import json
-import sqlite3
+import os
+import unittest
 
-import tests.test_cli_contract as herdr
+if os.name == "nt":
+    raise unittest.SkipTest("the supervisor refuses Orca on Windows")
+
+import tests.test_cli_contract as herdr  # noqa: E402
 from tests.support import SupervisorContractCase
 
 #: How long the supervisor gives a terminal to prove itself idle in one probe.
@@ -153,7 +157,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
     runtime = "orca"
 
     def external_session_id(self, name):
-        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+        with self.supervisor_db() as database:
             (external_id,) = database.execute(
                 "select external_session_id from sessions where name=? and stopped_at is null",
                 (name,),
@@ -207,6 +211,16 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         self.assertEqual(external_id, "session-worker-1")
         self.assertEqual(self.session_state("worker")["session_id"], external_id)
 
+    def test_name_pane_retitles_the_leads_own_terminal(self):
+        result = self.assert_success(self.cli("name-pane", "lead"))
+
+        self.assertEqual(result.stdout, "named this pane lead\n")
+        self.assertEqual(
+            [(operation["operation"], operation["session_id"], operation["title"])
+             for operation in self.runtime_operations()],
+            [("rename", "term-lead", "lead")],
+        )
+
     def test_the_commentator_splits_the_leads_own_terminal(self):
         commentator = self.start_commentator()
 
@@ -223,7 +237,7 @@ class OrcaTerminalContractTests(SupervisorContractCase):
         start = self.operations_on(name)[0]
         self.assertEqual(start["operation"], "start")
         self.assertNotIn("\n", start["command"])
-        self.assertEqual(self.launch_prompt(name).count("\n"), 2)
+        self.assertNotIn("\n", self.launch_prompt(name))
 
     def test_the_registry_beside_the_database_maps_names_to_terminals(self):
         self.launch("first")
