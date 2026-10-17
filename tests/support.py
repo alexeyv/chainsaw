@@ -218,15 +218,6 @@ class SupervisorContractCase(unittest.TestCase):
         self.git("commit", "-q", "-m", message)
         return self.head()
 
-    def commit_with_trailer(self):
-        (self.run_dir / "trailer.txt").write_text("trailer\n")
-        self.git("add", "trailer.txt")
-        self.git(
-            "commit", "-q", "-m", "feat: attributed fixture", "-m",
-            "Co-Authored-By: Fixture <fixture@example.invalid>",
-        )
-        return self.head()
-
     def new_task(self, text="Implement the fixture task.", files="work.txt", lines=10):
         args = ["task", "new", "--predicted-lines", str(lines)]
         if isinstance(files, int):
@@ -422,6 +413,19 @@ class SupervisorContractCase(unittest.TestCase):
         """Where the session's agent writes; the fake runtime settled it at launch."""
         return Path(self.session_state(name)["transcript"])
 
+    def stop_session(self, name):
+        """Mark the session stopped, as relaunching its name or `stop` does."""
+        self.write_supervisor_db(
+            "update sessions set stopped_at=started_at where name=? and stopped_at is null", name
+        )
+
+    def stop_session_and_remove_transcript(self, name):
+        """Stop the session, then delete its transcript, as Claude Code's
+        cleanup of old transcripts does long after."""
+        transcript = self.session_transcript(name)
+        self.stop_session(name)
+        transcript.unlink()
+
     def append_entry(self, name, entry):
         path = self.session_transcript(name)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,12 +500,12 @@ class SupervisorContractCase(unittest.TestCase):
         self.append_bash(name, "git commit -m 'fixture commit'", ok=True)
         self.append_text(name, f"[chainsaw {sha[:10]}]")
 
-    def prepare_committed_task(self, *, trailer=False):
+    def prepare_committed_task(self):
         task_id = self.new_task()
         self.launch()
         self.assert_success(self.dispatch(task_id))
         self.observe_in_flight(task_id)
-        sha = self.commit_with_trailer() if trailer else self.commit_file()
+        sha = self.commit_file()
         self.record_commit("worker", sha)
         return task_id, sha
 

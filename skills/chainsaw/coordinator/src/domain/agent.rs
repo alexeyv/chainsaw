@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 
-use super::{SessionKind, SessionRuntime, StartSession, StartedSession, Transcript};
+use super::{AgentKind, SessionKind, SessionRuntime, StartSession, StartedSession, Transcript};
 
 /// Where a sent prompt is in the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +42,10 @@ pub struct Launched {
 }
 
 pub trait Agent {
+  /// The kind this agent implements; a session of that kind is the only one
+  /// it serves.
+  fn kind(&self) -> AgentKind;
+
   /// Starts a session through `runtime` with `prompt` as its first prompt,
   /// and returns once the agent has begun writing its transcript, or fails
   /// when it has not within a minute.
@@ -80,9 +84,9 @@ pub trait Agent {
   /// The transcript of a session started in `run_dir`, or None until it exists.
   fn transcript(&self, canonical_run_dir: &Path, external_session_id: &str) -> Option<PathBuf>;
 
-  /// The session's transcript at `path`, read in this agent's format, or
-  /// None when there is no file there.
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>>;
+  /// The transcript at `path`, read in this agent's format, whether or not
+  /// the file is there.
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript>;
 
   /// When this agent writes a prompt it was sent to its transcript, and so
   /// what an unseen prompt means.

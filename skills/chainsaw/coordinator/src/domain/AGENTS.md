@@ -1,31 +1,33 @@
 # Domain types
 
-**`Run`** (`run.rs`): the run as a whole. Always only one, backed by single row database table. Basically, a persistent store for some state that doesn't have any better home. 
+A map, not a spec: per entity, what it holds, what it belongs to, what it is for. No implementation details.
+
+**`Run`** (`run.rs`): the run as a whole. Always only one. A persistent store for state that has no better home.
 
 **`RunEvent`** (`run_event.rs`): supervisor's operational journal (launched, kicked, compacted, stopped…).
 
-**`Session`** (`session.rs`): one LLM session.  lead, implementer or commentator. Records the agent it was launched with and keeps it for life. Has zero-to-many Tasks. Borrows the run's `SessionRuntime` and drives itself through it: status, prompt, interrupt, wait. Borrows the `Agent` of its kind from the run too, and opens its `Transcript` through it.
+**`Session`** (`session.rs`): one LLM session of the run: lead, implementer or commentator. Has zero-to-many Tasks. Holds the agent kind it was launched with and its `Transcript`. Uses the run's `SessionRuntime` and `Agent`.
 
-**`CommentatorWatch`** (`commentator_watch.rs`): the supervisor's policy for one commentator session's context, as a state machine fed one poll's reading at a time. Says when to bring the commentator back after it compacted itself, when to ask it to stop, interrupt it, compact it, or replace it, and when to hold new commits back from it. In memory only; a new session gets a new watch.
+**`CommentatorWatch`** (`commentator_watch.rs`): the supervisor's policy for one commentator's context, a state machine fed one poll's reading at a time: recover it after a compaction, ask it to stop, interrupt, compact or replace it, hold commits back from it. In memory only.
 
-**`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: how it starts a session on its first prompt, its launch flags, and where and how its transcript is read. A session exists only once its agent has begun its transcript. Implemented in `infra`, one per `AgentKind`; the run hands every `Session` the one its kind names.
+**`Agent`** (`agent.rs`): the interface to the coding CLI a session runs: starting a session and reading its transcript. One per `AgentKind`.
 
-**`Transcript`** (`transcript.rs`): the interface to a session's transcript as its agent reads it: its size, the context the session held, whether a prompt was taken, what the agent said and which commits it may have made. Only a transcript on disk can be opened, so a session whose transcript vanished cannot be read. Implemented in `infra`, over each agent's format.
+**`Transcript`** (`transcript.rs`): the interface to what a session's transcript tells the supervisor: size, context, prompts taken, what the agent said, commits made. Owned by a `Session`.
 
-**`SessionRuntime`** (`session_runtime.rs`): the interface to the terminal multiplexer a run's sessions live in: it starts a session and drives it by name. Implemented in `infra`; the run owns one and hands every `Session` a reference.
+**`SessionRuntime`** (`session_runtime.rs`): the interface to the terminal multiplexer a run's sessions live in. One per run.
 
-**`Task`** (`task.rs`): One unit of work. Typically belongs to an implementer Session, sometimes more than one Task belong to the same implementer Session. May be a retry of another Task. Owns ordered list of TaskEvents. The last TaskEvent in the list determines Task's state. Also owns zero-to-many Findings, Observations, and Calibrations.  
-Task is a state machine. Drafted → Dispatched → InFlight → CommittedUnverified → Accepted | Aborted. Transitions may skip forward; Accepted and Aborted are terminal.
+**`Task`** (`task.rs`): One unit of work. Typically belongs to an implementer Session, sometimes more than one Task belong to the same implementer Session. May be a retry of another Task. Owns ordered list of TaskEvents. Also owns zero-to-many Findings, Observations, and Calibrations.  
+Task is a state machine: Drafted → Dispatched → InFlight → CommittedUnverified → Accepted | Aborted.
 
 **`TaskEvent`** (`task_event.rs`): Record of a Task state transition. Owned by `Task`.
 
-**`Finding`** (`finding.rs`): A concern owned by a Task. Created by a commentator looking at Task's implementation in code; resolved by lead that adds a verdict and - if the verdict is `Task` - creates a fix Task for it.
+**`Finding`** (`finding.rs`): A concern a commentator raised about a Task's implementation. Owned by that Task; resolved by the lead with a verdict.
 
 **`Observation`** (`observation.rs`): Timestamped informational text requiring
 no response. Optionally references a `Task`.
 
 **`Prompt`** (`prompt.rs`): One prompt the supervisor sent to a Session: its text, when it was sent, how many times it went out, and when the session's transcript first showed it.
 
-**`HumanWait`** (`human_wait.rs`): One interval the run spent waiting on the human. At most one is open at a time. Knows how long it lasted, or has lasted so far while open.
+**`HumanWait`** (`human_wait.rs`): One interval the run spent waiting on the human. Knows how long it lasted, or has lasted so far while open.
 
 **`Calibration`** (`calibration.rs`): Measurement record linked to a `Task`. Predicted / actual file and line counts, starting / ending implementer context sizes etc.

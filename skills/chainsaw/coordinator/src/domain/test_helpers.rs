@@ -69,15 +69,44 @@ pub fn runtime() -> &'static dyn SessionRuntime {
   &IDLE_RUNTIME
 }
 
-/// An agent that has written nothing but, when it names one, the transcript
-/// at `transcript` once that file exists: no context, no prompt seen.
+/// An agent of `kind` that has written nothing but, when it names one, the
+/// transcript at `transcript` once that file exists: no context, no prompt
+/// seen. Its transcripts read without a file, unless they have `vanished`.
 pub struct FakeAgent {
+  pub kind: AgentKind,
   pub transcript: Option<PathBuf>,
+  pub vanished: bool,
 }
 
-static SILENT_AGENT: FakeAgent = FakeAgent { transcript: None };
+static SILENT_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Claude,
+  transcript: None,
+  vanished: false,
+};
+
+static SILENT_CODEX_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Codex,
+  transcript: None,
+  vanished: false,
+};
+
+static SILENT_CURSOR_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Cursor,
+  transcript: None,
+  vanished: false,
+};
+
+static VANISHED_AGENT: FakeAgent = FakeAgent {
+  kind: AgentKind::Claude,
+  transcript: None,
+  vanished: true,
+};
 
 impl Agent for FakeAgent {
+  fn kind(&self) -> AgentKind {
+    self.kind
+  }
+
   fn start(
     &self,
     _runtime: &dyn SessionRuntime,
@@ -115,19 +144,19 @@ impl Agent for FakeAgent {
     self.transcript.clone().filter(|path| path.is_file())
   }
 
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
-    path.is_file().then(|| {
-      Box::new(SilentTranscript {
-        path: path.to_owned(),
-      }) as Box<dyn Transcript>
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
+    Box::new(SilentTranscript {
+      path: path.to_owned(),
+      vanished: self.vanished,
     })
   }
 }
 
-/// A transcript the fake agent opens: nothing in it, no context, no prompt
-/// seen.
+/// A transcript the fake agent hands out: nothing in it, no context, no
+/// prompt seen, or gone altogether.
 struct SilentTranscript {
   path: PathBuf,
+  vanished: bool,
 }
 
 impl Transcript for SilentTranscript {
@@ -135,38 +164,59 @@ impl Transcript for SilentTranscript {
     &self.path
   }
 
-  fn size(&self) -> u64 {
-    0
+  fn check_readable(&self) -> Result<()> {
+    if self.vanished {
+      bail!("no such file");
+    }
+    Ok(())
   }
 
-  fn context_size(&self) -> ContextSize {
-    ContextSize::UNKNOWN
+  fn size(&self) -> Result<u64> {
+    Ok(0)
   }
 
-  fn context_before(&self, _offset: u64) -> ContextSize {
-    ContextSize::UNKNOWN
+  fn context_size(&self) -> Result<ContextSize> {
+    Ok(ContextSize::UNKNOWN)
   }
 
-  fn context_peak(&self, _start: u64, _end: Option<u64>) -> ContextSize {
-    ContextSize::UNKNOWN
+  fn context_before(&self, _offset: u64) -> Result<ContextSize> {
+    Ok(ContextSize::UNKNOWN)
   }
 
-  fn prompt_state(&self, _offset: u64, _prompt: &str) -> PromptState {
-    PromptState::Unseen
+  fn context_peak(&self, _from_offset: u64, _to_offset: Option<u64>) -> Result<ContextSize> {
+    Ok(ContextSize::UNKNOWN)
   }
 
-  fn latest_assistant_text(&self) -> Option<String> {
-    None
+  fn prompt_state(&self, _offset: u64, _prompt: &str) -> Result<PromptState> {
+    Ok(PromptState::Unseen)
   }
 
-  fn commit_candidates(&self, _offset: u64, _head: &str) -> Vec<String> {
-    Vec::new()
+  fn latest_assistant_text(&self) -> Result<Option<String>> {
+    Ok(None)
+  }
+
+  fn commit_candidates(&self, _offset: u64, _head: &str) -> Result<Vec<String>> {
+    Ok(Vec::new())
   }
 }
 
-/// The agent every fixture session borrows.
+/// The agent every fixture session borrows: the silent Claude.
 pub fn agent() -> &'static dyn Agent {
   &SILENT_AGENT
+}
+
+/// The silent fixture agent of `kind`.
+pub fn agent_for(kind: AgentKind) -> &'static dyn Agent {
+  match kind {
+    AgentKind::Claude => &SILENT_AGENT,
+    AgentKind::Codex => &SILENT_CODEX_AGENT,
+    AgentKind::Cursor => &SILENT_CURSOR_AGENT,
+  }
+}
+
+/// An agent whose every transcript is gone.
+pub fn vanished_agent() -> &'static dyn Agent {
+  &VANISHED_AGENT
 }
 
 /// A runtime that starts every session it is asked to, under the external id
@@ -671,9 +721,6 @@ pub fn launched_implementer() -> SessionSpec {
   }
 }
 
-/// A transcript that is always on disk: the crate's own manifest.
-pub const PRESENT_TRANSCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-
 /// A live implementer that has been polled: its transcript has grown, and
 /// its context read.
 pub fn working_implementer() -> SessionSpec {
@@ -691,9 +738,19 @@ pub fn build_session(spec: SessionSpec) -> Result<Session<'static>> {
 
 /// A session driven by `runtime` instead of the fixture's idle one.
 pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Result<Session<'_>> {
+  let agent = agent_for(spec.agent);
+  build_session_with(spec, runtime, agent)
+}
+
+/// A session reading its transcript through `agent` instead of the fixture's.
+pub fn build_session_with<'r>(
+  spec: SessionSpec,
+  runtime: &'r dyn SessionRuntime,
+  agent: &'r dyn Agent,
+) -> Result<Session<'r>> {
   Session::new(
     runtime,
-    agent(),
+    agent,
     spec.id,
     spec.name.to_owned(),
     spec.role,
@@ -729,7 +786,7 @@ pub fn format_session(session: &Session) -> String {
     format_time(session.last_growth()),
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),
-    session.transcript_path().display(),
+    session.transcript().path().display(),
     format_option_text(session.pane_id()),
     format_option(session.role_prompt().map(|path| path.display().to_string())),
     session.is_live(),

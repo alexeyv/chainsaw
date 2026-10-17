@@ -114,7 +114,6 @@ impl fmt::Display for AgentKind {
 /// incarnation: relaunching the same name stops this one and starts another.
 /// It drives itself through the run's runtime, and reads its transcript
 /// through the agent it was launched with; it borrows both from the run.
-#[derive(Clone)]
 pub struct Session<'r> {
   runtime: &'r dyn SessionRuntime,
   agent: &'r dyn Agent,
@@ -131,7 +130,7 @@ pub struct Session<'r> {
   last_growth: DateTime<Utc>,
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
-  transcript: PathBuf,
+  transcript: Box<dyn Transcript>,
   pane_id: Option<String>,
   role_prompt: Option<PathBuf>,
 }
@@ -162,6 +161,9 @@ impl<'r> Session<'r> {
     require_nonblank("name", &name)?;
     require_nonblank("external_session_id", &external_session_id)?;
     require_optional_nonblank("launched_head", launched_head.as_deref())?;
+    if agent.kind() != agent_kind {
+      bail!("agent {} cannot serve a {agent_kind} session", agent.kind());
+    }
     if transcript.as_os_str().is_empty() {
       bail!("transcript cannot be blank");
     }
@@ -191,8 +193,7 @@ impl<'r> Session<'r> {
     if over_limit_at.is_some_and(|over| over < started_at) {
       bail!("over_limit_at cannot precede started_at");
     }
-
-    Ok(Self {
+    let session = Self {
       runtime,
       agent,
       id,
@@ -208,10 +209,23 @@ impl<'r> Session<'r> {
       last_growth,
       kicked_at,
       over_limit_at,
-      transcript,
+      transcript: agent.transcript_at(&transcript),
       pane_id,
       role_prompt,
-    })
+    };
+    // Live session must have a readable transcript file. A stopped session
+    // remembers where its transcript was (and likely still is),
+    // but doesn't blow up if it's not
+    if session.is_live() {
+      session.transcript.check_readable().with_context(|| {
+        format!(
+          "supervisor: transcript of {} is gone from {}",
+          session.name,
+          session.transcript.path().display()
+        )
+      })?;
+    }
+    Ok(session)
   }
 
   /// What the runtime says the session is doing, or None when it has no such
@@ -295,11 +309,6 @@ impl<'r> Session<'r> {
     self.over_limit_at
   }
 
-  /// Where the agent writes this session's transcript. It never moves.
-  pub fn transcript_path(&self) -> &Path {
-    &self.transcript
-  }
-
   /// The pane the runtime opened for the session; None for the lead, which
   /// the supervisor never launched.
   pub fn pane_id(&self) -> Option<&str> {
@@ -312,20 +321,10 @@ impl<'r> Session<'r> {
     self.role_prompt.as_deref()
   }
 
-  /// The transcript, opened by the session's agent. Nothing in a run deletes
-  /// one, so a transcript that is gone means something outside the run
-  /// removed it, and that is an error rather than a session reading zero.
-  pub fn transcript(&self) -> Result<Box<dyn Transcript>> {
-    self
-      .agent
-      .open_transcript(&self.transcript)
-      .with_context(|| {
-        format!(
-          "supervisor: transcript of {} vanished from {}",
-          self.name,
-          self.transcript.display()
-        )
-      })
+  /// The transcript the agent placed at launch. A live session's is on disk;
+  /// a stopped one's may have been cleaned up since.
+  pub fn transcript(&self) -> &dyn Transcript {
+    &*self.transcript
   }
 
   /// A session is live until it is superseded or stopped.
@@ -375,7 +374,7 @@ impl PartialEq for Session<'_> {
       && self.last_growth == other.last_growth
       && self.kicked_at == other.kicked_at
       && self.over_limit_at == other.over_limit_at
-      && self.transcript == other.transcript
+      && self.transcript.path() == other.transcript.path()
       && self.pane_id == other.pane_id
       && self.role_prompt == other.role_prompt
   }
@@ -398,7 +397,7 @@ impl fmt::Debug for Session<'_> {
       .field("last_growth", &self.last_growth)
       .field("kicked_at", &self.kicked_at)
       .field("over_limit_at", &self.over_limit_at)
-      .field("transcript", &self.transcript)
+      .field("transcript", &self.transcript.path())
       .field("pane_id", &self.pane_id)
       .field("role_prompt", &self.role_prompt)
       .finish()

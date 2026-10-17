@@ -147,7 +147,7 @@ working on, and dispatch the next task as quickly as possible. Then go back to y
 **accepted** — terminal state, successful ending.
 Normally you should advance to it once you have seen and disposed of commentator's findings on the task.
 Trigger the transition thus: `$SUP accept <task-id>`
-This checks the commit is in git, carries no attribution trailer, and is on the branch.
+This checks the commit is in git and is on the branch.
 A dirty tree fails it only while no other task is dispatched or in flight: once the next
 implementer is working, the dirt is its. It does not re-derive whether the quality gate ran — the implementer's
 contract is to run it before it commits, and proving that again from the transcript

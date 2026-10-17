@@ -12,10 +12,10 @@ use crate::domain::test_helpers::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A transcript path nothing has written yet, removed when dropped.
-struct Transcript(PathBuf);
+pub(super) struct Transcript(PathBuf);
 
 impl Transcript {
-  fn unwritten() -> Self {
+  pub(super) fn unwritten() -> Self {
     Self(std::env::temp_dir().join(format!(
       "chainsaw-agent-transcript-{}-{}.jsonl",
       std::process::id(),
@@ -23,7 +23,7 @@ impl Transcript {
     )))
   }
 
-  fn written() -> Self {
+  pub(super) fn written() -> Self {
     let transcript = Self::unwritten();
     transcript.write();
     transcript
@@ -33,7 +33,7 @@ impl Transcript {
     fs::write(&self.0, "").unwrap();
   }
 
-  fn path(&self) -> PathBuf {
+  pub(super) fn path(&self) -> PathBuf {
     self.0.clone()
   }
 }
@@ -46,27 +46,9 @@ impl Drop for Transcript {
 
 fn writing(transcript: &Transcript) -> FakeAgent {
   FakeAgent {
+    kind: AgentKind::Claude,
     transcript: Some(transcript.path()),
-  }
-}
-
-mod open {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = Transcript::written();
-
-    let opened = open(&Claude, &transcript.path()).unwrap();
-
-    assert_eq!(opened.path(), transcript.path());
-  }
-
-  #[test]
-  fn should_be_none_when_there_is_no_file() {
-    let transcript = Transcript::unwritten();
-
-    assert!(open(&Claude, &transcript.path()).is_none());
+    vanished: false,
   }
 }
 

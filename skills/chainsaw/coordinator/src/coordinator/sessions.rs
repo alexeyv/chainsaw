@@ -228,22 +228,27 @@ fn implementer_transcripts(run: &Run, store: &Store) -> Result<Vec<(String, Path
     .into_iter()
     .filter(Session::can_take_task)
   {
-    let path = session.transcript()?.path().to_owned();
+    let path = session.transcript().path().to_owned();
     transcripts.push((session.external_session_id().to_owned(), path));
   }
   Ok(transcripts)
 }
 
+/// The named session's context, or every live session's: a stopped session
+/// holds no context, and its transcript may be gone.
 pub(super) fn cmd_context(run: &Run, store: &Store, name: Option<&str>) -> Result<()> {
   for session in store
     .read(|tx| run.sessions(tx))?
     .into_iter()
-    .filter(|session| name.is_none_or(|name| session.name() == name))
+    .filter(|session| match name {
+      Some(name) => session.name() == name,
+      None => session.is_live(),
+    })
   {
     println!(
       "{}\t{}",
       session.name(),
-      session.transcript()?.context_size()
+      session.transcript().context_size()?
     );
   }
   Ok(())

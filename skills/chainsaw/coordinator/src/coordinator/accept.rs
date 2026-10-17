@@ -199,9 +199,6 @@ fn accept_through_the_gate(run: &Run, store: &Store, task_id: i64) -> Result<()>
     match run.repo().commit(sha)? {
       None => problems.push(format!("commit {sha} not in git")),
       Some(commit) => {
-        if has_attribution_trailer(&commit.message) {
-          problems.push("commit carries an attribution trailer".to_owned());
-        }
         let head = run.repo().head()?;
         if !head.starts_with(&commit.sha) && !run.repo().is_ancestor(&commit.sha, &head)? {
           problems.push("commit is not on the branch".to_owned());
@@ -254,11 +251,4 @@ fn head_advanced_cleanly(run: &Run, base_head: Option<&str>) -> Result<bool> {
     Some(base_head) => run.repo().head_advanced_cleanly_from(base_head),
     None => Ok(false),
   }
-}
-
-fn has_attribution_trailer(message: &str) -> bool {
-  message.lines().any(|line| {
-    let lowercase = line.to_ascii_lowercase();
-    lowercase.starts_with("co-authored-by:") || lowercase.starts_with("claude-session:")
-  })
 }

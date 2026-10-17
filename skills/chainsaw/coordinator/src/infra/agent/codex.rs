@@ -12,15 +12,21 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-  TranscriptFormat, commits_printed, entries, open, read_lossy, start_with_prompt, text_of,
+  TranscriptFormat, commits_printed, entries, read_lossy, start_with_prompt, text_of,
+  transcript_file,
 };
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession, Transcript,
+  Agent, AgentKind, ContextSize, Launched, PromptState, SessionKind, SessionRuntime, StartSession,
+  Transcript,
 };
 
 pub struct Codex;
 
 impl Agent for Codex {
+  fn kind(&self) -> AgentKind {
+    AgentKind::Codex
+  }
+
   fn program(&self) -> &'static str {
     "codex"
   }
@@ -74,8 +80,8 @@ impl Agent for Codex {
     rollout_of(&Self::sessions_dir().ok()?, external_session_id, 4)
   }
 
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
-    open(&Codex, path)
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
+    transcript_file(&Codex, path)
   }
 }
 
@@ -110,9 +116,14 @@ impl TranscriptFormat for Codex {
     )
   }
 
-  fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize {
+  fn context_peak(
+    &self,
+    transcript: &Path,
+    from_offset: u64,
+    to_offset: Option<u64>,
+  ) -> ContextSize {
     ContextSize::tokens(
-      read_lossy(transcript, start, end)
+      read_lossy(transcript, from_offset, to_offset)
         .map(|text| text.lines().filter_map(usage_of_line).max().unwrap_or(0))
         .unwrap_or_default(),
     )

@@ -67,9 +67,9 @@ pub(super) fn start(
     watches.retain(|id, _| sessions.iter().any(|session| session.id() == *id));
     for session in sessions {
       let name = session.name();
-      let transcript = session.transcript()?;
-      let size = transcript.size();
-      let context = transcript.context_size();
+      let transcript = session.transcript();
+      let size = transcript.size()?;
+      let context = transcript.context_size()?;
       let grew = sizes.get(name).copied() != Some(size);
       sizes.insert(name.to_owned(), size);
       store.write(|tx| run.record_session_reading(tx, session.id(), context, grew, timestamp))?;
@@ -77,7 +77,7 @@ pub(super) fn start(
 
       match session.role() {
         Role::Implementer => {
-          observe_implementer(run, store, &session, &*transcript, quiet)?;
+          observe_implementer(run, store, &session, transcript, quiet)?;
         }
         Role::Commentator => {
           // The session was read before this poll's reading was recorded, so
@@ -186,15 +186,15 @@ fn observe_implementer(
   };
   if task.state() == TaskState::Dispatched {
     let dispatch_offset = task.transcript_offset() as u64;
-    if transcript.size() <= dispatch_offset {
+    if transcript.size()? <= dispatch_offset {
       return Ok(());
     }
-    let context = transcript.context_before(dispatch_offset);
+    let context = transcript.context_before(dispatch_offset)?;
     store.write(|tx| task::take_flight(tx, task.id(), context))?;
     return Ok(());
   }
   let head = run.repo().head()?;
-  let shas = transcript.commit_candidates(task.transcript_offset() as u64, &head);
+  let shas = transcript.commit_candidates(task.transcript_offset() as u64, &head)?;
   if let Some(sha) = new_commit_for(run, &shas, task.base_head())? {
     store.write(|tx| {
       task::record_commit(tx, task.id(), &sha, None)?;

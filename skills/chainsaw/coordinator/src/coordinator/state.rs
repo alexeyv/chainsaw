@@ -67,8 +67,6 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
       flags.push_str(" OVER-LIMIT");
     }
     let quiet = session.quiet_seconds(Utc::now());
-    // A transcript gone from under the run fails the report, not reads as zero.
-    session.transcript()?;
     println!(
       "  {:<16} {:<12} context {:>7} (max {}) quiet {quiet}s{flags}",
       session.name(),

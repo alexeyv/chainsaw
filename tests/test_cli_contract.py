@@ -128,6 +128,15 @@ class PromptAndDispatchContractTests(SupervisorContractCase):
         self.assertEqual(self.prompts_to("worker"), ["busy but silent"] * 3)
         self.assertEqual(result.stderr.count("resending"), 2)
 
+    def test_prompt_refuses_a_stopped_session(self):
+        self.launch()
+        self.stop_session("worker")
+
+        result = self.cli("prompt", "worker", "anyone there?")
+
+        self.assert_failure(result, "supervisor: worker is stopped; launch it again first")
+        self.assertEqual(self.prompts_to("worker"), [])
+
     def test_dispatch_refuses_a_session_that_is_not_an_implementer(self):
         task = self.new_task()
         commentator = self.start_commentator()
@@ -548,13 +557,6 @@ class VerificationContractTests(SupervisorContractCase):
 
         self.assert_failure(result, "tree is dirty")
 
-    def test_accept_rejects_attribution_trailers(self):
-        task, _ = self.prepare_committed_task(trailer=True)
-
-        result = self.cli("accept", str(task))
-
-        self.assert_failure(result, "commit carries an attribution trailer")
-
     def test_accept_takes_a_commit_the_branch_has_moved_past(self):
         task, task_sha = self.prepare_committed_task()
         self.commit_file("later.txt", "later\n", "feat: later fixture commit")
@@ -894,6 +896,17 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertEqual(result.stdout, "worker\t33\n")
 
+    def test_context_without_a_name_reports_live_sessions_only(self):
+        self.launch("worker")
+        self.launch("retired")
+        self.append_usage("worker", input_tokens=33)
+        self.append_usage("retired", input_tokens=44)
+        self.stop_session_and_remove_transcript("retired")
+
+        result = self.assert_success(self.cli("context"))
+
+        self.assertEqual(result.stdout, "worker\t33\n")
+
     def test_calibration_reports_git_and_task_context_cost(self):
         task = self.new_task(lines=20)
         self.launch()
@@ -923,6 +936,18 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         result = self.assert_success(self.cli("calibrate", str(task)))
 
         self.assertIn("context 0 (session 60, base 60)", result.stdout)
+
+    def test_calibration_of_a_stopped_session_whose_transcript_is_gone_fails(self):
+        task, sha = self.prepare_committed_task()
+        self.assert_success(self.cli("accept", str(task)))
+        self.stop_session_and_remove_transcript("worker")
+
+        result = self.cli("calibrate", str(task))
+
+        transcript = self.session_transcript("worker")
+        self.assert_failure(
+            result, f"supervisor: cannot read transcript {transcript}: No such file or directory"
+        )
 
     def test_lead_context_is_read_from_a_different_project_directory(self):
         harness = self.sandbox / "harness"
@@ -999,7 +1024,16 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assert_failure(result, 'unknown agent "gemini"')
 
-    def test_a_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
+    def test_state_does_not_check_a_stopped_sessions_transcript(self):
+        self.launch()
+        self.append_usage("worker", input_tokens=7)
+        self.stop_session_and_remove_transcript("worker")
+
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn("worker", state.stdout)
+
+    def test_a_live_transcript_that_disappears_mid_run_stops_the_daemon_loudly(self):
         self.launch()
         self.append_usage("worker", input_tokens=7)
         daemon = self.start_daemon(expected_exit=1)
@@ -1010,7 +1044,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         daemon.wait(timeout=10)
         state = self.cli("state")
 
-        message = f"supervisor: transcript of worker vanished from {transcript}"
+        message = f"supervisor: transcript of worker is gone from {transcript}"
         self.assertEqual(daemon.returncode, 1, self.daemon_report())
         self.assertIn(message, daemon.stderr_path.read_text())
         self.assert_failure(state, message)

@@ -17,11 +17,11 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-  TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, TranscriptFormat, entries, open, read_lossy,
-  start_with_prompt, text_of,
+  TRANSCRIPT_POLL, TRANSCRIPT_TIMEOUT, TranscriptFormat, entries, read_lossy, start_with_prompt,
+  text_of, transcript_file,
 };
 use crate::domain::{
-  Agent, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
+  Agent, AgentKind, ContextSize, Launched, PromptEcho, PromptState, SessionKind, SessionRuntime,
   SessionStatus, StartSession, Transcript,
 };
 
@@ -33,6 +33,10 @@ const LAUNCH_PROMPT: &str = "Reply only with the word ready, then wait for the t
 pub struct Cursor;
 
 impl Agent for Cursor {
+  fn kind(&self) -> AgentKind {
+    AgentKind::Cursor
+  }
+
   /// The CLI's own name: `cursor` on PATH opens the IDE.
   fn program(&self) -> &'static str {
     "cursor-agent"
@@ -119,8 +123,8 @@ impl Agent for Cursor {
     PromptEcho::WithReply
   }
 
-  fn open_transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
-    open(&Cursor, path)
+  fn transcript_at(&self, path: &Path) -> Box<dyn Transcript> {
+    transcript_file(&Cursor, path)
   }
 }
 
@@ -135,7 +139,12 @@ impl TranscriptFormat for Cursor {
     ContextSize::UNKNOWN
   }
 
-  fn context_peak(&self, _transcript: &Path, _start: u64, _end: Option<u64>) -> ContextSize {
+  fn context_peak(
+    &self,
+    _transcript: &Path,
+    _from_offset: u64,
+    _to_offset: Option<u64>,
+  ) -> ContextSize {
     ContextSize::UNKNOWN
   }
 
