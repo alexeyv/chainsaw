@@ -41,9 +41,7 @@ the commentator's findings — not implementation detail.
    directory. Under Cursor it is the directory that holds your transcript,
    `~/.cursor/projects/<project>/agent-transcripts/<session id>/`.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
-   from yours. The daemon keeps its context in hand: it brings the commentator back to
-   its role after a compaction and replaces it from its notes when it must, journaling
-   each step in `state`. Leave that to the daemon.
+   from yours.
 
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. Optional TOML files tune
