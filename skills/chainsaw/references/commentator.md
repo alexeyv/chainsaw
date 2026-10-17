@@ -82,9 +82,10 @@ not findings.
    $SUP observe "Run-wide convention: public errors preserve source context"
    ```
 
-   Observations are chronological narration only; the lead need not answer them. A
-   commit counts as waiting for you until its task has an observation or finding
-   recorded after it landed, "No findings" included.
+   Observations are chronological narration only; the lead need not answer them.
+   After you review a commit, always record an observation or a finding on its task,
+   even if it is just "No findings on abc123". That is how the supervisor knows the
+   commit was reviewed.
 4. Register each concern that requires lead judgment separately:
 
    ```sh
