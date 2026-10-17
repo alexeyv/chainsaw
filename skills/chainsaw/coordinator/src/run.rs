@@ -111,7 +111,8 @@ impl Run {
     agent::implementing(kind)
   }
 
-  /// Registers a session its agent has just started.
+  /// Registers a session its agent has just started in `pane_id`; the lead,
+  /// which the supervisor never starts, has none.
   #[allow(clippy::too_many_arguments)]
   pub fn register_session(
     &self,
@@ -122,6 +123,8 @@ impl Run {
     external_session_id: &str,
     launched_head: Option<&str>,
     transcript: &Path,
+    pane_id: Option<&str>,
+    role_prompt: Option<&Path>,
   ) -> Result<Session<'_>> {
     session::create(
       transaction,
@@ -133,6 +136,8 @@ impl Run {
       external_session_id,
       launched_head,
       transcript,
+      pane_id,
+      role_prompt,
     )
   }
 

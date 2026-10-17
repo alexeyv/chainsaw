@@ -140,6 +140,15 @@ mod compact_prompt {
   }
 }
 
+mod compact_at_args {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(Cursor.compact_at_args(150_000), None);
+  }
+}
+
 mod context_size {
   use super::*;
 
@@ -319,31 +328,6 @@ mod latest_assistant_text {
     let transcript = Transcript::containing(&prompt_line("hello"));
 
     assert_eq!(Cursor.latest_assistant_text(transcript.path()), None);
-  }
-}
-
-mod output_mentions {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = Transcript::containing(&assistant_line("reviewed abc1234 and found nothing"));
-
-    assert!(Cursor.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_count_a_tool_use_input() {
-    let transcript = Transcript::containing(&tool_use_line("git show abc1234"));
-
-    assert!(Cursor.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_ignore_mentions_by_the_user() {
-    let transcript = Transcript::containing(&prompt_line("review abc1234"));
-
-    assert!(!Cursor.output_mentions(transcript.path(), "abc1234"));
   }
 }
 

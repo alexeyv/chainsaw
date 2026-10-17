@@ -50,6 +50,14 @@ impl Agent for Codex {
     "/compact"
   }
 
+  /// A configuration override; `-c` may be given any number of times.
+  fn compact_at_args(&self, tokens: u64) -> Option<Vec<String>> {
+    Some(vec![
+      "-c".to_owned(),
+      format!("model_auto_compact_token_limit={tokens}"),
+    ])
+  }
+
   /// Codex names its own sessions.
   fn session_id_args(&self, _id: &str) -> Option<Vec<String>> {
     None
@@ -144,14 +152,6 @@ impl TranscriptFormat for Codex {
       }
     }
     last
-  }
-
-  /// What the agent said or did: its messages and its tool calls, not what
-  /// the tools returned or what was said to it.
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool {
-    entries(transcript, 0)
-      .iter()
-      .any(|entry| is_agents_own(entry) && entry.to_string().contains(text))
   }
 
   /// The transcript shows what git printed, so its commit lines are read.
@@ -256,15 +256,6 @@ fn is_message_from(entry: &Value, role: &str) -> bool {
   entry.get("type").and_then(Value::as_str) == Some("response_item")
     && entry.pointer("/payload/type").and_then(Value::as_str) == Some("message")
     && entry.pointer("/payload/role").and_then(Value::as_str) == Some(role)
-}
-
-fn is_agents_own(entry: &Value) -> bool {
-  entry.get("type").and_then(Value::as_str) == Some("response_item")
-    && (entry.pointer("/payload/role").and_then(Value::as_str) == Some("assistant")
-      || matches!(
-        entry.pointer("/payload/type").and_then(Value::as_str),
-        Some("function_call" | "custom_tool_call")
-      ))
 }
 
 /// The context the model was handed for one response: the input tokens of

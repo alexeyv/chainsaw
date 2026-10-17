@@ -147,6 +147,10 @@ class CursorImplementerContractTests(herdr.CursorImplementerContractTests):
     runtime = "orca"
 
 
+class CommentatorContextContractTests(herdr.CommentatorContextContractTests):
+    runtime = "orca"
+
+
 class OrcaTerminalContractTests(SupervisorContractCase):
     """What the supervisor does with a runtime that knows terminals, not agents."""
 

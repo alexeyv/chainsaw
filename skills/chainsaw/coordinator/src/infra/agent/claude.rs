@@ -49,6 +49,16 @@ impl Agent for Claude {
     "/compact"
   }
 
+  /// Claude Code's `autoCompactWindow` setting takes 100k to 1M tokens. It
+  /// compacts once the context reaches the window less the room it keeps for
+  /// the summary, so a little before `tokens`.
+  fn compact_at_args(&self, tokens: u64) -> Option<Vec<String>> {
+    Some(vec![
+      "--settings".to_owned(),
+      format!("{{\"autoCompactWindow\":{tokens}}}"),
+    ])
+  }
+
   fn session_id_args(&self, id: &str) -> Option<Vec<String>> {
     Some(vec!["--session-id".to_owned(), id.to_owned()])
   }
@@ -159,13 +169,6 @@ impl TranscriptFormat for Claude {
       }
     }
     last
-  }
-
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool {
-    entries(transcript, 0).iter().any(|entry| {
-      entry.get("type").and_then(Value::as_str) == Some("assistant")
-        && entry.to_string().contains(text)
-    })
   }
 
   /// The transcript shows what git printed, so its commit lines are read.

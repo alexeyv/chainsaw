@@ -29,9 +29,6 @@ pub trait Transcript {
   /// The last text the agent said, if it has said anything.
   fn latest_assistant_text(&self) -> Option<String>;
 
-  /// Whether anything the agent said or did mentions `text`.
-  fn output_mentions(&self, text: &str) -> bool;
-
   /// Commit ids the session may have made from `offset` on, given `head`,
   /// where the branch stands now. An agent whose transcript shows what git
   /// printed reads them from it; one whose transcript keeps no tool output

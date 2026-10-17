@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests.support import READING_TURN, SupervisorContractCase
+from tests.support import COMPACT_AT_ARGS, READING_TURN, SupervisorContractCase
 
 
 class TaskContractTests(SupervisorContractCase):
@@ -1040,7 +1040,7 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assertNotIn("commentary-delivered@", state.stdout)
         self.assertEqual(self.prompts_to(commentator).count(wake), 1)
 
-        self.append_text(commentator, f"Reviewed commit {sha[:7]}")
+        self.assert_success(self.cli("observe", "--task", str(task), f"No findings on {sha[:7]}"))
         self.wait_for_state("commentary-delivered@")
         time.sleep(0.1)
         self.assertEqual(self.prompts_to(commentator).count(wake), 1)
@@ -1077,14 +1077,15 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
         self.assert_success(self.cli("stop"))
         daemon.wait(timeout=10)
 
-    def test_daemon_observes_commentator_ingestion(self):
+    def test_an_observation_on_a_committed_task_delivers_its_review(self):
         task, sha = self.prepare_committed_task()
         self.assert_success(self.cli("accept", str(task)))
         commentator = self.start_commentator()
-        self.append_text(commentator, f"Reviewed commit {sha[:10]}")
 
+        self.assert_success(self.cli("observe", "--task", str(task), f"No findings on {sha[:7]}"))
         daemon = self.start_daemon()
         state = self.wait_for_state("commentary-delivered@")
+        time.sleep(0.1)
         wakes = [
             text for text in self.prompts_to(commentator)
             if text.startswith("supervisor: commit ")
@@ -1094,6 +1095,47 @@ class ReportingAndDaemonContractTests(SupervisorContractCase):
 
         self.assertIn("1 accepted", state.stdout)
         self.assertEqual(wakes, [])
+
+    def test_a_finding_on_a_committed_task_delivers_its_review(self):
+        task, sha = self.prepare_committed_task()
+        self.assert_success(self.cli("accept", str(task)))
+
+        self.assert_success(self.cli("finding", "--task", str(task), f"{sha[:7]} drops an error"))
+        state = self.assert_success(self.cli("state"))
+
+        self.assertIn("commentary-delivered@", state.stdout)
+
+    def test_a_commit_the_commentator_only_mentioned_still_waits_for_its_review(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.append_text(commentator, f"git show {sha[:7]}")
+        wake = (
+            f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+        )
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentary-wake")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertNotIn("commentary-delivered@", state.stdout)
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1)
+
+    def test_commentary_before_the_commit_lands_delivers_nothing(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.assert_success(self.cli("observe", "--task", str(task), "the gate ran clean"))
+        wake = (
+            f"supervisor: commit {sha[:10]} landed for task {task}; review it from git"
+        )
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentary-wake")
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+        self.assertNotIn("commentary-delivered@", state.stdout)
+        self.assertEqual(self.prompts_to(commentator).count(wake), 1)
 
     def test_stop_is_durable_and_ends_a_running_daemon(self):
         daemon = self.start_daemon()
@@ -1513,7 +1555,7 @@ class SettingsContractTests(SupervisorContractCase):
         commentator = self.start_commentator()
 
         self.assertEqual(self.launch_args("worker"), IMPLEMENTER_DEFAULTS)
-        self.assertEqual(self.launch_args(commentator), COMMENTATOR_DEFAULTS)
+        self.assertEqual(self.configured_args(commentator), COMMENTATOR_DEFAULTS)
 
     def test_each_role_is_tuned_from_its_own_table(self):
         self.write_settings(
@@ -1527,7 +1569,7 @@ class SettingsContractTests(SupervisorContractCase):
         commentator = self.start_commentator()
 
         self.assertEqual(self.launch_args("worker"), ["--model", "sonnet", "--effort", "medium"])
-        self.assertEqual(self.launch_args(commentator), COMMENTATOR_DEFAULTS)
+        self.assertEqual(self.configured_args(commentator), COMMENTATOR_DEFAULTS)
 
     def test_a_quoted_value_with_spaces_reaches_claude_as_one_flag(self):
         self.write_settings(
@@ -1617,7 +1659,7 @@ class SettingsContractTests(SupervisorContractCase):
         commentator = self.start_commentator()
 
         self.assertEqual(self.launch_args("worker"), ["--local"])
-        self.assertEqual(self.launch_args(commentator), ["--global"])
+        self.assertEqual(self.configured_args(commentator), ["--global"])
 
     def test_a_project_naming_the_agent_drops_the_global_args_for_that_role(self):
         self.write_global_settings('[implementer]\nargs = "--model sonnet --effort medium"\n')
@@ -2065,3 +2107,212 @@ class ClaudeCommitDetectionContractTests(SupervisorContractCase):
         self.assertIn(f"{task} in_flight", state.stdout)
         self.assert_failure(result)
         self.assertIn("no new commit since the task was dispatched", result.stdout)
+
+
+class CommentatorContextContractTests(SupervisorContractCase):
+    """The commentator is launched to compact itself at 150k, and the supervisor
+    brings it back to its role when it sees the drop. One that stays over the line is
+    asked to stop, interrupted if it will not, and compacted; one whose compaction
+    never takes is replaced from the same notes. Cursor cannot be told when to compact,
+    so a Cursor commentator is replaced after a while instead. A commentator with
+    nothing to review is never nudged."""
+
+    OVER_THE_LINE = 160_000
+    STOP_PROMPT = (
+        "supervisor: your context is past 150000 tokens and has not compacted. Finish the"
+        " review you are on, write your notes, and stop; take up nothing new. The"
+        " supervisor will bring you back."
+    )
+
+    def recovery_prompt(self, waiting):
+        return (
+            "supervisor: your context was compacted. Reread your role prompt at"
+            f" {self.run_dir / 'commentator.md'} and follow it entirely, read your notes at"
+            f" {self.state_dir / 'chainsaw-commentator-state.md'}, and make sure your"
+            f" `watch-transcripts` monitor is still running. {waiting}"
+        )
+
+    def stop_daemon(self, daemon):
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+    def test_the_commentator_is_launched_to_compact_itself_at_150k(self):
+        self.launch()
+        commentator = self.start_commentator()
+
+        self.assertEqual(self.launch_args(commentator)[:2], COMPACT_AT_ARGS["claude"])
+        self.assertNotIn("--settings", self.launch_args("worker"))
+
+    def test_a_codex_commentator_is_launched_to_compact_itself_at_150k(self):
+        self.write_settings('[commentator]\nagent = "codex"\n')
+
+        commentator = self.start_commentator()
+
+        self.assertEqual(
+            self.launch_args(commentator),
+            ["-c", "model_auto_compact_token_limit=150000",
+             "--dangerously-bypass-approvals-and-sandbox"],
+        )
+
+    def test_a_cursor_commentator_is_launched_only_as_configured(self):
+        self.write_settings('[commentator]\nagent = "cursor"\n')
+
+        commentator = self.start_commentator()
+
+        self.assertEqual(self.launch_args(commentator), ["--trust", "--force"])
+
+    def test_a_commentator_that_compacts_itself_is_brought_back_with_the_commits_waiting(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+        self.append_usage(commentator, input_tokens=138_000)
+
+        daemon = self.start_daemon()
+        self.wait_for_state("commentary-wake")
+        self.append_usage(commentator, input_tokens=21_000)
+        state = self.wait_for_state("commentator-recover")
+        self.stop_daemon(daemon)
+
+        self.assertIn(f"commentator-recover {commentator} at 21000", state.stdout)
+        self.assertNotIn("commentator-stop", state.stdout)
+        self.assertEqual(self.prompts_to(commentator), [
+            f"supervisor: commit {sha[:10]} landed for task {task}; review it from git",
+            self.recovery_prompt(
+                f"Commits waiting for your review: {sha[:10]} (task {task})."
+            ),
+        ])
+
+    def test_a_commentator_that_stays_over_the_line_is_stopped_compacted_and_brought_back(self):
+        commentator = self.start_commentator()
+        self.append_usage(commentator, input_tokens=self.OVER_THE_LINE)
+
+        daemon = self.start_daemon(poll_interval_ms=50)
+        self.wait_for_state(f"compact {commentator} at {self.OVER_THE_LINE}")
+        self.append_usage(commentator, input_tokens=20_000)
+        state = self.wait_for_state("commentator-recover")
+        self.stop_daemon(daemon)
+
+        self.assertIn(f"commentator-stop {commentator} at {self.OVER_THE_LINE}", state.stdout)
+        self.assertNotIn("commentator-interrupt", state.stdout)
+        self.assertEqual(self.prompts_to(commentator), [
+            self.STOP_PROMPT,
+            "/compact",
+            self.recovery_prompt("No commit is waiting for your review."),
+        ])
+
+    def test_a_commentator_that_will_not_stop_is_interrupted_then_compacted(self):
+        commentator = self.start_commentator()
+        self.append_usage(commentator, input_tokens=self.OVER_THE_LINE)
+        self.set_agent_status(commentator, "busy")
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state(f"compact {commentator} at")
+        self.stop_daemon(daemon)
+
+        self.assertIn(f"commentator-interrupt {commentator}", state.stdout)
+        self.assertIn(
+            "interrupt",
+            [operation["operation"] for operation in self.operations_on(commentator)],
+        )
+        self.assertEqual(self.prompts_to(commentator), [self.STOP_PROMPT, "/compact"])
+
+    def test_commits_wait_while_the_commentator_is_stopping_and_are_handed_over_after(self):
+        task = self.new_task()
+        self.launch()
+        self.assert_success(self.dispatch(task))
+        self.observe_in_flight(task)
+        commentator = self.start_commentator()
+        self.append_usage(commentator, input_tokens=self.OVER_THE_LINE)
+        self.set_agent_status(commentator, "busy")
+
+        daemon = self.start_daemon(poll_interval_ms=200)
+        self.wait_for_state("commentator-stop")
+        sha = self.commit_file()
+        self.record_commit("worker", sha)
+        held = self.wait_for_state(f"{task} committed_unverified")
+        time.sleep(0.5)
+        held_prompts = self.prompts_to(commentator)
+        self.set_agent_status(commentator, "idle")
+        self.wait_for_state(f"compact {commentator} at")
+        self.append_usage(commentator, input_tokens=20_000)
+        state = self.wait_for_state("commentator-recover")
+        self.stop_daemon(daemon)
+
+        self.assertNotIn("commentary-wake", held.stdout)
+        self.assertEqual(held_prompts, [self.STOP_PROMPT])
+        self.assertIn(f"commentary-wake task {task} {sha[:10]}", state.stdout)
+        self.assertEqual(self.prompts_to(commentator), [
+            self.STOP_PROMPT,
+            "/compact",
+            self.recovery_prompt(
+                f"Commits waiting for your review: {sha[:10]} (task {task})."
+            ),
+        ])
+
+    def test_a_commentator_whose_compaction_never_takes_is_replaced_on_its_role_prompt(self):
+        commentator = self.start_commentator()
+        start_prompt = self.launch_prompt(commentator)
+        (first,) = self.incarnations(commentator)
+        first_pane = first.split()[0]
+        self.append_usage(commentator, input_tokens=self.OVER_THE_LINE)
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentator-restart", timeout=30)
+        self.stop_daemon(daemon)
+
+        self.assertIn(
+            f"commentator-restart {commentator} at {self.OVER_THE_LINE}", state.stdout,
+        )
+        self.assertIn({"operation": "close", "session_id": first_pane}, self.runtime_operations())
+        incarnations = self.incarnations(commentator)
+        self.assertEqual(len(incarnations), 2, incarnations)
+        self.assertEqual(incarnations[0], f"{first_pane} stopped")
+        self.assertTrue(incarnations[1].endswith(" live"), incarnations)
+        self.assertNotEqual(incarnations[1].split()[0], first_pane)
+        self.assertEqual(self.launch_prompt(commentator), start_prompt)
+        self.assertEqual(self.launch_args(commentator)[:2], COMPACT_AT_ARGS["claude"])
+
+    def test_a_cursor_commentator_is_replaced_once_it_has_run_long_enough(self):
+        self.write_settings('[commentator]\nagent = "cursor"\n')
+        commentator = self.start_commentator()
+        self.age_session(commentator, 2 * 3600)
+
+        daemon = self.start_daemon()
+        state = self.wait_for_state("commentator-restart", timeout=30)
+        self.stop_daemon(daemon)
+
+        self.assertIn(f"commentator-stop {commentator} at unknown", state.stdout)
+        self.assertNotIn(f"compact {commentator}", state.stdout)
+        self.assertEqual(len(self.incarnations(commentator)), 2)
+        self.assertIn(
+            "supervisor: you are due for a fresh session. Finish the review you are on,"
+            " write your notes, and stop; take up nothing new. The supervisor will bring"
+            " you back.",
+            [operation.get("text") for operation in self.runtime_operations()],
+        )
+
+    def test_an_idle_commentator_with_nothing_to_review_is_left_alone(self):
+        commentator = self.start_commentator()
+        self.age_session(commentator, 3600)
+
+        daemon = self.start_daemon()
+        self.wait_for_state("lead")
+        time.sleep(0.5)
+        state = self.assert_success(self.cli("state"))
+        self.stop_daemon(daemon)
+
+        self.assertNotIn("kick", state.stdout)
+        self.assertEqual(self.prompts_to(commentator), [])
+
+    def test_an_idle_commentator_with_a_commit_waiting_is_nudged(self):
+        task, sha = self.prepare_committed_task()
+        commentator = self.start_commentator()
+
+        daemon = self.start_daemon()
+        self.wait_for_state("commentary-wake")
+        # Let the wake's turn end and its transcript settle.
+        time.sleep(1)
+        self.age_session(commentator, 3600)
+        self.wait_for_state(f"kick {commentator}")
+        self.stop_daemon(daemon)
+
+        self.assertEqual(self.prompts_to(commentator)[-1], "continue")

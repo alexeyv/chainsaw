@@ -6,11 +6,12 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 
+use super::commentator_watch::{OVER_LINE_POLLS, STOP_GRACE_POLLS};
 use super::{
-  Agent, AgentKind, Calibration, ContextSize, Finding, FindingVerdict, HumanWait, Launched,
-  Observation, Prompt, PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind,
-  SessionRuntime, SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState,
-  Transcript,
+  Agent, AgentKind, COMMENTATOR_COMPACT_TOKENS, Calibration, CommentatorAction, CommentatorReading,
+  CommentatorWatch, ContextSize, Finding, FindingVerdict, HumanWait, Launched, Observation, Prompt,
+  PromptState, Role, Run, RunEvent, RunEventKind, Session, SessionKind, SessionRuntime,
+  SessionStatus, StartSession, StartedSession, Task, TaskEvent, TaskState, Transcript,
 };
 
 /// A runtime that answers every status query the same way and accepts every
@@ -98,6 +99,10 @@ impl Agent for FakeAgent {
     "/compact"
   }
 
+  fn compact_at_args(&self, _tokens: u64) -> Option<Vec<String>> {
+    None
+  }
+
   fn session_id_args(&self, _id: &str) -> Option<Vec<String>> {
     None
   }
@@ -152,10 +157,6 @@ impl Transcript for SilentTranscript {
 
   fn latest_assistant_text(&self) -> Option<String> {
     None
-  }
-
-  fn output_mentions(&self, _text: &str) -> bool {
-    false
   }
 
   fn commit_candidates(&self, _offset: u64, _head: &str) -> Vec<String> {
@@ -644,6 +645,8 @@ pub struct SessionSpec {
   pub kicked_at: Option<DateTime<Utc>>,
   pub over_limit_at: Option<DateTime<Utc>>,
   pub transcript: &'static str,
+  pub pane_id: Option<&'static str>,
+  pub role_prompt: Option<&'static str>,
 }
 
 /// A live implementer that has just been launched and read nothing yet.
@@ -663,6 +666,8 @@ pub fn launched_implementer() -> SessionSpec {
     kicked_at: None,
     over_limit_at: None,
     transcript: "/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl",
+    pane_id: Some("pane-7"),
+    role_prompt: None,
   }
 }
 
@@ -703,12 +708,14 @@ pub fn build_session_on(spec: SessionSpec, runtime: &dyn SessionRuntime) -> Resu
     spec.kicked_at,
     spec.over_limit_at,
     PathBuf::from(spec.transcript),
+    spec.pane_id.map(str::to_owned),
+    spec.role_prompt.map(PathBuf::from),
   )
 }
 
 pub fn format_session(session: &Session) -> String {
   format!(
-    "id: {}\nname: {:?}\nrole: {}\nagent: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\ntranscript: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
+    "id: {}\nname: {:?}\nrole: {}\nagent: {}\nexternal_session_id: {:?}\nlaunched_head: {}\nstarted_at: {}\nstopped_at: {}\ncontext: {}\ncontext_max: {}\nlast_growth: {}\nkicked_at: {}\nover_limit_at: {}\ntranscript: {}\npane_id: {}\nrole_prompt: {}\nis_live: {}\ncan_take_task: {}\ncan_be_kicked: {}\ncan_latch_over_limit: {}",
     session.id(),
     session.name(),
     session.role(),
@@ -723,6 +730,8 @@ pub fn format_session(session: &Session) -> String {
     format_option(session.kicked_at().map(format_time)),
     format_option(session.over_limit_at().map(format_time)),
     session.transcript_path().display(),
+    format_option_text(session.pane_id()),
+    format_option(session.role_prompt().map(|path| path.display().to_string())),
     session.is_live(),
     session.can_take_task(),
     session.can_be_kicked(),
@@ -779,4 +788,87 @@ pub fn format_run(run: &Run) -> String {
     format_option(run.state_read_at().map(format_time)),
     run.is_stopping(),
   )
+}
+
+/// A poll's reading of a freshly started commentator holding `tokens`.
+pub fn commentator_at(tokens: u64) -> CommentatorReading {
+  CommentatorReading {
+    context: ContextSize::tokens(tokens),
+    reviews: 0,
+    age_seconds: 60,
+  }
+}
+
+/// A reading just over the line the commentator is told to compact at.
+pub fn commentator_over_the_line() -> CommentatorReading {
+  commentator_at(COMMENTATOR_COMPACT_TOKENS + 1)
+}
+
+/// A poll's reading of a commentator whose agent reports no context, after
+/// `reviews` reviews and `age_seconds`.
+pub fn unmeasured_commentator(reviews: u32, age_seconds: i64) -> CommentatorReading {
+  CommentatorReading {
+    context: ContextSize::UNKNOWN,
+    reviews,
+    age_seconds,
+  }
+}
+
+/// A watch on a commentator told at launch to compact itself, last read
+/// early in its work.
+pub fn self_compacting_watch() -> CommentatorWatch {
+  CommentatorWatch::new(true, ContextSize::tokens(30_000))
+}
+
+/// A watch on a commentator that stayed over the line and was just asked to
+/// stop.
+pub fn watch_asked_to_stop() -> CommentatorWatch {
+  let mut watch = self_compacting_watch();
+  for _ in 1..OVER_LINE_POLLS {
+    watch.poll(commentator_over_the_line(), busy);
+  }
+  assert_eq!(
+    watch.poll(commentator_over_the_line(), busy),
+    CommentatorAction::AskToStop
+  );
+  watch
+}
+
+/// A watch that has just sent its commentator a compaction.
+pub fn watch_compacting() -> CommentatorWatch {
+  let mut watch = watch_asked_to_stop();
+  assert_eq!(
+    watch.poll(commentator_over_the_line(), idle),
+    CommentatorAction::Compact
+  );
+  watch
+}
+
+/// A watch whose commentator was asked to stop and interrupted, and is busy
+/// still.
+pub fn watch_interrupted() -> CommentatorWatch {
+  let mut watch = watch_asked_to_stop();
+  for _ in 1..STOP_GRACE_POLLS {
+    watch.poll(commentator_over_the_line(), busy);
+  }
+  assert_eq!(
+    watch.poll(commentator_over_the_line(), busy),
+    CommentatorAction::Interrupt
+  );
+  watch
+}
+
+/// The runtime's answer for a session at its prompt.
+pub fn idle() -> bool {
+  true
+}
+
+/// The runtime's answer for a session mid-turn.
+pub fn busy() -> bool {
+  false
+}
+
+/// For a poll that must not ask the runtime.
+pub fn never_asked() -> bool {
+  panic!("the watch asked the runtime whether the commentator is idle")
 }

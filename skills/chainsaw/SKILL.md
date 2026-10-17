@@ -41,7 +41,9 @@ the commentator's findings — not implementation detail.
    directory. Under Cursor it is the directory that holds your transcript,
    `~/.cursor/projects/<project>/agent-transcripts/<session id>/`.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
-   from yours.
+   from yours. The daemon keeps its context in hand: it brings the commentator back to
+   its role after a compaction and replaces it from its notes when it must, journaling
+   each step in `state`. Leave that to the daemon.
 
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. Optional TOML files tune
@@ -163,8 +165,9 @@ kept — a landed commit does not oblige you to accept it.
 
 ### Remedying a coordinator failure
 
-The coordinator normally records commit and commentary-delivery transitions itself. If
-it misses one, remedy only that failure with `$SUP task record-commit <task-id> <sha>
+The coordinator normally records commits itself, and records a commit's commentary as
+delivered when the commentator observes or files a finding on its task. If it misses
+one, remedy only that failure with `$SUP task record-commit <task-id> <sha>
 --force --reason "..."` or `$SUP task record-commentary <task-id> --force --reason
 "..."`; do not use these commands to skip evidence or lifecycle stages. The commit must
 exist in the run repository, descend from the task's base head, and belong to no other

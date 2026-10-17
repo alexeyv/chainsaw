@@ -29,6 +29,8 @@ fn implementer(
     external,
     Some("base123"),
     Path::new("/transcripts/session.jsonl"),
+    Some("pane-1"),
+    None,
   )
 }
 
@@ -37,13 +39,14 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
   let row = db.query_row(
     "
       select name, role, agent, external_session_id, launched_head, started_at, stopped_at,
-             context, context_max, last_growth, kicked_at, over_limit_at, transcript
+             context, context_max, last_growth, kicked_at, over_limit_at, transcript, pane_id,
+             role_prompt
       from sessions where id=?
       ",
     [id],
     |row| {
       Ok(format!(
-        "{} {} {} {} {:?} started={} stopped={:?} context={:?}/{:?} growth={} kicked={:?} over_limit={:?} transcript={:?}",
+        "{} {} {} {} {:?} started={} stopped={:?} context={:?}/{:?} growth={} kicked={:?} over_limit={:?} transcript={:?} pane={:?} role_prompt={:?}",
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
@@ -57,6 +60,8 @@ fn stored_row(db: &Connection, id: i64) -> Result<String> {
         row.get::<_, Option<i64>>(10)?,
         row.get::<_, Option<i64>>(11)?,
         row.get::<_, String>(12)?,
+        row.get::<_, Option<String>>(13)?,
+        row.get::<_, Option<String>>(14)?,
       ))
     },
   )?;
@@ -94,6 +99,8 @@ last_growth: {started}
 kicked_at: none
 over_limit_at: none
 transcript: /transcripts/session.jsonl
+pane_id: "pane-1"
+role_prompt: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -104,7 +111,7 @@ can_latch_over_limit: true"#,
     assert_eq!(
       stored_row(&db, 1)?,
       format!(
-        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=\"/transcripts/session.jsonl\"",
+        "implementer-1 implementer claude uuid-1 Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=\"/transcripts/session.jsonl\" pane=Some(\"pane-1\") role_prompt=None",
         millis = session.started_at().timestamp_millis()
       )
     );
@@ -126,12 +133,49 @@ can_latch_over_limit: true"#,
       "uuid-lead",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
     transaction.commit()?;
 
     assert_eq!(session.role(), Role::Lead);
     assert_eq!(session.launched_head(), None);
+    assert_eq!(session.pane_id(), None);
     assert!(!session.can_take_task());
+    Ok(())
+  }
+
+  #[test]
+  fn should_register_a_commentator_with_its_role_prompt() -> Result<()> {
+    let mut db = database();
+
+    let transaction = db.transaction()?;
+    let session = create(
+      &transaction,
+      runtime(),
+      implementing,
+      "commentator-1",
+      Role::Commentator,
+      AgentKind::Claude,
+      "uuid-commentator",
+      Some("base123"),
+      Path::new("/transcripts/session.jsonl"),
+      Some("pane-2"),
+      Some(Path::new("/skill/references/commentator.md")),
+    )?;
+    transaction.commit()?;
+
+    assert_eq!(
+      stored_row(&db, session.id())?,
+      format!(
+        "commentator-1 commentator claude uuid-commentator Some(\"base123\") started={millis} stopped=None context=None/None growth={millis} kicked=None over_limit=None transcript=\"/transcripts/session.jsonl\" pane=Some(\"pane-2\") role_prompt=Some(\"/skill/references/commentator.md\")",
+        millis = session.started_at().timestamp_millis()
+      )
+    );
+    assert_eq!(
+      session.role_prompt(),
+      Some(Path::new("/skill/references/commentator.md"))
+    );
     Ok(())
   }
 
@@ -271,6 +315,8 @@ mod all {
       "uuid-lead",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
     let first = implementer(&transaction, "implementer-1", "uuid-1")?;
     stop_named(&transaction, "implementer-1")?;
@@ -394,6 +440,8 @@ last_growth: {polled}
 kicked_at: none
 over_limit_at: none
 transcript: /transcripts/session.jsonl
+pane_id: "pane-1"
+role_prompt: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -616,6 +664,8 @@ mod record_over_limit {
       "uuid-lead",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
 
     let before = Utc::now();
@@ -644,6 +694,8 @@ mod record_over_limit {
       "uuid-lead",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
     let latched = record_over_limit(&transaction, runtime(), implementing, lead.id())?;
     let grown = lead.started_at() + chrono::Duration::seconds(900);
@@ -677,6 +729,8 @@ mod record_over_limit {
       "uuid-lead-1",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
     record_over_limit(&transaction, runtime(), implementing, first.id())?;
     stop_named(&transaction, "lead")?;
@@ -691,6 +745,8 @@ mod record_over_limit {
       "uuid-lead-2",
       None,
       Path::new("/transcripts/session.jsonl"),
+      None,
+      None,
     )?;
 
     assert_eq!(second.over_limit_at(), None);

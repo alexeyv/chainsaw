@@ -94,13 +94,19 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
 }
 
 /// The supervisor actions worth a line at the bottom of `state`: prompts it
-/// pushed at a session or gave up on, the overrides the lead forced, and how
-/// an abort reached its session. Launches, dispatches, commits and the
+/// pushed at a session or gave up on, how it kept the commentator's context
+/// in hand, the overrides the lead forced, and how an abort reached its
+/// session. Launches, dispatches, commits and the
 /// daemon's own lifecycle are visible elsewhere in `state` and stay out.
 const STATE_EVENT_KINDS: &[RunEventKind] = &[
   RunEventKind::StopLead,
   RunEventKind::Kick,
   RunEventKind::Compact,
+  RunEventKind::CommentatorRecover,
+  RunEventKind::CommentatorStop,
+  RunEventKind::CommentatorInterrupt,
+  RunEventKind::CommentatorRestart,
+  RunEventKind::CommentatorRestartFailed,
   RunEventKind::PromptQueued,
   RunEventKind::PromptTaken,
   RunEventKind::PromptFailed,

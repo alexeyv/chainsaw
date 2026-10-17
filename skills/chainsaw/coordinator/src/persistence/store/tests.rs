@@ -150,6 +150,11 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
   initialize_schema(&db)?;
 
   let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+  let launch_columns = db.query_row(
+    "select count(*) from pragma_table_info('sessions') where name in ('pane_id', 'role_prompt')",
+    [],
+    |row| row.get::<_, i64>(0),
+  )?;
   let task_id_required = db.query_row(
     "select \"notnull\" from pragma_table_info('findings') where name='task_id'",
     [],
@@ -206,6 +211,7 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
     |row| row.get::<_, i64>(0),
   )?;
   assert_eq!(version, 1);
+  assert_eq!(launch_columns, 2);
   assert_eq!(task_id_required, 1);
   assert_eq!(task_foreign_keys, 2);
   assert_eq!(observation_foreign_keys, 1);

@@ -132,6 +132,8 @@ pub struct Session<'r> {
   kicked_at: Option<DateTime<Utc>>,
   over_limit_at: Option<DateTime<Utc>>,
   transcript: PathBuf,
+  pane_id: Option<String>,
+  role_prompt: Option<PathBuf>,
 }
 
 impl<'r> Session<'r> {
@@ -153,6 +155,8 @@ impl<'r> Session<'r> {
     kicked_at: Option<DateTime<Utc>>,
     over_limit_at: Option<DateTime<Utc>>,
     transcript: PathBuf,
+    pane_id: Option<String>,
+    role_prompt: Option<PathBuf>,
   ) -> Result<Self> {
     require_positive("id", id)?;
     require_nonblank("name", &name)?;
@@ -160,6 +164,15 @@ impl<'r> Session<'r> {
     require_optional_nonblank("launched_head", launched_head.as_deref())?;
     if transcript.as_os_str().is_empty() {
       bail!("transcript cannot be blank");
+    }
+    require_optional_nonblank("pane_id", pane_id.as_deref())?;
+    if let Some(role_prompt) = &role_prompt {
+      if role != Role::Commentator {
+        bail!("only a commentator has a role prompt");
+      }
+      if role_prompt.as_os_str().is_empty() {
+        bail!("role_prompt cannot be blank");
+      }
     }
     if let (Some(context), Some(context_max)) = (context.known(), context_max.known())
       && context_max < context
@@ -196,6 +209,8 @@ impl<'r> Session<'r> {
       kicked_at,
       over_limit_at,
       transcript,
+      pane_id,
+      role_prompt,
     })
   }
 
@@ -285,6 +300,18 @@ impl<'r> Session<'r> {
     &self.transcript
   }
 
+  /// The pane the runtime opened for the session; None for the lead, which
+  /// the supervisor never launched.
+  pub fn pane_id(&self) -> Option<&str> {
+    self.pane_id.as_deref()
+  }
+
+  /// The role prompt a commentator was started on, which it rereads after a
+  /// compaction and a replacement is started on again.
+  pub fn role_prompt(&self) -> Option<&Path> {
+    self.role_prompt.as_deref()
+  }
+
   /// The transcript, opened by the session's agent. Nothing in a run deletes
   /// one, so a transcript that is gone means something outside the run
   /// removed it, and that is an error rather than a session reading zero.
@@ -349,6 +376,8 @@ impl PartialEq for Session<'_> {
       && self.kicked_at == other.kicked_at
       && self.over_limit_at == other.over_limit_at
       && self.transcript == other.transcript
+      && self.pane_id == other.pane_id
+      && self.role_prompt == other.role_prompt
   }
 }
 
@@ -370,6 +399,8 @@ impl fmt::Debug for Session<'_> {
       .field("kicked_at", &self.kicked_at)
       .field("over_limit_at", &self.over_limit_at)
       .field("transcript", &self.transcript)
+      .field("pane_id", &self.pane_id)
+      .field("role_prompt", &self.role_prompt)
       .finish()
   }
 }

@@ -21,16 +21,20 @@ struct SessionRow {
   kicked_at: Option<i64>,
   over_limit_at: Option<i64>,
   transcript: String,
+  pane_id: Option<String>,
+  role_prompt: Option<String>,
 }
 
 const SELECT: &str = "
   select id, name, role, agent, external_session_id, launched_head, started_at, stopped_at,
-         context, context_max, last_growth, kicked_at, over_limit_at, transcript
+         context, context_max, last_growth, kicked_at, over_limit_at, transcript, pane_id,
+         role_prompt
   from sessions
 ";
 
-/// Register a session that has just started with `agent` and begun writing
-/// `transcript`. Its last growth is its start.
+/// Register a session that has just started with `agent` in `pane_id` and
+/// begun writing `transcript`, a commentator on `role_prompt`. Its last growth
+/// is its start.
 #[allow(clippy::too_many_arguments)]
 pub fn create<'r>(
   transaction: &Transaction<'_>,
@@ -42,14 +46,16 @@ pub fn create<'r>(
   external_session_id: &str,
   launched_head: Option<&str>,
   transcript: &Path,
+  pane_id: Option<&str>,
+  role_prompt: Option<&Path>,
 ) -> Result<Session<'r>> {
   let started_at = Utc::now();
   let id = transaction.query_row(
     "
       insert into sessions(
         name, role, agent, external_session_id, launched_head, started_at, last_growth,
-        transcript
-      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
+        transcript, pane_id, role_prompt
+      ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)
       returning id
       ",
     params![
@@ -60,6 +66,8 @@ pub fn create<'r>(
       launched_head,
       started_at.timestamp_millis(),
       transcript.to_string_lossy(),
+      pane_id,
+      role_prompt.map(|path| path.to_string_lossy()),
     ],
     |row| row.get(0),
   )?;
@@ -195,6 +203,8 @@ fn session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     kicked_at: row.get("kicked_at")?,
     over_limit_at: row.get("over_limit_at")?,
     transcript: row.get("transcript")?,
+    pane_id: row.get("pane_id")?,
+    role_prompt: row.get("role_prompt")?,
   })
 }
 
@@ -229,6 +239,8 @@ fn materialize<'r>(
       .map(|at| time(at, "over_limit_at"))
       .transpose()?,
     row.transcript.into(),
+    row.pane_id,
+    row.role_prompt.map(Into::into),
   )
 }
 

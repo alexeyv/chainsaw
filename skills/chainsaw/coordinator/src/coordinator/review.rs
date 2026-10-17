@@ -6,16 +6,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 
 use crate::cli::Verdict;
-use crate::domain::{FindingVerdict, Task};
+use crate::domain::{FindingVerdict, RunEventKind, Task};
 use crate::persistence::store::Store;
-use crate::persistence::{finding, observation, task};
+use crate::persistence::{finding, observation, run_event, task};
 
 pub(super) fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
   let observation = store.write(|tx| {
-    if let Some(task_id) = task_id {
-      require_task(tx, task_id)?;
+    let task = task_id
+      .map(|task_id| require_task(tx, task_id))
+      .transpose()?;
+    let observation = observation::create(tx, task_id, text)?;
+    if let Some(task) = task {
+      record_delivery(tx, &task)?;
     }
-    observation::create(tx, task_id, text)
+    Ok(observation)
   })?;
   println!("{}", observation.id());
   Ok(())
@@ -23,8 +27,10 @@ pub(super) fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Re
 
 pub(super) fn cmd_finding(store: &Store, task_id: i64, description: &str) -> Result<()> {
   let finding = store.write(|tx| {
-    require_task(tx, task_id)?;
-    finding::register(tx, task_id, description)
+    let task = require_task(tx, task_id)?;
+    let finding = finding::register(tx, task_id, description)?;
+    record_delivery(tx, &task)?;
+    Ok(finding)
   })?;
   println!("{}", finding.id());
   Ok(())
@@ -126,4 +132,18 @@ pub(super) fn cmd_resolutions(store: &Store) -> Result<()> {
 
 fn require_task(transaction: &rusqlite::Transaction<'_>, task_id: i64) -> Result<Task> {
   task::get(transaction, task_id)?.with_context(|| format!("supervisor: no task {task_id}"))
+}
+
+/// Commentary on a task whose commit awaits review is that review delivered:
+/// the commit no longer waits for the commentator. Commentary on a task
+/// before its commit lands is about its transcript, and delivers nothing.
+fn record_delivery(transaction: &rusqlite::Transaction<'_>, task: &Task) -> Result<()> {
+  if task.awaits_commentary() && task::record_commentary_delivery(transaction, task.id())? {
+    run_event::create(
+      transaction,
+      RunEventKind::CommentaryDelivered,
+      &format!("task {}", task.id()),
+    )?;
+  }
+  Ok(())
 }

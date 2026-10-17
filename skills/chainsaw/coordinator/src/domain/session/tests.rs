@@ -71,6 +71,8 @@ last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: none
 transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+pane_id: "pane-7"
+role_prompt: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -98,6 +100,8 @@ last_growth: 2023-11-14T22:13:20Z
 kicked_at: none
 over_limit_at: none
 transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+pane_id: "pane-7"
+role_prompt: none
 is_live: true
 can_take_task: true
 can_be_kicked: true
@@ -118,6 +122,22 @@ can_latch_over_limit: true"#
     assert_eq!(session.role(), Role::Lead);
     assert_eq!(session.launched_head(), None);
     assert!(!session.can_take_task());
+  }
+
+  #[test]
+  fn should_accept_a_commentator_on_its_role_prompt() {
+    let session = build_session(SessionSpec {
+      name: "commentator-1",
+      role: Role::Commentator,
+      role_prompt: Some("/skill/references/commentator.md"),
+      ..working_implementer()
+    })
+    .unwrap();
+
+    assert_eq!(
+      session.role_prompt(),
+      Some(Path::new("/skill/references/commentator.md"))
+    );
   }
 
   #[test]
@@ -145,6 +165,8 @@ last_growth: 2023-11-14T22:23:20Z
 kicked_at: 2023-11-14T22:28:20Z
 over_limit_at: none
 transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+pane_id: "pane-7"
+role_prompt: none
 is_live: false
 can_take_task: false
 can_be_kicked: false
@@ -181,6 +203,8 @@ last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: 2023-11-14T22:28:20Z
 transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+pane_id: "pane-7"
+role_prompt: none
 is_live: true
 can_take_task: false
 can_be_kicked: true
@@ -245,6 +269,37 @@ can_latch_over_limit: false"#
     })
     .unwrap_err();
     assert_eq!(error.to_string(), "launched_head cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_the_pane_id_is_blank() {
+    let error = build_session(SessionSpec {
+      pane_id: Some(""),
+      ..working_implementer()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "pane_id cannot be blank");
+  }
+
+  #[test]
+  fn should_fail_when_a_session_other_than_the_commentator_has_a_role_prompt() {
+    let error = build_session(SessionSpec {
+      role_prompt: Some("/skill/references/commentator.md"),
+      ..working_implementer()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "only a commentator has a role prompt");
+  }
+
+  #[test]
+  fn should_fail_when_the_role_prompt_is_blank() {
+    let error = build_session(SessionSpec {
+      role: Role::Commentator,
+      role_prompt: Some(""),
+      ..working_implementer()
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "role_prompt cannot be blank");
   }
 
   #[test]

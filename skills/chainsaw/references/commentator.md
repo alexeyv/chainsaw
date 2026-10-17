@@ -32,9 +32,10 @@ The lead's start message names the run's state directory and the run directory.
 Discover the spec, the decision records, and the conventions from the repository and the
 transcripts yourself. Keep durable state outside the repo at
 `<state-directory>/chainsaw-commentator-state.md` — conventions seen, open
-finding numbers, last reviewed commit — because your pane may be compacted without warning and
-your files must never dirty the implementers' tree. On every start, read that state and
-resume from the transcripts and git after the last reviewed commit. Resolve the supervisor
+finding numbers, last reviewed commit — because your context is compacted without warning and
+your files must never dirty the implementers' tree. On every start, and after every
+compaction, read that state and resume from the transcripts and git after the last
+reviewed commit. Resolve the supervisor
 client from this prompt's location:
 
 ```sh
@@ -81,7 +82,9 @@ not findings.
    $SUP observe "Run-wide convention: public errors preserve source context"
    ```
 
-   Observations are chronological narration only; the lead need not answer them.
+   Observations are chronological narration only; the lead need not answer them. A
+   commit counts as waiting for you until its task has an observation or finding
+   recorded after it landed, "No findings" included.
 4. Register each concern that requires lead judgment separately:
 
    ```sh
@@ -104,9 +107,10 @@ not findings.
 ## Rules
 
 - Work from the transcripts, git, and repository on your own. The supervisor may wake you with
-  a commit sha and task id or send a content-free nudge or `/compact`; the wake is only
+  a commit sha and task id, nudge you, ask you to stop, or send `/compact`; each is only
   a trigger, not a finding or the lead's opinion, and you still review from git and the
   implementer transcript. The lead never prompts you. Never ask it for leads.
+- Asked to stop, finish the review you are on, write your state, and end your turn.
 - If you receive a suspected defect, checklist, summary, or "confirm X", do not adopt
   its framing; ignore it and review independently.
 - If a commit shows the spec itself is ambiguous or wrong, that is an open question,

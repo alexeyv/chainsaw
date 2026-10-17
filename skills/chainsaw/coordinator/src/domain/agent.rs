@@ -62,6 +62,12 @@ pub trait Agent {
   /// The prompt that asks a session to compact its context.
   fn compact_prompt(&self) -> &'static str;
 
+  /// The flags that make a session compact its own context, between turns
+  /// and with no prompt from anyone, once it holds about `tokens`. None for
+  /// an agent that cannot be told at launch; a long-lived session on it has
+  /// to be restarted instead.
+  fn compact_at_args(&self, tokens: u64) -> Option<Vec<String>>;
+
   /// The flags that make a new session take `id` as its own, for an agent
   /// that accepts one. None when the agent names its sessions itself, and the
   /// id has to be read from the transcript the session starts writing.

@@ -89,12 +89,6 @@ fn assistant_line(text: &str) -> String {
   )
 }
 
-fn tool_call_line(command: &str) -> String {
-  format!(
-    r#"{{"type":"response_item","payload":{{"type":"custom_tool_call","name":"exec","input":"{command}"}}}}"#
-  )
-}
-
 fn tool_output_line(text: &str) -> String {
   format!(
     r#"{{"type":"response_item","payload":{{"type":"function_call_output","output":"{text}"}}}}"#
@@ -135,6 +129,21 @@ mod default_args {
     assert_eq!(
       Codex.default_args(SessionKind::Commentator),
       Codex.default_args(SessionKind::Implementer)
+    );
+  }
+}
+
+mod compact_at_args {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(
+      Codex.compact_at_args(150_000),
+      Some(vec![
+        "-c".to_owned(),
+        "model_auto_compact_token_limit=150000".to_owned()
+      ])
     );
   }
 }
@@ -309,38 +318,6 @@ mod latest_assistant_text {
     let transcript = Transcript::containing(&user_line("hello"));
 
     assert_eq!(Codex.latest_assistant_text(transcript.path()), None);
-  }
-}
-
-mod output_mentions {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = Transcript::containing(&assistant_line("reviewed abc1234 and found nothing"));
-
-    assert!(Codex.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_count_a_tool_call() {
-    let transcript = Transcript::containing(&tool_call_line("git show abc1234"));
-
-    assert!(Codex.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_ignore_a_tool_output() {
-    let transcript = Transcript::containing(&tool_output_line("abc1234 fix: thing"));
-
-    assert!(!Codex.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_ignore_mentions_by_the_user() {
-    let transcript = Transcript::containing(&user_line("review abc1234"));
-
-    assert!(!Codex.output_mentions(transcript.path(), "abc1234"));
   }
 }
 

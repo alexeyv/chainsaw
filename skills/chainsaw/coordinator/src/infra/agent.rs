@@ -46,7 +46,6 @@ trait TranscriptFormat: Sync {
   fn context_peak(&self, transcript: &Path, start: u64, end: Option<u64>) -> ContextSize;
   fn prompt_state(&self, transcript: &Path, offset: u64, prompt: &str) -> PromptState;
   fn latest_assistant_text(&self, transcript: &Path) -> Option<String>;
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool;
   fn commit_candidates(&self, transcript: &Path, offset: u64, head: &str) -> Vec<String>;
 }
 
@@ -93,10 +92,6 @@ impl Transcript for TranscriptFile {
 
   fn latest_assistant_text(&self) -> Option<String> {
     self.format.latest_assistant_text(&self.path)
-  }
-
-  fn output_mentions(&self, text: &str) -> bool {
-    self.format.output_mentions(&self.path, text)
   }
 
   fn commit_candidates(&self, offset: u64, head: &str) -> Vec<String> {

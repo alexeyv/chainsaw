@@ -86,6 +86,11 @@ impl Agent for Cursor {
     "/summarize"
   }
 
+  /// The Cursor Agent CLI has no setting for when it compacts.
+  fn compact_at_args(&self, _tokens: u64) -> Option<Vec<String>> {
+    None
+  }
+
   /// Cursor names its own sessions: `--resume` takes only an existing chat.
   fn session_id_args(&self, _id: &str) -> Option<Vec<String>> {
     None
@@ -168,14 +173,6 @@ impl TranscriptFormat for Cursor {
       }
     }
     last
-  }
-
-  /// What the agent said or did: its text and its tool calls, which share an
-  /// assistant entry. Tool results are not in the transcript at all.
-  fn output_mentions(&self, transcript: &Path, text: &str) -> bool {
-    entries(transcript, 0)
-      .iter()
-      .any(|entry| is_from(entry, "assistant") && entry.to_string().contains(text))
   }
 
   /// The transcript keeps no tool output, so git's commit line never reaches

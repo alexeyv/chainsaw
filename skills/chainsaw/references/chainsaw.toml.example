@@ -27,6 +27,10 @@ prompt-timeout-seconds = 15
 # three times prompt-timeout-seconds to show up.
 # Each role's args are split like a shell would and passed to the agent as written:
 # quote a value that contains spaces, e.g. --append-system-prompt 'be terse'.
+# The commentator also gets a flag ahead of its args that makes it compact itself
+# at 150k tokens: --settings '{"autoCompactWindow":150000}' on claude, -c
+# model_auto_compact_token_limit=150000 on codex. Cursor has no such setting, so a
+# cursor commentator is replaced with a fresh one after 8 reviews or 90 minutes.
 
 [implementer]
 agent = "claude"

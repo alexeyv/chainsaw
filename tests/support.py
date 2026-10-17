@@ -31,6 +31,13 @@ FAKE_RUNTIMES = {
 READING_TURN = "Read the fixture files, then stop and wait for the task."
 #: Where the supervisor maps session names to the Orca terminals it opened.
 ORCA_REGISTRY_FILE_NAME = "chainsaw-orca-terminals.json"
+#: The flags the supervisor puts first on a commentator's command line so that it
+#: compacts itself at 150k, per agent; Cursor cannot be told.
+COMPACT_AT_ARGS = {
+    "claude": ["--settings", '{"autoCompactWindow":150000}'],
+    "codex": ["-c", "model_auto_compact_token_limit=150000"],
+    "cursor": [],
+}
 
 _configured_command = os.environ.get("CHAINSAW_SUPERVISOR_COMMAND")
 if _configured_command:
@@ -262,11 +269,37 @@ class SupervisorContractCase(unittest.TestCase):
             ).fetchone()
         return agent
 
+    def age_session(self, name, seconds):
+        """Move the live session `name`'s start and last growth `seconds` into the
+        past, as if it had been running and quiet that long."""
+        then = int((time.time() - seconds) * 1000)
+        self.write_supervisor_db(
+            "update sessions set started_at=?, last_growth=? where name=? and stopped_at is null",
+            then, then, name,
+        )
+
+    def incarnations(self, name):
+        """Each session row named `name`, oldest first, as `pane live|stopped`."""
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+            rows = database.execute(
+                "select pane_id, stopped_at is null from sessions where name=? order by id",
+                (name,),
+            ).fetchall()
+        return [f"{pane} {'live' if live else 'stopped'}" for pane, live in rows]
+
     def launch_args(self, name):
         """The agent flags the runtime was handed when it last started `name`,
         without the prompt that follows them."""
         args = self._start_args(name)
         return args[:args.index("--")]
+
+    def configured_args(self, name):
+        """The flags settings gave the commentator `name`: its launch flags after the
+        ones that tell it to compact itself."""
+        args = self.launch_args(name)
+        own = COMPACT_AT_ARGS[self.session_agent(name)]
+        self.assertEqual(args[:len(own)], own, "the commentator was not told to compact")
+        return args[len(own):]
 
     def launch_prompt(self, name):
         """The prompt `name` was last started on, after `--` on its command line."""
@@ -482,11 +515,12 @@ class SupervisorContractCase(unittest.TestCase):
         return state
 
     def start_daemon(self, lead="lead", session_id=None, agent=None, expected_exit=0,
-                     lead_transcript=True):
+                     lead_transcript=True, poll_interval_ms=10):
         """Start a daemon that must have exited with `expected_exit` by teardown.
         The lead runs on `agent` when named, otherwise on the daemon's default. It
         registers with the transcript its agent is already writing, so one is begun
-        for it unless the case says otherwise or has written its own."""
+        for it unless the case says otherwise or has written its own. A case that
+        needs time between the daemon's polls slows them down."""
         session_id = session_id or f"session-{lead}"
         kind = agent or "claude"
         written = list(fake_agent.transcripts_root(kind, self.home).rglob(f"*{session_id}.jsonl"))
@@ -497,7 +531,7 @@ class SupervisorContractCase(unittest.TestCase):
         command = [*self.supervisor_command, "--run-dir", str(self.run_dir),
                    "daemon", "--lead", lead, "--session-id", session_id,
                    *(["--agent", agent] if agent else []),
-                   "--poll-interval-ms", "10"]
+                   "--poll-interval-ms", str(poll_interval_ms)]
         stderr_path = self.sandbox / f"daemon-{len(self._daemons)}.stderr"
         process = subprocess.Popen(
             command,

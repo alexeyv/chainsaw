@@ -76,6 +76,21 @@ mod default_args {
   }
 }
 
+mod compact_at_args {
+  use super::*;
+
+  #[test]
+  fn should_work() {
+    assert_eq!(
+      Claude.compact_at_args(150_000),
+      Some(vec![
+        "--settings".to_owned(),
+        r#"{"autoCompactWindow":150000}"#.to_owned()
+      ])
+    );
+  }
+}
+
 mod session_id_args {
   use super::*;
 
@@ -223,25 +238,6 @@ mod latest_assistant_text {
       Claude.latest_assistant_text(transcript.path()).as_deref(),
       Some("said")
     );
-  }
-}
-
-mod output_mentions {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let transcript = Transcript::containing(&assistant_line("reviewed abc1234 and found nothing"));
-
-    assert!(Claude.output_mentions(transcript.path(), "abc1234"));
-  }
-
-  #[test]
-  fn should_ignore_mentions_by_the_user() {
-    let transcript =
-      Transcript::containing(r#"{"type":"user","message":{"content":"review abc1234"}}"#);
-
-    assert!(!Claude.output_mentions(transcript.path(), "abc1234"));
   }
 }
 

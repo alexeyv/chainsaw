@@ -1,5 +1,6 @@
 mod agent;
 mod calibration;
+mod commentator_watch;
 mod context_size;
 mod finding;
 mod human_wait;
@@ -20,6 +21,9 @@ use anyhow::{Result, bail};
 
 pub use agent::{Agent, Launched, PromptEcho, PromptState};
 pub use calibration::Calibration;
+pub use commentator_watch::{
+  COMMENTATOR_COMPACT_TOKENS, CommentatorAction, CommentatorReading, CommentatorWatch,
+};
 pub use context_size::ContextSize;
 pub use finding::{Finding, FindingVerdict};
 pub use human_wait::HumanWait;
