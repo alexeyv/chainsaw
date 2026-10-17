@@ -52,14 +52,6 @@ pub(super) fn cmd_launch(
   Ok(())
 }
 
-/// Starts a session on `prompt` and registers it once its agent has begun
-/// its transcript, a commentator with the `role_prompt` it was told to read.
-/// The prompt goes in with the session, so it is recorded as sent once and
-/// seen. Returns what the runtime and the agent know the session by.
-///
-/// A commentator is told at launch to compact itself at
-/// `COMMENTATOR_COMPACT_TOKENS`, when its agent can be. That flag goes ahead
-/// of the configured ones, so a configured flag of the same name wins.
 fn launch(
   run: &Run,
   store: &Store,
@@ -69,6 +61,7 @@ fn launch(
   role_prompt: Option<&Path>,
 ) -> Result<Value> {
   let agent = run.settings().launch_agent(kind);
+  // Before the configured args, so a configured flag of the same name wins.
   let mut args = match kind {
     SessionKind::Commentator => run
       .agent(agent)
