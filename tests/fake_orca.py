@@ -153,11 +153,14 @@ def open_terminal(current, command, title=None, split_from=None):
 
 def launched(command):
     """The program behind the shell command the supervisor hands a terminal:
-    `cd RUN_DIR && exec PROGRAM [--session-id ID] ARGS...`."""
+    `cd RUN_DIR && PROGRAM [--session-id ID] ARGS...; exit`."""
     words = shlex.split(ansi_c_unquoted(command))
-    if words[:1] != ["cd"] or words[2:4] != ["&&", "exec"] or len(words) < 5:
+    if words[:1] != ["cd"] or words[2:3] != ["&&"] or words[-1:] != ["exit"] or len(words) < 5:
         raise SystemExit(f"fake orca cannot run {command!r}")
-    run_dir, program, args = words[1], words[4], words[5:]
+    words[-2] = words[-2].removesuffix(";")
+    if not words[-2]:
+        words.pop(-2)
+    run_dir, program, args = words[1], words[3], words[4:-1]
     session_id = None
     if args[:1] == ["--session-id"]:
         session_id, args = args[1], args[2:]

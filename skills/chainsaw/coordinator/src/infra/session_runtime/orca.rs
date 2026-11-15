@@ -231,8 +231,13 @@ impl SessionRuntime for OrcaSessionRuntime {
     words.extend(assigned.iter().flatten().cloned());
     words.extend(session.args.iter().cloned());
     let run_dir = session.run_dir.to_string_lossy();
+    // The agent runs as a child of the pane's shell, not in its place: Orca
+    // looks for a running agent only among the shell's children, and a pane
+    // where it finds none gets prompts typed in unframed, which Claude Code
+    // keeps only part of past a kilobyte. The shell exits after the agent, so
+    // Orca still reports the terminal exited once the agent is gone.
     let command = format!(
-      "cd {} && exec {}",
+      "cd {} && {}; exit",
       quote_on_one_line(&run_dir),
       words
         .iter()

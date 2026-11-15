@@ -194,7 +194,7 @@ mod start {
         "worker",
         "--command",
         &format!(
-          "cd /tmp/run && exec claude --session-id {} --model sonnet --effort medium",
+          "cd /tmp/run && claude --session-id {} --model sonnet --effort medium; exit",
           started.external_id
         ),
         "--json"
@@ -235,7 +235,7 @@ mod start {
         "horizontal",
         "--command",
         &format!(
-          "cd /tmp/run && exec claude --session-id {}",
+          "cd /tmp/run && claude --session-id {}; exit",
           started.external_id
         ),
         "--json"
@@ -262,7 +262,7 @@ mod start {
     assert_eq!(
       orca.calls()[0][7],
       format!(
-        "cd '/tmp/my run' && exec claude --session-id {} --append-system-prompt 'be terse'",
+        "cd '/tmp/my run' && claude --session-id {} --append-system-prompt 'be terse'; exit",
         started.external_id
       )
     );
@@ -287,7 +287,7 @@ mod start {
     assert_eq!(
       orca.calls()[0][7],
       format!(
-        "cd /tmp/run && exec claude --session-id {} -- $'Read the role prompt.\\nRun directory: /tmp/run'",
+        "cd /tmp/run && claude --session-id {} -- $'Read the role prompt.\\nRun directory: /tmp/run'; exit",
         started.external_id
       )
     );
@@ -319,7 +319,7 @@ mod start {
     assert_eq!(
       orca.calls()[0][7],
       format!(
-        "cd {} && exec codex --dangerously-bypass-approvals-and-sandbox",
+        "cd {} && codex --dangerously-bypass-approvals-and-sandbox; exit",
         run_dir.display()
       )
     );
@@ -356,7 +356,7 @@ mod start {
     assert_eq!(
       orca.calls()[0][7],
       format!(
-        "cd {} && exec cursor-agent --trust --force 'Reply only with the word ready, then wait for the task.'",
+        "cd {} && cursor-agent --trust --force 'Reply only with the word ready, then wait for the task.'; exit",
         run_dir.display()
       )
     );
