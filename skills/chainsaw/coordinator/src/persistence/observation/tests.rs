@@ -5,7 +5,7 @@ fn millisecond_floor(time: DateTime<Utc>) -> DateTime<Utc> {
   DateTime::from_timestamp_millis(time.timestamp_millis()).unwrap()
 }
 
-use super::{after, create};
+use super::{after, create, newest_id};
 use crate::domain::Observation;
 use crate::domain::test_helpers::format_observation;
 use crate::persistence::test_fixture::{database, row_count, task_row};
@@ -174,6 +174,30 @@ mod after {
       format_observations(&after(&db.unchecked_transaction()?, 0, Some(5))?),
       format_observations(&[relevant, run_wide])
     );
+    Ok(())
+  }
+}
+
+mod newest_id {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    create(&transaction, None, "first")?;
+    let second = create(&transaction, None, "second")?;
+
+    assert_eq!(newest_id(&transaction)?, second.id());
+    Ok(())
+  }
+
+  #[test]
+  fn should_be_zero_when_there_is_no_observation() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+
+    assert_eq!(newest_id(&transaction)?, 0);
     Ok(())
   }
 }

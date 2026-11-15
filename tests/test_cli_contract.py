@@ -2435,17 +2435,32 @@ class ContinuationContractTests(SupervisorContractCase):
         self.assert_success(self.cli("observe", "second"))
         self.assert_success(self.cli("poll"))
         self.assert_success(self.cli("observe", "third"))
-        self.assert_success(self.cli("poll", "--task", str(task)))
-        self.assert_success(self.cli("poll", "--after-observation", "1"))
 
-        continuation = self.assert_success(self.cli("continuation"))
+        self.assert_success(self.cli("poll", "--task", str(task)))
+        after_task_poll = self.assert_success(self.cli("continuation"))
+        self.assert_success(self.cli("poll", "--after-observation", "3"))
+        self.assert_success(self.cli("poll", "--after-observation", "0"))
+        after_earlier_poll = self.assert_success(self.cli("continuation"))
         resumed = json.loads(self.assert_success(self.cli(
             "poll", "--after-observation", "2",
         )).stdout)
 
-        self.assertIn("observation cursor 3\n", continuation.stdout)
-        self.assertIn("next poll: poll --after-observation 3\n", continuation.stdout)
+        self.assertIn("observation cursor 2\n", after_task_poll.stdout)
+        self.assertIn("observation cursor 3\n", after_earlier_poll.stdout)
+        self.assertIn("next poll: poll --after-observation 3\n", after_earlier_poll.stdout)
         self.assertEqual([item["text"] for item in resumed["observations"]], ["third"])
+
+    def test_a_cursor_past_the_newest_observation_is_refused_and_not_recorded(self):
+        self.new_task()
+        self.assert_success(self.cli("observe", "only"))
+
+        result = self.cli("poll", "--after-observation", "5")
+        continuation = self.assert_success(self.cli("continuation"))
+
+        self.assert_failure(
+            result, "supervisor: --after-observation 5 is past the newest observation 1",
+        )
+        self.assertIn("observation cursor 0\n", continuation.stdout)
 
     def test_a_new_lead_ends_the_lead_before_it_and_the_implementers_that_are_done(self):
         finished, _ = self.prepare_committed_task()

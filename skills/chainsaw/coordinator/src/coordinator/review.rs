@@ -44,6 +44,14 @@ pub(super) fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i6
     if let Some(task_id) = task_id {
       require_task(tx, task_id)?;
     }
+    // No poll ever returned a cursor past the newest observation, so one is
+    // made up; recorded, it would make a continuing lead skip observations.
+    let newest = observation::newest_id(tx)?;
+    if after_observation > newest {
+      bail!(
+        "supervisor: --after-observation {after_observation} is past the newest observation {newest}"
+      );
+    }
     Ok((
       observation::after(tx, after_observation, task_id)?,
       finding::unresolved(tx, task_id)?,

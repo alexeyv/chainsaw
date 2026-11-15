@@ -50,6 +50,15 @@ pub fn after(
   rows.map(|row| materialize(row?)).collect()
 }
 
+/// The id of the newest observation, or 0 when there is none.
+pub fn newest_id(transaction: &Transaction<'_>) -> Result<i64> {
+  Ok(
+    transaction.query_row("select coalesce(max(id), 0) from observations", [], |row| {
+      row.get(0)
+    })?,
+  )
+}
+
 fn observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRow> {
   Ok(ObservationRow {
     id: row.get("id")?,
