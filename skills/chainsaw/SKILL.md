@@ -97,11 +97,11 @@ have different semantics:
 - A **finding** is a task-specific concern requiring your judgment. Its numeric id is
   stable for the run and it remains unresolved until a `resolve` command succeeds.
 
-Start with observation cursor `0` and an empty map of unresolved findings keyed by
-finding id. Poll run-wide so no task's review is omitted:
+Start with observation cursor `0`, or on a continuation the cursor `$SUP continuation`
+printed, and an empty map of unresolved findings keyed by finding id. Poll run-wide
+so no task's review is omitted:
 
 ```sh
-$SUP poll --after-observation 0
 $SUP poll --after-observation "$OBSERVATION_CURSOR"
 ```
 
