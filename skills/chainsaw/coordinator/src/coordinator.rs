@@ -11,6 +11,7 @@ use crate::run::Run;
 
 mod accept;
 mod calibrate;
+mod continuation;
 mod daemon;
 mod prompt;
 mod review;
@@ -20,6 +21,7 @@ mod tasks;
 
 use accept::{cmd_accept, cmd_task_record_commentary, cmd_task_record_commit};
 use calibrate::cmd_calibrate;
+use continuation::{cmd_continuation, cmd_handoff, cmd_reset};
 use prompt::{cmd_prompt, daemon_prompt};
 use review::{cmd_finding, cmd_observe, cmd_poll, cmd_resolutions, cmd_resolve};
 use sessions::{
@@ -52,7 +54,8 @@ pub fn execute(run: &Run, store: &Store, command: Command) -> Result<()> {
 }
 
 /// Commands whose output the lead reads. The daemon and the commentator's
-/// watch never return; the rest print a value the lead pipes somewhere.
+/// watch never return; reset moves the state the warnings are read from; the
+/// rest print a value the lead pipes somewhere.
 fn is_lead_facing(command: &Command) -> bool {
   !matches!(
     command,
@@ -61,6 +64,7 @@ fn is_lead_facing(command: &Command) -> bool {
       | Command::StateDir
       | Command::Context { .. }
       | Command::Stop
+      | Command::Reset
   )
 }
 
@@ -229,6 +233,9 @@ fn dispatch(run: &Run, store: &Store, command: Command) -> Result<()> {
     Command::Context { name } => cmd_context(run, store, name.as_deref()),
     Command::HumanWait { action } => cmd_human_wait(store, action),
     Command::Stop => cmd_stop(store),
+    Command::Handoff => cmd_handoff(run, store),
+    Command::Continuation => cmd_continuation(run, store),
+    Command::Reset => cmd_reset(run, store),
   }
 }
 

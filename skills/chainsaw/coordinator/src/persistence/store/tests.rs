@@ -206,11 +206,12 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
   )?;
   let run_rows = db.query_row(
     "select count(*) from run where daemon_seen_at is null
-       and stop_requested_at is null and state_read_at is null",
+       and stop_requested_at is null and state_read_at is null
+       and observation_cursor=0 and daemon_pid is null",
     [],
     |row| row.get::<_, i64>(0),
   )?;
-  assert_eq!(version, 1);
+  assert_eq!(version, 2);
   assert_eq!(launch_columns, 2);
   assert_eq!(task_id_required, 1);
   assert_eq!(task_foreign_keys, 2);
@@ -228,14 +229,48 @@ fn creates_communication_storage_with_foreign_keys() -> Result<()> {
 #[test]
 fn refuses_a_database_from_another_schema_version() -> Result<()> {
   let db = Connection::open_in_memory()?;
-  db.execute_batch("pragma user_version=2;")?;
+  db.execute_batch("pragma user_version=3;")?;
 
   let error = initialize_schema(&db).unwrap_err();
 
   assert_eq!(
     error.to_string(),
-    "database schema version 2 is unsupported; expected 1: remove the database and start a new run"
+    "database schema version 3 is unsupported; expected 2: remove the database and start a new run"
   );
+  Ok(())
+}
+
+/// The run table as version 1 created it, with a run under way.
+const VERSION_1_RUN: &str = "
+create table run(
+  id integer primary key check(id=1),
+  daemon_seen_at int, stop_requested_at int, state_read_at int);
+insert into run(id, state_read_at) values(1, 1700000000000);
+pragma user_version=1;
+";
+
+#[test]
+fn migrates_a_version_1_run_so_it_can_be_continued() -> Result<()> {
+  let db = Connection::open_in_memory()?;
+  db.execute_batch(VERSION_1_RUN)?;
+
+  initialize_schema(&db)?;
+
+  let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+  let run = db.query_row(
+    "select state_read_at, observation_cursor, daemon_pid from run where id=1",
+    [],
+    |row| {
+      Ok(format!(
+        "read={} cursor={} daemon={:?}",
+        row.get::<_, i64>(0)?,
+        row.get::<_, i64>(1)?,
+        row.get::<_, Option<i64>>(2)?,
+      ))
+    },
+  )?;
+  assert_eq!(version, 2);
+  assert_eq!(run, "read=1700000000000 cursor=0 daemon=None");
   Ok(())
 }
 

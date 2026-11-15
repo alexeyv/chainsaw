@@ -1,28 +1,39 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 
-/// Live facts about the run as a whole: when a daemon last polled, when the
-/// lead asked the run to stop, and when state was last read. There is exactly
-/// one per database, seeded with the schema, so every field starts empty.
+/// Live facts about the run as a whole: when a daemon last polled and which
+/// daemon owns the run, when the lead asked the run to stop, when state was
+/// last read, and how far the lead has read the observations. There is
+/// exactly one per database, seeded with the schema, so every field starts
+/// empty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
   daemon_seen_at: Option<DateTime<Utc>>,
   stop_requested_at: Option<DateTime<Utc>>,
   state_read_at: Option<DateTime<Utc>>,
+  observation_cursor: i64,
+  daemon_pid: Option<u32>,
 }
 
 impl Run {
-  /// The three facts are independent of one another: a stop may be requested
+  /// The facts are independent of one another: a stop may be requested
   /// before any daemon polls, and state may be read before either.
   pub fn new(
     daemon_seen_at: Option<DateTime<Utc>>,
     stop_requested_at: Option<DateTime<Utc>>,
     state_read_at: Option<DateTime<Utc>>,
+    observation_cursor: i64,
+    daemon_pid: Option<u32>,
   ) -> Result<Self> {
+    if observation_cursor < 0 {
+      bail!("observation_cursor cannot be negative");
+    }
     Ok(Self {
       daemon_seen_at,
       stop_requested_at,
       state_read_at,
+      observation_cursor,
+      daemon_pid,
     })
   }
 
@@ -36,6 +47,18 @@ impl Run {
 
   pub fn state_read_at(&self) -> Option<DateTime<Utc>> {
     self.state_read_at
+  }
+
+  /// The cursor the lead's last run-wide poll returned: the observations
+  /// before it have been delivered. A continuing lead polls after it.
+  pub fn observation_cursor(&self) -> i64 {
+    self.observation_cursor
+  }
+
+  /// The process id of the daemon that started last, which owns the run; an
+  /// earlier daemon still polling has been superseded.
+  pub fn daemon_pid(&self) -> Option<u32> {
+    self.daemon_pid
   }
 
   /// A stop stands until the next daemon start clears it.

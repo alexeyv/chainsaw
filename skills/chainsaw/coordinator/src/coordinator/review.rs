@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::cli::Verdict;
 use crate::domain::{FindingVerdict, RunEventKind, Task};
 use crate::persistence::store::Store;
-use crate::persistence::{finding, observation, run_event, task};
+use crate::persistence::{finding, observation, run as run_record, run_event, task};
 
 pub(super) fn cmd_observe(store: &Store, task_id: Option<i64>, text: &str) -> Result<()> {
   let observation = store.write(|tx| {
@@ -52,6 +52,11 @@ pub(super) fn cmd_poll(store: &Store, after_observation: i64, task_id: Option<i6
   let observation_cursor = observations
     .last()
     .map_or(after_observation, |observation| observation.id());
+  // Only the lead polls run-wide, so this is how far the lead has read; a
+  // continuing lead picks up from it.
+  if task_id.is_none() {
+    store.write(|tx| run_record::record_observation_cursor(tx, observation_cursor))?;
+  }
   let observations = observations
     .into_iter()
     .map(|observation| {

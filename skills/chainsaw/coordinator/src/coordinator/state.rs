@@ -93,8 +93,8 @@ pub(super) fn cmd_state(run: &Run, store: &Store, only_task: Option<i64>) -> Res
 
 /// The supervisor actions worth a line at the bottom of `state`: prompts it
 /// pushed at a session or gave up on, how it kept the commentator's context
-/// in hand, the overrides the lead forced, and how an abort reached its
-/// session. Launches, dispatches, commits and the
+/// in hand, the overrides the lead forced, how an abort reached its session,
+/// and how one lead handed the run to the next. Launches, dispatches, commits and the
 /// daemon's own lifecycle are visible elsewhere in `state` and stay out.
 const STATE_EVENT_KINDS: &[RunEventKind] = &[
   RunEventKind::StopLead,
@@ -114,6 +114,8 @@ const STATE_EVENT_KINDS: &[RunEventKind] = &[
   RunEventKind::CommentaryWake,
   RunEventKind::AbortInterrupt,
   RunEventKind::AbortUnreachable,
+  RunEventKind::Handoff,
+  RunEventKind::Takeover,
 ];
 
 fn clock_time(millis: i64) -> String {

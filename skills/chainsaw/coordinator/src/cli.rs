@@ -7,7 +7,7 @@ use crate::domain::AgentKind;
 #[derive(Debug, Parser)]
 #[command(about = "Coordinate a Chainsaw development run")]
 pub struct Cli {
-  /// The run's clean-slate checkout.
+  /// The run's checkout.
   #[arg(long, global = true, default_value = ".")]
   pub run_dir: PathBuf,
 
@@ -142,6 +142,13 @@ pub enum Command {
   HumanWait { action: HumanWaitAction },
   /// Ask the daemon to stop.
   Stop,
+  /// Save the continuation prompt, read from standard input, for the next lead.
+  Handoff,
+  /// Say whether this is a new run or a continuation, and print what the
+  /// previous lead handed off.
+  Continuation,
+  /// Archive this run's state so that the next command starts a new run.
+  Reset,
 }
 
 #[derive(Debug, Subcommand)]

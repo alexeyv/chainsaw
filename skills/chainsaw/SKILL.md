@@ -14,8 +14,9 @@ the commentator's findings — not implementation detail.
 1. Verify you are inside Herdr (`test "${HERDR_ENV:-}" = 1`) or Orca
    (`test -n "${ORCA_TERMINAL_HANDLE:-}"`); if neither, stop and say so. The supervisor
    opens sessions through whichever one it finds itself in.
-2. Check your inputs: a spec and a clean-slate run directory — a checkout in which no
-   session has ever started. The check itself needs the supervisor client, so it is in
+2. Find out whether you begin a new run or continue one. A new run needs a spec. A
+   run directory where an earlier lead already ran is a continuation, and you take it
+   over without asking the human. The check needs the supervisor client, so it is in
    the next step.
 3. Resolve the role path and the supervisor client from this file's own location, not
    the run directory: `ROLE=$(realpath <dir of this SKILL.md>/references/commentator.md)`
@@ -23,14 +24,30 @@ the commentator's findings — not implementation detail.
    the supervisor on first use, so no separate cargo step is needed. Define the client
    invocation once — `--run-dir` comes before the subcommand:
    `SUP="$SUPERVISOR --run-dir <run-dir>"`. Every command below is `$SUP <command>`.
-   Now the clean-slate check: `$SUP state-dir` prints where the supervisor keeps this
-   run's state, outside the run tree. That directory must hold nothing but the database
-   the supervisor has just created, and `$SUP state` must list no sessions and no
-   tasks. If either shows an earlier run, tell the human and stop.
+   Now run `$SUP continuation`. Its first line says which case you are in:
+   - `new run: ...` — nothing has run here yet. Begin from the spec. If you have no
+     spec, ask the human for one.
+   - `continuation: ...` — an earlier lead ran this run. Carry on from where it
+     stopped. Do not ask the human whether to. The output gives the observation
+     cursor to poll from. The supervisor recorded that cursor, so it beats any cursor
+     in the snapshot. After the cursor comes the continuation prompt the previous
+     lead handed off. It is a state snapshot, not the process: this skill is still
+     the process. If no prompt was handed off, rebuild what you need from `$SUP
+     state`, `$SUP poll` and git. Finish this setup as below. Then reconcile before
+     you dispatch anything: `$SUP state` for each task's state, and `$SUP poll
+     --after-observation <cursor>` for the unresolved findings. Check the snapshot
+     against git, then go into the loop. A task still `dispatched` or `in_flight`
+     belongs to an implementer that is still working, so watch it as usual.
+     If no work is left, ask the human.
+   Never run `$SUP reset` yourself. The human runs it to start over on purpose. It
+   archives the run's state, and the next `/chainsaw` here then begins a new run.
    First name your pane and tab: under Herdr `herdr agent rename "$HERDR_PANE_ID" lead && herdr tab rename "$HERDR_TAB_ID" lead`,
    under Orca `orca terminal rename --title lead`.
    Then start the supervisor once, as a background process:
    `$SUP daemon --lead lead --session-id <your-session-id> --agent <your-agent> &`.
+   On a continuation, starting the daemon takes the run over. It ends the earlier
+   lead and every implementer whose tasks are all accepted or aborted, and any
+   earlier daemon still running exits by itself.
    `--agent` is the agent you are running on: `claude`, `codex` or `cursor`. The
    session id is your own, as that agent names it; it names your transcript, which the
    daemon reads to measure your context. Under Claude Code it is the UUID that names
@@ -41,7 +58,8 @@ the commentator's findings — not implementation detail.
    directory. Under Cursor it is the directory that holds your transcript,
    `~/.cursor/projects/<project>/agent-transcripts/<session id>/`.
 4. `$SUP start-commentator --role-prompt "$ROLE"` starts the commentator in a pane split
-   from yours.
+   from yours. On a continuation it replaces the earlier commentator and closes that
+   one's pane. The new one picks up from the notes the earlier one left.
 
 5. The supervisor launches implementers and the commentator with `--model opus
    --effort high` plus its other default Claude flags. Optional TOML files tune
@@ -114,7 +132,8 @@ If `resolve` fails, the finding is still unresolved. The database is authoritati
 never infer a resolution from a drafted task or from a finding disappearing from local
 notes. Carry both the exact observation cursor and the full unresolved map (stable
 finding number, source task, description, and current judgment) through `/compact`,
-continuation prompts, and handoffs.
+continuation prompts, and handoffs. The supervisor also records the cursor of every
+run-wide poll, and `$SUP continuation` prints it for the lead that comes after you.
 
 ## Task lifecycle
 
@@ -353,12 +372,18 @@ When the user says to stop OR a supervisor command's output warns that your cont
 
 1. Let the in-flight implementer finish.
 2. Wait for the commentator's findings on that commit.
-3. Write the continuation prompt to the run directory. Its first line is an
-   instruction, not state: "Invoke the `chainsaw` skill and read it in full before
-   any other tool call; this file is a state snapshot, not the process." A lead that
-   resumed from a continuation without the skill fired implementers as sub-agents and
-   in parallel. Then: HEAD, the gate command and
+3. Write the continuation prompt and hand it to the supervisor on standard input,
+   with a heredoc (`$SUP handoff <<'EOF'` … `EOF`) rather than a file in the run
+   tree. The supervisor stores it in the state directory. The next lead started in this run
+   directory reads it back through `$SUP continuation`, after it has loaded this
+   skill. Its first line is still an instruction, not state: "Invoke the `chainsaw`
+   skill and read it in full before any other tool call; this file is a state
+   snapshot, not the process." A human may paste the prompt into a fresh session
+   too, and a lead that resumed from a continuation without the skill fired
+   implementers as sub-agents and in parallel. Then: HEAD, the gate command and
    exact numbers, done/next derived from git not remembered, the exact observation
-   cursor, every unresolved finding keyed by its stable number in full, resolved
-   findings and their reasons, open questions, traps hit.
-4. `$SUP stop`.
+   cursor, every unresolved finding keyed by its stable number in full with your
+   current judgment, resolved findings and their reasons, open questions, traps hit,
+   and any implementer launched on its reading turn that is still waiting for a task.
+4. `$SUP stop`. The next `/chainsaw` in this run directory continues the run. To
+   start over, the human runs `$SUP reset`.
