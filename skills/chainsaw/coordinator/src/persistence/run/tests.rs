@@ -2,7 +2,10 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::Connection;
 
-use super::{clear_stop_request, get, record_daemon_seen, record_state_read, request_stop};
+use super::{
+  claim_daemon, clear_stop_request, get, record_daemon_seen, record_observation_cursor,
+  record_state_read, request_stop,
+};
 use crate::domain::test_helpers::{format_run, within};
 use crate::persistence::test_fixture::database;
 
@@ -43,7 +46,9 @@ mod get {
       r#"daemon_seen_at: none
 stop_requested_at: none
 state_read_at: none
-is_stopping: false"#
+is_stopping: false
+observation_cursor: 0
+daemon_pid: none"#
     );
     Ok(())
   }
@@ -229,7 +234,9 @@ mod clear_stop_request {
       r#"daemon_seen_at: none
 stop_requested_at: none
 state_read_at: none
-is_stopping: false"#
+is_stopping: false
+observation_cursor: 0
+daemon_pid: none"#
     );
     Ok(())
   }
@@ -262,6 +269,104 @@ is_stopping: false"#
     let transaction = db.transaction()?;
 
     let error = clear_stop_request(&transaction).unwrap_err();
+
+    assert_eq!(error.to_string(), "run record is missing");
+    Ok(())
+  }
+}
+
+/// The run record's continuation facts as stored.
+fn stored_continuation(db: &Connection) -> Result<String> {
+  let row = db.query_row(
+    "select observation_cursor, daemon_pid from run where id=1",
+    [],
+    |row| {
+      Ok(format!(
+        "cursor={} daemon={:?}",
+        row.get::<_, i64>(0)?,
+        row.get::<_, Option<i64>>(1)?,
+      ))
+    },
+  )?;
+  Ok(row)
+}
+
+mod claim_daemon {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+
+    let run = claim_daemon(&transaction, 4321)?;
+    transaction.commit()?;
+
+    assert_eq!(run.daemon_pid(), Some(4321));
+    assert_eq!(stored_continuation(&db)?, "cursor=0 daemon=Some(4321)");
+    Ok(())
+  }
+
+  #[test]
+  fn should_hand_the_run_to_the_later_daemon_when_claimed_again() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    claim_daemon(&transaction, 4321)?;
+
+    let run = claim_daemon(&transaction, 8765)?;
+
+    assert_eq!(run.daemon_pid(), Some(8765));
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
+    let mut db = database();
+    delete_run_row(&db)?;
+    let transaction = db.transaction()?;
+
+    let error = claim_daemon(&transaction, 4321).unwrap_err();
+
+    assert_eq!(error.to_string(), "run record is missing");
+    Ok(())
+  }
+}
+
+mod record_observation_cursor {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+
+    let run = record_observation_cursor(&transaction, 7)?;
+    transaction.commit()?;
+
+    assert_eq!(run.observation_cursor(), 7);
+    assert_eq!(stored_continuation(&db)?, "cursor=7 daemon=None");
+    Ok(())
+  }
+
+  #[test]
+  fn should_keep_the_later_cursor_when_an_earlier_one_is_recorded() -> Result<()> {
+    let mut db = database();
+    let transaction = db.transaction()?;
+    record_observation_cursor(&transaction, 7)?;
+
+    let run = record_observation_cursor(&transaction, 3)?;
+
+    assert_eq!(run.observation_cursor(), 7);
+    Ok(())
+  }
+
+  #[test]
+  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
+    let mut db = database();
+    delete_run_row(&db)?;
+    let transaction = db.transaction()?;
+
+    let error = record_observation_cursor(&transaction, 7).unwrap_err();
 
     assert_eq!(error.to_string(), "run record is missing");
     Ok(())

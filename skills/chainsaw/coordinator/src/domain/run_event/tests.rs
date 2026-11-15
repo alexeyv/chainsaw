@@ -36,7 +36,9 @@ mod try_from {
         "commentator-restart-failed",
       ),
       (RunEventKind::StopLead, "stop-lead"),
+      (RunEventKind::Handoff, "handoff"),
       (RunEventKind::Stop, "stop"),
+      (RunEventKind::Takeover, "takeover"),
       (RunEventKind::DaemonStart, "daemon-start"),
       (RunEventKind::DaemonExit, "daemon-exit"),
     ];

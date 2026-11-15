@@ -35,7 +35,9 @@ pub enum RunEventKind {
   CommentatorRestart,
   CommentatorRestartFailed,
   StopLead,
+  Handoff,
   Stop,
+  Takeover,
   DaemonStart,
   DaemonExit,
 }
@@ -67,7 +69,9 @@ impl RunEventKind {
       Self::CommentatorRestart => "commentator-restart",
       Self::CommentatorRestartFailed => "commentator-restart-failed",
       Self::StopLead => "stop-lead",
+      Self::Handoff => "handoff",
       Self::Stop => "stop",
+      Self::Takeover => "takeover",
       Self::DaemonStart => "daemon-start",
       Self::DaemonExit => "daemon-exit",
     }

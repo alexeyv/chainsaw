@@ -4,12 +4,13 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 create table run(
   id integer primary key check(id=1),
-  daemon_seen_at int, stop_requested_at int, state_read_at int);
+  daemon_seen_at int, stop_requested_at int, state_read_at int,
+  observation_cursor int not null default 0, daemon_pid int);
 insert into run(id) values(1);
 create table sessions(
   id integer primary key, name text not null, role text not null,
@@ -53,7 +54,16 @@ create table human_waits(id integer primary key, started int, ended int);
 create table run_events(
   id integer primary key autoincrement,
   kind text not null, detail text not null, created_at int not null);
-pragma user_version=1;
+pragma user_version=2;
+"#;
+
+/// Brings a version 1 database, from before runs could be continued, to
+/// version 2: the run record learns the lead's observation cursor and which
+/// daemon owns the run.
+const MIGRATE_FROM_1: &str = r#"
+alter table run add column observation_cursor int not null default 0;
+alter table run add column daemon_pid int;
+pragma user_version=2;
 "#;
 
 pub const DATABASE_FILE_NAME: &str = "chainsaw-supervisor.db";
@@ -114,6 +124,7 @@ pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
       }
       transaction.execute_batch(SCHEMA)?;
     }
+    1 => transaction.execute_batch(MIGRATE_FROM_1)?,
     SCHEMA_VERSION => {}
     version => bail!(
       "database schema version {version} is unsupported; expected {SCHEMA_VERSION}: remove the database and start a new run"

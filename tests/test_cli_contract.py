@@ -2350,3 +2350,201 @@ class CommentatorContextContractTests(SupervisorContractCase):
         self.stop_daemon(daemon)
 
         self.assertEqual(self.prompts_to(commentator)[-1], "continue")
+
+
+class ContinuationContractTests(SupervisorContractCase):
+    """A run outlives one lead. The lead that stops hands off a continuation prompt;
+    the next lead started in the same run directory reads it back with the run's own
+    facts, and its daemon takes the run over from the sessions before it. Starting
+    over is a deliberate reset that archives the run's state."""
+
+    def stop_daemon(self, daemon):
+        self.assert_success(self.cli("stop"))
+        daemon.wait(timeout=10)
+
+    def run_events(self, kind):
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+            return [detail for (detail,) in database.execute(
+                "select detail from run_events where kind=? order by id", (kind,),
+            )]
+
+    def test_a_run_with_nothing_in_it_is_a_new_run(self):
+        result = self.assert_success(self.cli("continuation"))
+
+        self.assertEqual(result.stdout, "new run: no tasks and no sessions yet\n")
+
+    def test_the_next_lead_reads_back_the_handed_off_prompt_with_the_runs_facts(self):
+        task = self.new_task()
+        self.assert_success(self.cli("finding", "--task", str(task), "missing test"))
+
+        handed_off = self.assert_success(self.cli(
+            "handoff", input_text="HEAD abc123; task 1 drafted, not dispatched.\n",
+        ))
+        state = self.assert_success(self.cli("state"))
+        continuation = self.assert_success(self.cli("continuation"))
+
+        path = self.state_dir / "chainsaw-continuation.md"
+        self.assertEqual(
+            handed_off.stdout,
+            f"supervisor: continuation prompt saved to {path}; the next lead started in"
+            f" {self.run_dir.resolve()} continues from it\n",
+        )
+        self.assertIn(f"handoff {path}", state.stdout)
+        self.assertEqual(
+            continuation.stdout,
+            "continuation: 1 tasks, 1 unresolved findings, observation cursor 0\n"
+            "next poll: poll --after-observation 0\n"
+            "\n"
+            f"continuation prompt from the previous lead ({path}):\n"
+            "HEAD abc123; task 1 drafted, not dispatched.\n",
+        )
+
+    def test_a_later_handoff_replaces_the_earlier_one(self):
+        self.new_task()
+        self.assert_success(self.cli("handoff", input_text="first lead's snapshot"))
+
+        self.assert_success(self.cli("handoff", input_text="second lead's snapshot"))
+        continuation = self.assert_success(self.cli("continuation"))
+
+        self.assertTrue(continuation.stdout.endswith("):\nsecond lead's snapshot\n"))
+        self.assertNotIn("first lead's snapshot", continuation.stdout)
+
+    def test_handoff_refuses_an_empty_prompt(self):
+        result = self.cli("handoff", input_text="  \n")
+
+        self.assert_failure(result, "the continuation prompt on standard input is empty")
+        self.assertFalse((self.state_dir / "chainsaw-continuation.md").exists())
+
+    def test_a_continuation_nobody_handed_off_says_where_to_rebuild_from(self):
+        self.new_task()
+
+        continuation = self.assert_success(self.cli("continuation"))
+
+        self.assertEqual(
+            continuation.stdout,
+            "continuation: 1 tasks, 0 unresolved findings, observation cursor 0\n"
+            "next poll: poll --after-observation 0\n"
+            "\n"
+            "no continuation prompt was handed off; rebuild what you need from `state`,"
+            " `poll` and git\n",
+        )
+
+    def test_the_continuation_resumes_from_the_last_run_wide_poll(self):
+        task = self.new_task()
+        self.assert_success(self.cli("observe", "--task", str(task), "first"))
+        self.assert_success(self.cli("observe", "second"))
+        self.assert_success(self.cli("poll"))
+        self.assert_success(self.cli("observe", "third"))
+        self.assert_success(self.cli("poll", "--task", str(task)))
+        self.assert_success(self.cli("poll", "--after-observation", "1"))
+
+        continuation = self.assert_success(self.cli("continuation"))
+        resumed = json.loads(self.assert_success(self.cli(
+            "poll", "--after-observation", "2",
+        )).stdout)
+
+        self.assertIn("observation cursor 3\n", continuation.stdout)
+        self.assertIn("next poll: poll --after-observation 3\n", continuation.stdout)
+        self.assertEqual([item["text"] for item in resumed["observations"]], ["third"])
+
+    def test_a_new_lead_ends_the_lead_before_it_and_the_implementers_that_are_done(self):
+        finished, _ = self.prepare_committed_task()
+        self.assert_success(self.cli("accept", str(finished)))
+        out = self.new_task(text="Second task.", files="second.txt")
+        self.launch("worker-2")
+        self.assert_success(self.dispatch(out, "worker-2"))
+        self.launch("worker-3")
+        commentator = self.start_commentator()
+
+        daemon = self.start_daemon(session_id="session-lead-2")
+        state = self.wait_for_state("takeover")
+        self.stop_daemon(daemon)
+
+        self.assertIn("takeover lead session-lead-2 ended worker, lead", state.stdout)
+        self.assertEqual(self.incarnations("lead"), ["None stopped", "None live"])
+        self.assertEqual(self.incarnations("worker"), [f"{self.pane('worker')} stopped"])
+        self.assertEqual(self.incarnations("worker-2"), [f"{self.pane('worker-2')} live"])
+        self.assertEqual(self.incarnations("worker-3"), [f"{self.pane('worker-3')} live"])
+        self.assertEqual(self.incarnations(commentator), [f"{self.pane(commentator)} live"])
+
+    def pane(self, name):
+        """The pane the supervisor recorded for the session row named `name`."""
+        with sqlite3.connect(self.state_dir / "chainsaw-supervisor.db") as database:
+            (pane,) = database.execute(
+                "select pane_id from sessions where name=? order by id desc limit 1", (name,),
+            ).fetchone()
+        return pane
+
+    def test_the_same_lead_restarting_its_daemon_takes_nothing_over(self):
+        finished, _ = self.prepare_committed_task()
+        self.assert_success(self.cli("accept", str(finished)))
+
+        daemon = self.start_daemon()
+        self.wait_for_state("lead             lead")
+        self.stop_daemon(daemon)
+
+        self.assertEqual(self.run_events("takeover"), [])
+        self.assertEqual(self.incarnations("lead"), ["None live"])
+        self.assertEqual(self.incarnations("worker"), [f"{self.pane('worker')} live"])
+
+    def test_a_daemon_started_later_supersedes_one_still_running(self):
+        earlier = self.start_daemon()
+        self.wait_for_state("lead             lead")
+
+        later = self.start_daemon(session_id="session-lead-2")
+        earlier.wait(timeout=10)
+        self.stop_daemon(later)
+
+        exits = self.run_events("daemon-exit")
+        self.assertEqual(earlier.returncode, 0)
+        self.assertEqual(exits, [
+            f"pid {earlier.pid}, superseded by pid {later.pid}", f"pid {later.pid}",
+        ])
+
+    def test_starting_the_commentator_again_closes_the_earlier_ones_pane(self):
+        commentator = self.start_commentator()
+        first_pane = self.pane(commentator)
+
+        self.start_commentator()
+
+        second_pane = self.pane(commentator)
+        self.assertIn({"operation": "close", "session_id": first_pane}, self.runtime_operations())
+        self.assertEqual(
+            self.incarnations(commentator), [f"{first_pane} stopped", f"{second_pane} live"],
+        )
+
+    def test_reset_archives_the_run_so_the_next_command_starts_a_new_one(self):
+        self.new_task()
+        self.assert_success(self.cli("handoff", input_text="snapshot"))
+        state_dir = self.state_dir
+
+        reset = self.assert_success(self.cli("reset"))
+        continuation = self.assert_success(self.cli("continuation"))
+
+        (archive,) = state_dir.parent.glob(f"{state_dir.name}.archived-*")
+        self.assertEqual(
+            reset.stdout,
+            f"supervisor: archived this run's state to {archive}; the next command in"
+            f" {self.run_dir.resolve()} starts a new run\n",
+        )
+        self.assertTrue((archive / "chainsaw-supervisor.db").exists())
+        self.assertEqual((archive / "chainsaw-continuation.md").read_text(), "snapshot")
+        self.assertEqual(continuation.stdout, "new run: no tasks and no sessions yet\n")
+
+    def test_reset_of_a_new_run_leaves_it_alone(self):
+        reset = self.assert_success(self.cli("reset"))
+
+        self.assertEqual(
+            reset.stdout, "supervisor: nothing to reset; the run has no tasks and no sessions\n",
+        )
+        self.assertEqual(list(self.state_dir.parent.glob("*.archived-*")), [])
+
+    def test_reset_refuses_while_a_daemon_runs_the_run(self):
+        daemon = self.start_daemon()
+        self.wait_for_state("lead             lead")
+
+        result = self.cli("reset")
+        self.stop_daemon(daemon)
+
+        self.assert_failure(result, "a daemon is still running this run; `stop` it before resetting")
+        self.assertEqual(list(self.state_dir.parent.glob("*.archived-*")), [])

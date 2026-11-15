@@ -34,28 +34,36 @@ pub(super) fn start(
   lead_agent: AgentKind,
   poll_interval: Duration,
 ) -> Result<()> {
+  let pid = std::process::id();
   register_lead(run, store, lead, lead_session_id, lead_agent)?;
   store.write(|tx| {
     run_record::clear_stop_request(tx)?;
-    run_event::create(
-      tx,
-      RunEventKind::DaemonStart,
-      &format!("pid {}", std::process::id()),
-    )?;
+    run_record::claim_daemon(tx, pid)?;
+    run_event::create(tx, RunEventKind::DaemonStart, &format!("pid {pid}"))?;
     Ok(())
   })?;
   let mut sizes: HashMap<String, u64> = HashMap::new();
   let mut watches: HashMap<i64, CommentatorWatch> = HashMap::new();
   loop {
-    // One write transaction per poll: read the stop request, then stamp the poll.
-    let stopping = store.write(|tx| {
-      let stopping = run_record::get(tx)?.is_stopping();
-      if !stopping {
+    // One write transaction per poll: read the stop request and the owner,
+    // then stamp the poll.
+    let run_now = store.write(|tx| {
+      let run_now = run_record::get(tx)?;
+      if !run_now.is_stopping() && run_now.daemon_pid() == Some(pid) {
         run_record::record_daemon_seen(tx)?;
       }
-      Ok(stopping)
+      Ok(run_now)
     })?;
-    if stopping {
+    if let Some(owner) = run_now.daemon_pid().filter(|owner| *owner != pid) {
+      // A daemon started after this one owns the run now, as a continuing
+      // lead's does when the one before it was never stopped.
+      return record_run_event(
+        store,
+        RunEventKind::DaemonExit,
+        &format!("pid {pid}, superseded by pid {owner}"),
+      );
+    }
+    if run_now.is_stopping() {
       break;
     }
     let timestamp = Utc::now();
@@ -103,18 +111,14 @@ pub(super) fn start(
     }
     thread::sleep(poll_interval);
   }
-  record_run_event(
-    store,
-    RunEventKind::DaemonExit,
-    &format!("pid {}", std::process::id()),
-  )
+  record_run_event(store, RunEventKind::DaemonExit, &format!("pid {pid}"))
 }
 
 /// The lead is started by the human on an agent of their choosing, so the
 /// daemon registers it from what the lead says about itself, and with the
 /// transcript that agent is already writing for it. The same session id
-/// keeps its row across daemon restarts; a different one, as a relaunch on
-/// any agent has, is a new incarnation and stops the old row.
+/// keeps its row across daemon restarts; a different one is a new lead
+/// continuing the run, which takes it over from the leads before it.
 fn register_lead(
   run: &Run,
   store: &Store,
@@ -129,27 +133,73 @@ fn register_lead(
   };
   store.write(|tx| {
     let current = run.session_named(tx, lead)?;
-    if !current.is_some_and(|session| {
+    if current.is_some_and(|session| {
       session.is_live()
         && session.role() == Role::Lead
         && session.external_session_id() == lead_session_id
     }) {
-      session::stop_named(tx, lead)?;
-      run.register_session(
+      return Ok(());
+    }
+    let ended = end_superseded_sessions(run, tx, lead)?;
+    run.register_session(
+      tx,
+      lead,
+      Role::Lead,
+      lead_agent,
+      lead_session_id,
+      None,
+      &transcript,
+      None,
+      None,
+    )?;
+    if !ended.is_empty() {
+      run_event::create(
         tx,
-        lead,
-        Role::Lead,
-        lead_agent,
-        lead_session_id,
-        None,
-        &transcript,
-        None,
-        None,
+        RunEventKind::Takeover,
+        &format!("lead {lead_session_id} ended {}", ended.join(", ")),
       )?;
     }
     Ok(())
   })?;
   Ok(())
+}
+
+/// Ends what a new lead takes over from: every earlier lead, and every
+/// implementer whose tasks are all accepted or aborted, which can never take
+/// another. An implementer with a task still out stays watched, and so does
+/// one launched on its reading turn with no task yet, which the new lead may
+/// still dispatch to. Their panes are left alone. The commentator is
+/// replaced when the new lead starts its own. Returns the names it ended.
+fn end_superseded_sessions(
+  run: &Run,
+  transaction: &rusqlite::Transaction<'_>,
+  lead: &str,
+) -> Result<Vec<String>> {
+  let mut ended = Vec::new();
+  for session in run
+    .sessions(transaction)?
+    .into_iter()
+    .filter(Session::is_live)
+  {
+    let finished = match session.role() {
+      Role::Lead => true,
+      Role::Implementer => {
+        let tasks = task::tasks_for_session(transaction, session.id())?;
+        !tasks.is_empty() && tasks.iter().all(|task| task.state().is_terminal())
+      }
+      Role::Commentator => false,
+    };
+    if finished {
+      session::stop_named(transaction, session.name())?;
+      ended.push(session.name().to_owned());
+    }
+  }
+  // A live row under the lead's name that is not a lead is ended too, as it
+  // always was, so the new lead's name is its own.
+  if session::stop_named(transaction, lead)? > 0 && !ended.iter().any(|name| name == lead) {
+    ended.push(lead.to_owned());
+  }
+  Ok(ended)
 }
 
 /// Nudge a session that has gone quiet while its runtime reports it idle. The

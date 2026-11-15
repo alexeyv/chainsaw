@@ -109,8 +109,20 @@ fn launch(
   Ok(json!({"name": name, "pane_id": pane_id, "tab_id": tab_id, "session_id": external_session_id}))
 }
 
+/// Starts the run's commentator for the lead. A commentator an earlier lead
+/// started may still be up in its pane, reviewing for nobody; its pane is
+/// closed first so that only one reviews.
 pub(super) fn cmd_start_commentator(run: &Run, store: &Store, role_prompt: &Path) -> Result<()> {
   let role_prompt = absolute_path(role_prompt)?;
+  let name = commentator_agent_name(run.dir());
+  if let Some(previous) = store
+    .read(|tx| run.session_named(tx, &name))?
+    .filter(Session::is_live)
+    && let Some(pane_id) = previous.pane_id()
+  {
+    // A pane already gone is what a close is for.
+    let _ = run.runtime().abandon(&name, pane_id);
+  }
   println!("{}", start_commentator(run, store, &role_prompt, &[])?);
   Ok(())
 }

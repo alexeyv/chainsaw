@@ -809,6 +809,8 @@ pub struct RunSpec {
   pub daemon_seen_at: Option<DateTime<Utc>>,
   pub stop_requested_at: Option<DateTime<Utc>>,
   pub state_read_at: Option<DateTime<Utc>>,
+  pub observation_cursor: i64,
+  pub daemon_pid: Option<u32>,
 }
 
 /// A run as the schema seeds it: nothing has happened yet.
@@ -817,14 +819,19 @@ pub fn fresh_run() -> RunSpec {
     daemon_seen_at: None,
     stop_requested_at: None,
     state_read_at: None,
+    observation_cursor: 0,
+    daemon_pid: None,
   }
 }
 
-/// A run whose state was read, then polled by a daemon five minutes later.
+/// A run whose state was read, then polled by its daemon five minutes later,
+/// with the lead's run-wide polls through observation 4.
 pub fn polled_run() -> RunSpec {
   RunSpec {
     daemon_seen_at: Some(timestamp(1_700_000_600)),
     state_read_at: Some(timestamp(1_700_000_300)),
+    observation_cursor: 4,
+    daemon_pid: Some(4321),
     ..fresh_run()
   }
 }
@@ -834,16 +841,20 @@ pub fn build_run(spec: RunSpec) -> Result<Run> {
     spec.daemon_seen_at,
     spec.stop_requested_at,
     spec.state_read_at,
+    spec.observation_cursor,
+    spec.daemon_pid,
   )
 }
 
 pub fn format_run(run: &Run) -> String {
   format!(
-    "daemon_seen_at: {}\nstop_requested_at: {}\nstate_read_at: {}\nis_stopping: {}",
+    "daemon_seen_at: {}\nstop_requested_at: {}\nstate_read_at: {}\nis_stopping: {}\nobservation_cursor: {}\ndaemon_pid: {}",
     format_option(run.daemon_seen_at().map(format_time)),
     format_option(run.stop_requested_at().map(format_time)),
     format_option(run.state_read_at().map(format_time)),
     run.is_stopping(),
+    run.observation_cursor(),
+    format_option(run.daemon_pid()),
   )
 }
 

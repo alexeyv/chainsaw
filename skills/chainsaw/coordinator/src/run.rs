@@ -55,7 +55,7 @@ impl Run {
     })
   }
 
-  /// The run's clean-slate checkout, canonicalized.
+  /// The run's checkout, canonicalized.
   pub fn dir(&self) -> &Path {
     &self.dir
   }
