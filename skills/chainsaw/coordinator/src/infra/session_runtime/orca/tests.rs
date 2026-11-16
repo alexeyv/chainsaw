@@ -1,8 +1,11 @@
 use std::env;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::domain::AgentKind;
@@ -19,7 +22,17 @@ fn shim() -> &'static Path {
     let program = dir.join("orca");
     fs::write(&program, FAKE_ORCA).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-    let _ = Command::new(&program).arg("warm").output();
+    // On Linux, a test starting a process while the fake orca is written can
+    // leave it "busy" for a moment; try again for up to a second.
+    let mut tries = 0;
+    while let Err(error) = Command::new(&program).arg("warm").output() {
+      tries += 1;
+      assert!(
+        error.kind() == io::ErrorKind::ExecutableFileBusy && tries < 100,
+        "{error}"
+      );
+      thread::sleep(Duration::from_millis(10));
+    }
     program
   })
 }
