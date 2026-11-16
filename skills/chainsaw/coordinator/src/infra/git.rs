@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// One commit as `git log` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +29,11 @@ impl Repo {
 
   /// The full id HEAD points at.
   pub fn head(&self) -> Result<String> {
-    self.stdout(&["rev-parse", "HEAD"])
+    let output = self.run(&["rev-parse", "--verify", "--quiet", "HEAD"])?;
+    if !output.status.success() {
+      bail!("HEAD names no commit; an empty repository needs a first commit");
+    }
+    Ok(text(&output))
   }
 
   /// Whether `sha` names an object in the repository.

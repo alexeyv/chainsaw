@@ -77,6 +77,18 @@ mod head {
     assert_eq!(fixture.repo().head()?, sha);
     Ok(())
   }
+
+  #[test]
+  fn should_fail_when_the_repository_has_no_commits() {
+    let fixture = Fixture::new();
+
+    let error = fixture.repo().head().unwrap_err();
+
+    assert_eq!(
+      error.to_string(),
+      "HEAD names no commit; an empty repository needs a first commit"
+    );
+  }
 }
 
 mod has_commit {
