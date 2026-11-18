@@ -1,107 +1,9 @@
-use std::env;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use super::*;
 use crate::domain::AgentKind;
+use crate::infra::session_runtime::tests::FakeCli;
 
-static NEXT_SHIM: AtomicU64 = AtomicU64::new(0);
-static SHIM: OnceLock<PathBuf> = OnceLock::new();
-
-/// Written once per test process and hard-linked into each fixture, for the
-/// reason the Herdr shim is: macOS scans a fresh executable on its first run.
-fn shim() -> &'static Path {
-  SHIM.get_or_init(|| {
-    let dir = env::temp_dir().join(format!("chainsaw-orca-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let program = dir.join("orca");
-    fs::write(&program, FAKE_ORCA).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-    // On Linux, a test starting a process while the fake orca is written can
-    // leave it "busy" for a moment; try again for up to a second.
-    let mut tries = 0;
-    while let Err(error) = Command::new(&program).arg("warm").output() {
-      tries += 1;
-      assert!(
-        error.kind() == io::ErrorKind::ExecutableFileBusy && tries < 100,
-        "{error}"
-      );
-      thread::sleep(Duration::from_millis(10));
-    }
-    program
-  })
-}
-
-/// An `orca` standing in at the real process boundary: it records the argv it
-/// was handed and answers with the JSON shapes and exit codes the real CLI
-/// produces. The terminal handle after `--terminal` and the title after
-/// `--title` pick the scenario.
-const FAKE_ORCA: &str = r#"#!/bin/sh
-calls="$(dirname "$0")/calls"
-for argument in "$@"; do printf '%s\n' "$argument" >> "$calls"; done
-printf '%s\n' 'END-OF-CALL' >> "$calls"
-handle=""; title=""; previous=""
-for argument in "$@"; do
-  [ "$previous" = "--terminal" ] && handle="$argument"
-  [ "$previous" = "--title" ] && title="$argument"
-  previous="$argument"
-done
-case "$1 $2" in
-'terminal create')
-  case "$title" in
-  refused) printf '{"ok":false,"error":{"code":"worktree_not_found","message":"no such worktree"}}\n'; exit 1 ;;
-  garbled) printf 'not json\n' ;;
-  crashed) printf 'orca: boom\n' >&2; exit 1 ;;
-  *) printf '{"ok":true,"result":{"terminal":{"handle":"term-7","tabId":"tab-7","title":"%s"}}}\n' "$title" ;;
-  esac ;;
-'terminal split')
-  printf '{"ok":true,"result":{"split":{"handle":"term-9","tabId":"tab-9"}}}\n' ;;
-'terminal wait')
-  case "$handle" in
-  term-busy) printf '{"ok":false,"error":{"code":"timeout","message":"timeout"}}\n'; exit 1 ;;
-  term-unsettled) printf '{"ok":true,"result":{"wait":{"satisfied":false}}}\n' ;;
-  term-gone) printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale handle"}}\n'; exit 1 ;;
-  *) printf '{"ok":true,"result":{"wait":{"satisfied":true}}}\n' ;;
-  esac ;;
-'terminal send')
-  printf '{"ok":true,"result":{"send":{"accepted":true}}}\n' ;;
-'terminal close')
-  case "$handle" in
-  term-gone) printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale handle"}}\n'; exit 1 ;;
-  *) printf '{"ok":true,"result":{"close":{"closed":true}}}\n' ;;
-  esac ;;
-*)
-  printf 'unsupported: %s\n' "$*" >&2; exit 2 ;;
-esac
-"#;
-
-struct FakeOrca {
-  dir: PathBuf,
-  program: PathBuf,
-  calls: PathBuf,
-}
-
-impl FakeOrca {
-  fn new() -> Self {
-    let sequence = NEXT_SHIM.fetch_add(1, Ordering::Relaxed);
-    let dir = shim().parent().unwrap().join(format!("fixture-{sequence}"));
-    fs::create_dir_all(&dir).unwrap();
-    let program = dir.join("orca");
-    fs::hard_link(shim(), &program).unwrap();
-    let calls = dir.join("calls");
-    Self {
-      dir,
-      program,
-      calls,
-    }
-  }
-
-  fn runtime(&self) -> OrcaSessionRuntime {
+impl FakeCli {
+  fn orca_runtime(&self) -> OrcaSessionRuntime {
     OrcaSessionRuntime {
       cli: Cli::new("orca", &self.program),
       terminal: "ambient-terminal".to_owned(),
@@ -116,7 +18,7 @@ impl FakeOrca {
 
   /// A session already started, as `start` would have remembered it.
   fn registered(&self, name: &str, handle: &str) -> OrcaSessionRuntime {
-    let runtime = self.runtime();
+    let runtime = self.orca_runtime();
     runtime
       .remember(
         name,
@@ -137,27 +39,6 @@ impl FakeOrca {
     fs::create_dir_all(&run_dir).unwrap();
     run_dir
   }
-
-  /// Every invocation's argv, in order.
-  fn calls(&self) -> Vec<Vec<String>> {
-    let text = fs::read_to_string(&self.calls).unwrap_or_default();
-    let mut calls = Vec::new();
-    let mut current = Vec::new();
-    for line in text.lines() {
-      if line == "END-OF-CALL" {
-        calls.push(std::mem::take(&mut current));
-      } else {
-        current.push(line.to_owned());
-      }
-    }
-    calls
-  }
-}
-
-impl Drop for FakeOrca {
-  fn drop(&mut self) {
-    let _ = fs::remove_dir_all(&self.dir);
-  }
 }
 
 fn is_version_4_uuid(text: &str) -> bool {
@@ -175,8 +56,8 @@ mod start {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
-    let runtime = orca.runtime();
+    let orca = FakeCli::new("orca");
+    let runtime = orca.orca_runtime();
     let args = ["--model", "sonnet", "--effort", "medium"].map(str::to_owned);
 
     let started = runtime
@@ -222,8 +103,8 @@ mod start {
 
   #[test]
   fn should_split_the_supervisors_terminal_for_a_commentator() {
-    let orca = FakeOrca::new();
-    let runtime = orca.runtime();
+    let orca = FakeCli::new("orca");
+    let runtime = orca.orca_runtime();
 
     let started = runtime
       .start(StartSession {
@@ -258,11 +139,11 @@ mod start {
 
   #[test]
   fn should_quote_the_command_for_the_shell() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
     let args = ["--append-system-prompt", "be terse"].map(str::to_owned);
 
     let started = orca
-      .runtime()
+      .orca_runtime()
       .start(StartSession {
         id: "worker",
         run_dir: Path::new("/tmp/my run"),
@@ -283,11 +164,11 @@ mod start {
 
   #[test]
   fn should_type_a_prompt_spanning_lines_on_one_line() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
     let args = ["--", "Read the role prompt.\nRun directory: /tmp/run"].map(str::to_owned);
 
     let started = orca
-      .runtime()
+      .orca_runtime()
       .start(StartSession {
         id: "commentator",
         run_dir: Path::new("/tmp/run"),
@@ -308,8 +189,8 @@ mod start {
 
   #[test]
   fn should_fail_when_an_agent_naming_its_own_sessions_never_writes_a_transcript() {
-    let orca = FakeOrca::new();
-    let runtime = orca.runtime();
+    let orca = FakeCli::new("orca");
+    let runtime = orca.orca_runtime();
     let run_dir = orca.run_dir();
 
     let error = runtime
@@ -341,8 +222,8 @@ mod start {
 
   #[test]
   fn should_run_cursor_through_its_cli() {
-    let orca = FakeOrca::new();
-    let runtime = orca.runtime();
+    let orca = FakeCli::new("orca");
+    let runtime = orca.orca_runtime();
     let run_dir = orca.run_dir();
 
     let error = runtime
@@ -377,10 +258,10 @@ mod start {
 
   #[test]
   fn should_fail_when_orca_refuses() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let error = orca
-      .runtime()
+      .orca_runtime()
       .start(StartSession {
         id: "refused",
         run_dir: Path::new("/tmp/run"),
@@ -398,10 +279,10 @@ mod start {
 
   #[test]
   fn should_fail_when_orca_answers_with_invalid_json() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let error = orca
-      .runtime()
+      .orca_runtime()
       .start(StartSession {
         id: "garbled",
         run_dir: Path::new("/tmp/run"),
@@ -416,10 +297,10 @@ mod start {
 
   #[test]
   fn should_fail_when_orca_fails_without_a_reply() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let error = orca
-      .runtime()
+      .orca_runtime()
       .start(StartSession {
         id: "crashed",
         run_dir: Path::new("/tmp/run"),
@@ -438,7 +319,7 @@ mod status {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let status = orca
       .registered("worker", "term-7")
@@ -464,7 +345,7 @@ mod status {
 
   #[test]
   fn should_report_busy_when_the_agent_is_mid_turn() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let status = orca
       .registered("worker", "term-busy")
@@ -476,7 +357,7 @@ mod status {
 
   #[test]
   fn should_report_busy_when_the_wait_ends_unsatisfied() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let status = orca
       .registered("worker", "term-unsettled")
@@ -488,9 +369,9 @@ mod status {
 
   #[test]
   fn should_report_nothing_for_a_session_never_started() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
-    let status = orca.runtime().status("worker").unwrap();
+    let status = orca.orca_runtime().status("worker").unwrap();
 
     assert_eq!(status, None);
     assert!(orca.calls().is_empty());
@@ -498,7 +379,7 @@ mod status {
 
   #[test]
   fn should_report_nothing_when_orca_no_longer_has_the_terminal() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let status = orca
       .registered("worker", "term-gone")
@@ -514,7 +395,7 @@ mod prompt {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     orca
       .registered("worker", "term-7")
@@ -538,9 +419,9 @@ mod prompt {
 
   #[test]
   fn should_fail_for_a_session_never_started() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
-    let error = orca.runtime().prompt("worker", "hello").unwrap_err();
+    let error = orca.orca_runtime().prompt("worker", "hello").unwrap_err();
 
     assert_eq!(error.to_string(), "orca: no session named worker");
     assert!(orca.calls().is_empty());
@@ -552,7 +433,7 @@ mod interrupt {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     orca
       .registered("worker", "term-7")
@@ -578,7 +459,7 @@ mod wait {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     orca
       .registered("worker", "term-busy")
@@ -616,7 +497,7 @@ mod wait {
 
   #[test]
   fn should_return_after_the_grace_period_when_the_turn_never_shows() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     orca
       .registered("worker", "term-7")
@@ -633,7 +514,7 @@ mod wait {
 
   #[test]
   fn should_return_at_once_when_orca_no_longer_has_the_terminal() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     orca
       .registered("worker", "term-gone")
@@ -645,10 +526,10 @@ mod wait {
 
   #[test]
   fn should_fail_for_a_session_never_started() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
 
     let error = orca
-      .runtime()
+      .orca_runtime()
       .wait("worker", Duration::from_secs(30))
       .unwrap_err();
 
@@ -661,7 +542,7 @@ mod abandon {
 
   #[test]
   fn should_work() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
     let runtime = orca.registered("worker", "term-7");
 
     runtime.abandon("worker", "term-7").unwrap();
@@ -678,7 +559,7 @@ mod abandon {
 
   #[test]
   fn should_fail_and_keep_the_session_when_orca_refuses() {
-    let orca = FakeOrca::new();
+    let orca = FakeCli::new("orca");
     let runtime = orca.registered("worker", "term-gone");
 
     let error = runtime.abandon("worker", "term-gone").unwrap_err();
