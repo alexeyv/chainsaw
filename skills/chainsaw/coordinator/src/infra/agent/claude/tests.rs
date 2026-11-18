@@ -354,8 +354,8 @@ mod transcripts_dir_name {
   #[test]
   fn should_work() {
     assert_eq!(
-      transcripts_dir_name(Path::new("/Users/alex/src/run")),
-      "-Users-alex-src-run"
+      transcripts_dir_name(Path::new("/Users/me/src/run")),
+      "-Users-me-src-run"
     );
   }
 
@@ -370,8 +370,8 @@ mod transcripts_dir_name {
   #[test]
   fn should_dash_dots_when_the_run_directory_is_dotted() {
     assert_eq!(
-      transcripts_dir_name(Path::new("/Users/alex/src/ui.wt/run")),
-      "-Users-alex-src-ui-wt-run"
+      transcripts_dir_name(Path::new("/Users/me/src/ui.wt/run")),
+      "-Users-me-src-ui-wt-run"
     );
   }
 

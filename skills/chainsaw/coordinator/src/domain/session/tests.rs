@@ -71,7 +71,7 @@ context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: none
-transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+transcript: /home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 pane_id: "pane-7"
 role_prompt: none
 is_live: true
@@ -100,7 +100,7 @@ context_max: none
 last_growth: 2023-11-14T22:13:20Z
 kicked_at: none
 over_limit_at: none
-transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+transcript: /home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 pane_id: "pane-7"
 role_prompt: none
 is_live: true
@@ -165,7 +165,7 @@ context_max: 5000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: 2023-11-14T22:28:20Z
 over_limit_at: none
-transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+transcript: /home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 pane_id: "pane-7"
 role_prompt: none
 is_live: false
@@ -203,7 +203,7 @@ context_max: 260000
 last_growth: 2023-11-14T22:23:20Z
 kicked_at: none
 over_limit_at: 2023-11-14T22:28:20Z
-transcript: /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
+transcript: /home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl
 pane_id: "pane-7"
 role_prompt: none
 is_live: true
@@ -335,7 +335,7 @@ can_latch_over_limit: false"#
 
     assert_eq!(
       error.to_string(),
-      "supervisor: transcript of implementer-1 is gone from /home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"
+      "supervisor: transcript of implementer-1 is gone from /home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl"
     );
   }
 

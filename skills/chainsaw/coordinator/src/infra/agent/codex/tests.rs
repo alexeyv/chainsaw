@@ -245,8 +245,8 @@ mod prompt_state {
   fn should_work() {
     let transcript = format!(
       "{}\n{}\n{}\n",
-      user_line("# AGENTS.md instructions for /Users/alex/run"),
-      user_line("<environment_context><cwd>/Users/alex/run</cwd></environment_context>"),
+      user_line("# AGENTS.md instructions for /Users/me/run"),
+      user_line("<environment_context><cwd>/Users/me/run</cwd></environment_context>"),
       user_line("deliver this prompt")
     );
 
@@ -257,8 +257,8 @@ mod prompt_state {
   fn should_report_unseen_when_only_codex_own_user_messages_are_present() {
     let transcript = format!(
       "{}\n{}\n",
-      user_line("# AGENTS.md instructions for /Users/alex/run"),
-      user_line("<environment_context><cwd>/Users/alex/run</cwd></environment_context>")
+      user_line("# AGENTS.md instructions for /Users/me/run"),
+      user_line("<environment_context><cwd>/Users/me/run</cwd></environment_context>")
     );
 
     assert_eq!(state_in(&transcript, "deliver this"), PromptState::Unseen);

@@ -186,7 +186,7 @@ fn state_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
 }
 
 /// One flat name per run directory: every `/` and `.` becomes `-`, so
-/// `/Users/alex/src/ui.wt/run` is `-Users-alex-src-ui-wt-run` and `/x/.bare`
+/// `/Users/me/src/ui.wt/run` is `-Users-me-src-ui-wt-run` and `/x/.bare`
 /// is `-x--bare`. Two run directories that differ only in a dot against a
 /// dash share a name; a run is a clean-slate checkout, so none do in practice.
 fn state_dir_name(canonical_run_dir: &Path) -> String {

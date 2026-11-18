@@ -67,8 +67,8 @@ impl Drop for ProjectsDir {
 }
 
 const SESSION: &str = "5b4c1a9e-2f3d-4e6a-8b7c-9d0e1f2a3b4c";
-const RUN_DIR: &str = "/Users/alex/src/run";
-const TRANSCRIPT: &str = "Users-alex-src-run/agent-transcripts/5b4c1a9e-2f3d-4e6a-8b7c-9d0e1f2a3b4c/5b4c1a9e-2f3d-4e6a-8b7c-9d0e1f2a3b4c.jsonl";
+const RUN_DIR: &str = "/Users/me/src/run";
+const TRANSCRIPT: &str = "Users-me-src-run/agent-transcripts/5b4c1a9e-2f3d-4e6a-8b7c-9d0e1f2a3b4c/5b4c1a9e-2f3d-4e6a-8b7c-9d0e1f2a3b4c.jsonl";
 
 fn user_line(text: &str) -> String {
   format!(r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#)
@@ -353,7 +353,7 @@ mod newest_session_in {
   }
 
   fn transcript_of(session: &str) -> String {
-    format!("Users-alex-src-run/agent-transcripts/{session}/{session}.jsonl")
+    format!("Users-me-src-run/agent-transcripts/{session}/{session}.jsonl")
   }
 
   fn age(path: &Path) {
@@ -379,7 +379,7 @@ mod newest_session_in {
 
   #[test]
   fn should_ignore_a_session_of_another_project() {
-    let elsewhere = format!("Users-alex-src/agent-transcripts/{SESSION}/{SESSION}.jsonl");
+    let elsewhere = format!("Users-me-src/agent-transcripts/{SESSION}/{SESSION}.jsonl");
     let projects = ProjectsDir::holding(&elsewhere);
 
     assert_eq!(
@@ -390,7 +390,7 @@ mod newest_session_in {
 
   #[test]
   fn should_ignore_what_is_not_a_sessions_transcript() {
-    let projects = ProjectsDir::holding("Users-alex-src-run/agent-transcripts/notes/scratch.jsonl");
+    let projects = ProjectsDir::holding("Users-me-src-run/agent-transcripts/notes/scratch.jsonl");
 
     assert_eq!(
       newest_session_in(projects.path(), Path::new(RUN_DIR), a_minute_ago()),
@@ -439,7 +439,7 @@ mod transcript_in {
 
   #[test]
   fn should_find_the_transcript_under_another_project_when_cursor_disagrees_about_the_run_dir() {
-    let elsewhere = format!("Users-alex-src/agent-transcripts/{SESSION}/{SESSION}.jsonl");
+    let elsewhere = format!("Users-me-src/agent-transcripts/{SESSION}/{SESSION}.jsonl");
     let projects = ProjectsDir::holding(&elsewhere);
 
     assert_eq!(
@@ -472,7 +472,7 @@ mod project_name {
 
   #[test]
   fn should_work() {
-    assert_eq!(project_name(Path::new(RUN_DIR)), "Users-alex-src-run");
+    assert_eq!(project_name(Path::new(RUN_DIR)), "Users-me-src-run");
   }
 
   #[test]

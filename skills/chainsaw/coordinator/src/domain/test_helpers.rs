@@ -715,7 +715,7 @@ pub fn launched_implementer() -> SessionSpec {
     last_growth: created_at(),
     kicked_at: None,
     over_limit_at: None,
-    transcript: "/home/alex/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl",
+    transcript: "/home/me/.claude/projects/-run/0b5c2e6a-1d3f-4a8b-9c7e-2f1a3b4c5d6e.jsonl",
     pane_id: Some("pane-7"),
     role_prompt: None,
   }
