@@ -95,6 +95,11 @@ mod new_commit_among {
     let newest = fixture.commit("d.txt", "d", "fourth");
     let repo = fixture.repo();
 
+    assert_eq!(repo.head()?, newest);
+    assert!(repo.has_commit(&newest)?);
+    assert!(repo.is_ancestor(&base, &base)?);
+    assert_eq!(repo.files_changed(&base, &newest)?, ["c.txt", "d.txt"]);
+
     let skipped = [
       older[..7].to_owned(),
       "0123456789abcdef".to_owned(),
@@ -154,7 +159,7 @@ mod commit {
   #[test]
   fn should_work() -> Result<()> {
     let fixture = Fixture::new();
-    let base = fixture.commit("a.txt", "a\nb\n", "first");
+    fixture.commit("a.txt", "a\nb\n", "first");
     let message = "second\n\nCo-authored-by: someone";
     let sha = fixture.commit("a.txt", "a\nc\nd\n", message);
     let repo = fixture.repo();
@@ -163,7 +168,6 @@ mod commit {
       repo.shortstat(&sha)?,
       "1 file changed, 2 insertions(+), 1 deletion(-)"
     );
-    assert_eq!(repo.files_changed(&base, &sha)?, ["a.txt"]);
     assert!(repo.files_changed(&sha, "HEAD")?.is_empty());
     assert_eq!(
       repo.commit(&sha[..7])?,
