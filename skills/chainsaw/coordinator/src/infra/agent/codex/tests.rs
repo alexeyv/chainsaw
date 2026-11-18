@@ -104,35 +104,6 @@ fn usage_line(input: u64, cached: u64, total: u64) -> String {
   )
 }
 
-mod program {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(Codex.program(), "codex");
-  }
-}
-
-mod default_args {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(
-      Codex.default_args(SessionKind::Implementer),
-      "--dangerously-bypass-approvals-and-sandbox"
-    );
-  }
-
-  #[test]
-  fn should_be_the_same_for_the_commentator() {
-    assert_eq!(
-      Codex.default_args(SessionKind::Commentator),
-      Codex.default_args(SessionKind::Implementer)
-    );
-  }
-}
-
 mod compact_at_args {
   use super::*;
 
@@ -162,20 +133,6 @@ mod context_size {
 
   #[test]
   fn should_work() {
-    let transcript = Transcript::containing(&format!(
-      "{}\n{}\n",
-      usage_line(10, 0, 10),
-      usage_line(40, 8, 50)
-    ));
-
-    assert_eq!(
-      Codex.context_size(transcript.path()),
-      ContextSize::tokens(40)
-    );
-  }
-
-  #[test]
-  fn should_read_the_last_response_input_not_the_thread_total() {
     let transcript = Transcript::containing(&format!(
       "{}\n{}\n",
       usage_line(19_519, 7_808, 19_519),

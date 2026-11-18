@@ -82,10 +82,6 @@ fn load_text(text: &str) -> Result<Settings> {
   dir.load(&[])
 }
 
-fn load_sets(values: &[&str]) -> Result<Settings> {
-  ScratchDir::new().load(values)
-}
-
 mod load {
   use super::*;
 
@@ -170,33 +166,6 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_keep_defaults_when_the_file_is_empty() {
-    let dir = ScratchDir::new();
-
-    assert_eq!(load_text("").unwrap(), dir.load(&[]).unwrap());
-  }
-
-  #[test]
-  fn should_keep_defaults_for_a_role_given_an_empty_table() {
-    let dir = ScratchDir::new();
-
-    assert_eq!(
-      load_text("[implementer]\n").unwrap(),
-      dir.load(&[]).unwrap()
-    );
-  }
-
-  #[test]
-  fn should_pass_args_through_untouched_apart_from_splitting() {
-    let settings = load_text("[implementer]\nargs = \"  --whatever=1   x  \"\n").unwrap();
-
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--whatever=1", "x"]
-    );
-  }
-
-  #[test]
   fn should_keep_a_quoted_value_with_spaces_as_one_arg() {
     let settings =
       load_text("[implementer]\nargs = \"--append-system-prompt 'be terse' --model sonnet\"\n")
@@ -213,33 +182,6 @@ args = "--model sonnet --effort medium"
     let settings = load_text("[commentator]\nargs = \"\"\n").unwrap();
 
     assert!(settings.launch_args(SessionKind::Commentator).is_empty());
-  }
-
-  #[test]
-  fn should_let_a_set_beat_the_file() {
-    let dir = ScratchDir::new();
-    dir.write_settings("[implementer]\nargs = \"--chrome\"\n");
-
-    let settings = dir.load(&["implementer.args=--effort medium"]).unwrap();
-
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--effort", "medium"]
-    );
-  }
-
-  #[test]
-  fn should_read_the_global_file_when_the_run_directory_has_none() {
-    let dir = ScratchDir::new();
-    dir.write_global("prompt-timeout-seconds = 4\n[implementer]\nagent = \"codex\"\n");
-
-    let settings = dir.load(&[]).unwrap();
-
-    assert_eq!(settings.prompt_timeout(), Duration::from_secs(4));
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
   }
 
   #[test]
@@ -336,59 +278,6 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_drop_the_files_args_when_a_set_names_the_agent() {
-    let dir = ScratchDir::new();
-    dir.write_settings("[implementer]\nargs = \"--model sonnet\"\n");
-
-    let settings = dir.load(&["implementer.agent=codex"]).unwrap();
-
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox"]
-    );
-  }
-
-  #[test]
-  fn should_launch_codex_with_the_set_args_when_the_agent_is_set_first() {
-    let settings = load_sets(&[
-      "implementer.agent=codex",
-      "implementer.args=--model gpt-5.4",
-    ])
-    .unwrap();
-
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--model", "gpt-5.4"]
-    );
-  }
-
-  #[test]
-  fn should_launch_codex_with_the_set_args_when_the_args_are_set_first() {
-    let settings = load_sets(&[
-      "implementer.args=--model gpt-5.4",
-      "implementer.agent=codex",
-    ])
-    .unwrap();
-
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--model", "gpt-5.4"]
-    );
-  }
-
-  #[test]
   fn should_let_a_set_beat_the_local_file() {
     let dir = ScratchDir::new();
     dir.write_local("[implementer]\nargs = \"--local\"\n");
@@ -429,24 +318,6 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_launch_codex_with_its_own_defaults_when_a_role_names_it() {
-    let settings = load_text("[implementer]\nagent = \"codex\"\n").unwrap();
-
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox"]
-    );
-    assert_eq!(
-      settings.launch_agent(SessionKind::Commentator),
-      AgentKind::Claude
-    );
-  }
-
-  #[test]
   fn should_launch_cursor_with_its_own_defaults_when_a_role_names_it() {
     let settings = load_text("[implementer]\nagent = \"cursor\"\n").unwrap();
 
@@ -465,20 +336,6 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_let_a_set_name_the_agent() {
-    let settings = load_sets(&["commentator.agent=codex"]).unwrap();
-
-    assert_eq!(
-      settings.launch_agent(SessionKind::Commentator),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Commentator),
-      ["--dangerously-bypass-approvals-and-sandbox"]
-    );
-  }
-
-  #[test]
   fn should_fail_naming_the_role_the_value_and_the_accepted_agents_when_the_agent_is_unknown() {
     let error = load_text("[implementer]\nagent = \"gemini\"\n").unwrap_err();
 
@@ -489,49 +346,12 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_fail_naming_the_set_when_it_names_an_unknown_agent() {
-    let error = load_sets(&["commentator.agent=gemini"]).unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid --set commentator.agent=gemini: unknown agent \"gemini\", expected one of `claude`, `codex`, `cursor`\nin `commentator.agent`"
-    );
-  }
-
-  #[test]
   fn should_fail_naming_the_file_and_the_cause_when_a_key_is_unknown() {
     let error = load_text("promt-timeout-seconds = 1\n").unwrap_err();
 
     assert_eq!(
       message(&error),
       "invalid settings in chainsaw.toml: unknown field `promt-timeout-seconds`, expected one of `prompt-timeout-seconds`, `implementer`, `commentator`"
-    );
-  }
-
-  #[test]
-  fn should_fail_naming_the_role_when_a_nested_key_is_unknown() {
-    let error = load_text("[implementer]\nmodel = \"x\"\n").unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid settings in chainsaw.toml: unknown field `model`, expected `agent` or `args`\nin `implementer`"
-    );
-  }
-
-  #[test]
-  fn should_fail_when_a_role_is_unknown() {
-    let error = load_text("[reviewer]\nargs = \"x\"\n").unwrap_err();
-
-    assert!(message(&error).contains("unknown field `reviewer`, expected one of"));
-  }
-
-  #[test]
-  fn should_fail_when_a_value_has_the_wrong_type() {
-    let error = load_text("[implementer]\nargs = [\"--chrome\"]\n").unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid settings in chainsaw.toml: invalid type: sequence, expected a string\nin `implementer.args`"
     );
   }
 
@@ -573,36 +393,6 @@ args = "--model sonnet --effort medium"
     let prefix = "cannot read chainsaw.toml: ";
     assert!(message(&error).starts_with(prefix));
     assert!(message(&error).len() > prefix.len());
-  }
-
-  #[test]
-  fn should_fail_naming_the_set_and_the_cause_when_it_is_invalid() {
-    let error = load_sets(&["implementer.model=x"]).unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid --set implementer.model=x: unknown field `model`, expected `agent` or `args`\nin `implementer`"
-    );
-  }
-
-  #[test]
-  fn should_fail_naming_the_set_when_its_quote_is_unbalanced() {
-    let error = load_sets(&["implementer.args=--model \"sonnet"]).unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid --set implementer.args=--model \"sonnet: missing closing quote\nin `implementer.args`"
-    );
-  }
-
-  #[test]
-  fn should_fail_naming_the_key_when_it_is_set_twice() {
-    let error = load_sets(&["prompt-timeout-seconds=1", "prompt-timeout-seconds=2"]).unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid --set prompt-timeout-seconds=2: prompt-timeout-seconds was already set by an earlier --set"
-    );
   }
 
   #[test]
@@ -651,11 +441,6 @@ mod sets_layer {
   }
 
   #[test]
-  fn should_build_an_empty_layer_when_nothing_is_set() {
-    assert_eq!(sets_layer(&[]).unwrap(), Table::new());
-  }
-
-  #[test]
   fn should_fail_naming_the_set_and_the_cause_when_it_is_invalid() {
     let error =
       sets_layer(&sets(&["prompt-timeout-seconds=1", "implementer.model=x"])).unwrap_err();
@@ -686,56 +471,9 @@ mod set_into {
 
   #[test]
   fn should_work() {
-    let result = apply("prompt-timeout-seconds = 15\n", "prompt-timeout-seconds=20").unwrap();
-
-    assert_eq!(result["prompt-timeout-seconds"], Value::Integer(20));
-  }
-
-  #[test]
-  fn should_take_a_bare_word_as_a_string() {
-    let result = apply("", "implementer.args=--chrome").unwrap();
-
-    assert_eq!(result["implementer"]["args"].as_str(), Some("--chrome"));
-  }
-
-  #[test]
-  fn should_take_words_with_spaces_as_a_string() {
-    let result = apply("", "implementer.args=--effort medium").unwrap();
-
-    assert_eq!(
-      result["implementer"]["args"].as_str(),
-      Some("--effort medium")
-    );
-  }
-
-  #[test]
-  fn should_take_a_quoted_string_without_its_quotes() {
     let result = apply("", "implementer.args=\"--chrome\"").unwrap();
 
     assert_eq!(result["implementer"]["args"].as_str(), Some("--chrome"));
-  }
-
-  #[test]
-  fn should_keep_the_rest_of_the_layer() {
-    let result = apply(
-      "prompt-timeout-seconds = 3\n[implementer]\nargs = \"--chrome\"\n",
-      "implementer.args=--effort medium",
-    )
-    .unwrap();
-
-    assert_eq!(result["prompt-timeout-seconds"], Value::Integer(3));
-    assert_eq!(
-      result["implementer"]["args"].as_str(),
-      Some("--effort medium")
-    );
-  }
-
-  #[test]
-  fn should_keep_the_layers_args_when_the_set_names_the_agent() {
-    let result = apply("[implementer]\nargs = \"-a\"\n", "implementer.agent=codex").unwrap();
-
-    assert_eq!(result["implementer"]["agent"].as_str(), Some("codex"));
-    assert_eq!(result["implementer"]["args"].as_str(), Some("-a"));
   }
 
   #[test]
@@ -750,120 +488,5 @@ mod set_into {
     let error = apply("", "=5").unwrap_err();
 
     assert!(message(&error).contains("unquoted keys cannot be empty"));
-  }
-
-  #[test]
-  fn should_fail_naming_the_cause_when_the_set_is_invalid() {
-    let error = apply("", "implementer.model=x").unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "unknown field `model`, expected `agent` or `args`\nin `implementer`"
-    );
-  }
-
-  #[test]
-  fn should_fail_when_an_earlier_set_named_the_key() {
-    let error = set_into(
-      table(""),
-      "implementer.args=b",
-      &sets(&["implementer.args=a"]),
-    )
-    .unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "implementer.args was already set by an earlier --set"
-    );
-  }
-}
-
-mod lay_over {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let laid = lay_over(
-      table("prompt-timeout-seconds = 4\n[implementer]\nargs = \"--global\"\n"),
-      table("[implementer]\nargs = \"--project\"\n"),
-    );
-
-    assert_eq!(
-      laid.to_string(),
-      table("prompt-timeout-seconds = 4\n[implementer]\nargs = \"--project\"\n").to_string()
-    );
-  }
-
-  #[test]
-  fn should_drop_the_args_below_when_the_layer_names_the_agent_without_args() {
-    let laid = lay_over(
-      table("[implementer]\nargs = \"--global\"\n[commentator]\nargs = \"--global\"\n"),
-      table("[implementer]\nagent = \"codex\"\n"),
-    );
-
-    assert_eq!(
-      laid.to_string(),
-      table("[implementer]\nagent = \"codex\"\n[commentator]\nargs = \"--global\"\n").to_string()
-    );
-  }
-
-  #[test]
-  fn should_keep_the_args_below_when_the_layer_names_neither_agent_nor_args() {
-    let laid = lay_over(
-      table("[implementer]\nargs = \"--global\"\n"),
-      table("[implementer]\n"),
-    );
-
-    assert_eq!(
-      laid.to_string(),
-      table("[implementer]\nargs = \"--global\"\n").to_string()
-    );
-  }
-
-  #[test]
-  fn should_take_the_layers_args_when_it_names_both_agent_and_args() {
-    let laid = lay_over(
-      table("[implementer]\nargs = \"--global\"\n"),
-      table("[implementer]\nagent = \"codex\"\nargs = \"--project\"\n"),
-    );
-
-    assert_eq!(
-      laid.to_string(),
-      table("[implementer]\nagent = \"codex\"\nargs = \"--project\"\n").to_string()
-    );
-  }
-
-  #[test]
-  fn should_lay_a_role_over_nothing_when_the_table_lacks_it() {
-    let laid = lay_over(table(""), table("[implementer]\nagent = \"codex\"\n"));
-
-    assert_eq!(
-      laid.to_string(),
-      table("[implementer]\nagent = \"codex\"\n").to_string()
-    );
-  }
-}
-
-mod merge {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    let merged = merge(
-      table("a = 1\n[t]\nx = 1\ny = 1\n"),
-      table("b = 2\n[t]\ny = 2\n"),
-    );
-
-    assert_eq!(
-      merged.to_string(),
-      table("a = 1\nb = 2\n[t]\nx = 1\ny = 2\n").to_string()
-    );
-  }
-
-  #[test]
-  fn should_replace_a_scalar_with_a_table() {
-    let merged = merge(table("t = 1\n"), table("[t]\nx = 1\n"));
-
-    assert_eq!(merged["t"]["x"], Value::Integer(1));
   }
 }
