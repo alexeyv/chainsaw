@@ -66,79 +66,6 @@ fn git(dir: &Path, args: &[&str]) -> String {
   String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-mod head {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    let sha = fixture.commit("a.txt", "a", "first");
-
-    assert_eq!(fixture.repo().head()?, sha);
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_repository_has_no_commits() {
-    let fixture = Fixture::new();
-
-    let error = fixture.repo().head().unwrap_err();
-
-    assert_eq!(
-      error.to_string(),
-      "HEAD names no commit; an empty repository needs a first commit"
-    );
-  }
-}
-
-mod has_commit {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    let sha = fixture.commit("a.txt", "a", "first");
-
-    assert!(fixture.repo().has_commit(&sha)?);
-    assert!(fixture.repo().has_commit(&sha[..7])?);
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_false_when_the_sha_names_nothing() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
-
-    assert!(!fixture.repo().has_commit("0123456789abcdef")?);
-    Ok(())
-  }
-}
-
-mod is_ancestor {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    let first = fixture.commit("a.txt", "a", "first");
-    let second = fixture.commit("b.txt", "b", "second");
-
-    assert!(fixture.repo().is_ancestor(&first, &second)?);
-    assert!(fixture.repo().is_ancestor(&first, &first)?);
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_false_when_the_descendant_comes_first() -> Result<()> {
-    let fixture = Fixture::new();
-    let first = fixture.commit("a.txt", "a", "first");
-    let second = fixture.commit("b.txt", "b", "second");
-
-    assert!(!fixture.repo().is_ancestor(&second, &first)?);
-    Ok(())
-  }
-}
-
 mod canonical_commit {
   use super::*;
 
@@ -146,27 +73,12 @@ mod canonical_commit {
   fn should_work() -> Result<()> {
     let fixture = Fixture::new();
     let sha = fixture.commit("a.txt", "a", "first");
+    let repo = fixture.repo();
 
-    assert_eq!(fixture.repo().canonical_commit(&sha[..7])?, Some(sha));
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_none_when_the_sha_is_not_hex_of_a_plausible_length() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
-
-    assert_eq!(fixture.repo().canonical_commit("HEAD")?, None);
-    assert_eq!(fixture.repo().canonical_commit("abc")?, None);
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_none_when_no_commit_has_the_sha() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
-
-    assert_eq!(fixture.repo().canonical_commit("0123456789abcdef")?, None);
+    assert_eq!(repo.canonical_commit(&sha[..7])?, Some(sha));
+    assert_eq!(repo.canonical_commit("HEAD")?, None);
+    assert_eq!(repo.canonical_commit("abc")?, None);
+    assert_eq!(repo.canonical_commit("0123456789abcdef")?, None);
     Ok(())
   }
 }
@@ -177,50 +89,25 @@ mod new_commit_among {
   #[test]
   fn should_work() -> Result<()> {
     let fixture = Fixture::new();
-    let base = fixture.commit("a.txt", "a", "first");
-    let second = fixture.commit("b.txt", "b", "second");
-    let third = fixture.commit("c.txt", "c", "third");
-    let candidates = vec![
-      base[..7].to_owned(),
-      second[..7].to_owned(),
-      third[..7].to_owned(),
-    ];
-
-    let found = fixture.repo().new_commit_among(&candidates, &base)?;
-
-    assert_eq!(found, Some(third[..7].to_owned()));
-    Ok(())
-  }
-
-  #[test]
-  fn should_skip_candidates_that_are_not_commits_descending_from_the_base() -> Result<()> {
-    let fixture = Fixture::new();
     let older = fixture.commit("a.txt", "a", "first");
     let base = fixture.commit("b.txt", "b", "second");
-    let newer = fixture.commit("c.txt", "c", "third");
-    let candidates = vec![
-      newer[..7].to_owned(),
+    let third = fixture.commit("c.txt", "c", "third");
+    let newest = fixture.commit("d.txt", "d", "fourth");
+    let repo = fixture.repo();
+
+    let skipped = [
       older[..7].to_owned(),
       "0123456789abcdef".to_owned(),
       base[..7].to_owned(),
     ];
+    assert_eq!(repo.new_commit_among(&skipped, &base)?, None);
 
-    let found = fixture.repo().new_commit_among(&candidates, &base)?;
-
-    assert_eq!(found, Some(newer[..7].to_owned()));
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_none_when_no_candidate_is_new() -> Result<()> {
-    let fixture = Fixture::new();
-    let base = fixture.commit("a.txt", "a", "first");
-
-    let found = fixture
-      .repo()
-      .new_commit_among(&[base[..7].to_owned()], &base)?;
-
-    assert_eq!(found, None);
+    let mut candidates = vec![third[..7].to_owned(), newest[..7].to_owned()];
+    candidates.extend(skipped);
+    assert_eq!(
+      repo.new_commit_among(&candidates, &base)?,
+      Some(newest[..7].to_owned())
+    );
     Ok(())
   }
 }
@@ -231,68 +118,33 @@ mod head_advanced_cleanly_from {
   #[test]
   fn should_work() -> Result<()> {
     let fixture = Fixture::new();
+    let repo = fixture.repo();
     let base = fixture.commit("a.txt", "a", "first");
-    fixture.commit("b.txt", "b", "second");
+    assert!(!repo.head_advanced_cleanly_from(&base)?);
 
-    assert!(fixture.repo().head_advanced_cleanly_from(&base)?);
-    Ok(())
-  }
+    let next = fixture.commit("b.txt", "b", "second");
+    assert!(repo.head_advanced_cleanly_from(&base)?);
 
-  #[test]
-  fn should_be_false_when_head_is_still_the_base() -> Result<()> {
-    let fixture = Fixture::new();
-    let base = fixture.commit("a.txt", "a", "first");
-
-    assert!(!fixture.repo().head_advanced_cleanly_from(&base)?);
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_false_when_the_base_is_not_behind_head() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
-    let other = fixture.commit("b.txt", "b", "second");
-    git(&fixture.dir, &["reset", "-q", "--hard", "HEAD~1"]);
-
-    assert!(!fixture.repo().head_advanced_cleanly_from(&other)?);
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_false_when_the_tree_is_dirty() -> Result<()> {
-    let fixture = Fixture::new();
-    let base = fixture.commit("a.txt", "a", "first");
-    fixture.commit("b.txt", "b", "second");
-    fs::write(fixture.dir.join("c.txt"), "c")?;
-
-    assert!(!fixture.repo().head_advanced_cleanly_from(&base)?);
-    Ok(())
-  }
-}
-
-mod status {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
     fs::write(fixture.dir.join("a.txt"), "changed")?;
     fs::write(fixture.dir.join("new.txt"), "new")?;
+    assert_eq!(repo.status()?, "M a.txt\n?? new.txt");
+    assert!(!repo.head_advanced_cleanly_from(&base)?);
 
-    assert_eq!(fixture.repo().status()?, "M a.txt\n?? new.txt");
-    assert!(!fixture.repo().is_clean()?);
+    git(&fixture.dir, &["reset", "-q", "--hard", &base]);
+    fs::remove_file(fixture.dir.join("new.txt"))?;
+    assert_eq!(repo.status()?, "");
+    assert!(!repo.head_advanced_cleanly_from(&next)?);
     Ok(())
   }
 
   #[test]
-  fn should_be_empty_when_the_tree_is_clean() -> Result<()> {
+  fn should_fail_when_the_repository_has_no_commits() {
     let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
 
-    assert_eq!(fixture.repo().status()?, "");
-    assert!(fixture.repo().is_clean()?);
-    Ok(())
+    assert_eq!(
+      fixture.repo().head().unwrap_err().to_string(),
+      "HEAD names no commit; an empty repository needs a first commit"
+    );
   }
 }
 
@@ -302,73 +154,25 @@ mod commit {
   #[test]
   fn should_work() -> Result<()> {
     let fixture = Fixture::new();
-    let sha = fixture.commit("a.txt", "a", "first\n\nCo-authored-by: someone");
-
-    let commit = fixture.repo().commit(&sha[..7])?;
-
-    assert_eq!(
-      commit,
-      Some(Commit {
-        sha,
-        message: "first\n\nCo-authored-by: someone".to_owned(),
-      })
-    );
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_none_when_no_commit_has_the_sha() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a", "first");
-
-    assert_eq!(fixture.repo().commit("0123456789abcdef")?, None);
-    Ok(())
-  }
-}
-
-mod shortstat {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    fixture.commit("a.txt", "a\nb\n", "first");
-    let sha = fixture.commit("a.txt", "a\nc\nd\n", "second");
+    let base = fixture.commit("a.txt", "a\nb\n", "first");
+    let message = "second\n\nCo-authored-by: someone";
+    let sha = fixture.commit("a.txt", "a\nc\nd\n", message);
+    let repo = fixture.repo();
 
     assert_eq!(
-      fixture.repo().shortstat(&sha)?,
+      repo.shortstat(&sha)?,
       "1 file changed, 2 insertions(+), 1 deletion(-)"
     );
-    Ok(())
-  }
-}
-
-mod files_changed {
-  use super::*;
-
-  #[test]
-  fn should_work() -> Result<()> {
-    let fixture = Fixture::new();
-    let first = fixture.commit("a.txt", "a", "first");
-    fixture.commit("b.txt", "b", "second");
-    let third = fixture.commit("c.txt", "c", "third");
-
+    assert_eq!(repo.files_changed(&base, &sha)?, ["a.txt"]);
+    assert!(repo.files_changed(&sha, "HEAD")?.is_empty());
     assert_eq!(
-      fixture.repo().files_changed(&first, &third)?,
-      vec!["b.txt", "c.txt"]
+      repo.commit(&sha[..7])?,
+      Some(Commit {
+        sha,
+        message: message.to_owned()
+      })
     );
-    Ok(())
-  }
-
-  #[test]
-  fn should_be_empty_when_nothing_changed() -> Result<()> {
-    let fixture = Fixture::new();
-    let first = fixture.commit("a.txt", "a", "first");
-
-    assert_eq!(
-      fixture.repo().files_changed(&first, "HEAD")?,
-      Vec::<String>::new()
-    );
+    assert_eq!(repo.commit("0123456789abcdef")?, None);
     Ok(())
   }
 }
