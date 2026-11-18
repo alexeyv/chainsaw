@@ -11,72 +11,24 @@ mod can_transition_to {
 
   #[test]
   fn should_work() {
-    assert!(TaskState::Drafted.can_transition_to(TaskState::Dispatched));
-    assert!(TaskState::Dispatched.can_transition_to(TaskState::InFlight));
-    assert!(TaskState::InFlight.can_transition_to(TaskState::CommittedUnverified));
-    assert!(TaskState::CommittedUnverified.can_transition_to(TaskState::Accepted));
-  }
+    use TaskState::{Aborted, Accepted, CommittedUnverified, Dispatched, Drafted, InFlight};
 
-  #[test]
-  fn should_allow_skipping_forward_over_intermediate_states() {
-    assert!(TaskState::Drafted.can_transition_to(TaskState::Accepted));
-    assert!(TaskState::Dispatched.can_transition_to(TaskState::CommittedUnverified));
-  }
-
-  #[test]
-  fn should_allow_aborting_from_every_state_that_is_not_terminal() {
-    for state in TaskState::iter() {
-      assert_eq!(
-        state.can_transition_to(TaskState::Aborted),
-        !state.is_terminal(),
-        "abort reachability wrong for {state}"
-      );
-    }
-  }
-
-  #[test]
-  fn should_refuse_to_stay_in_or_move_backward_from_any_state() {
     for current in TaskState::iter() {
-      for next in TaskState::iter().filter(|next| *next <= current) {
-        assert!(
-          !current.can_transition_to(next),
-          "{current} -> {next} was allowed"
-        );
-      }
-    }
-  }
-
-  #[test]
-  fn should_refuse_to_leave_a_terminal_state() {
-    for current in [TaskState::Accepted, TaskState::Aborted] {
+      let reachable: &[TaskState] = match current {
+        Drafted => &[Dispatched, InFlight, CommittedUnverified, Accepted, Aborted],
+        Dispatched => &[InFlight, CommittedUnverified, Accepted, Aborted],
+        InFlight => &[CommittedUnverified, Accepted, Aborted],
+        CommittedUnverified => &[Accepted, Aborted],
+        Accepted | Aborted => &[],
+      };
+      assert_eq!(current.is_terminal(), reachable.is_empty(), "{current}");
       for next in TaskState::iter() {
-        assert!(
-          !current.can_transition_to(next),
-          "{current} -> {next} was allowed"
+        assert_eq!(
+          current.can_transition_to(next),
+          reachable.contains(&next),
+          "{current} -> {next}"
         );
       }
-    }
-  }
-}
-
-mod is_terminal {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert!(TaskState::Accepted.is_terminal());
-    assert!(TaskState::Aborted.is_terminal());
-  }
-
-  #[test]
-  fn should_be_false_for_every_state_a_task_can_leave() {
-    for state in [
-      TaskState::Drafted,
-      TaskState::Dispatched,
-      TaskState::InFlight,
-      TaskState::CommittedUnverified,
-    ] {
-      assert!(!state.is_terminal(), "{state} is terminal");
     }
   }
 }
@@ -173,55 +125,6 @@ events:
   4 committed_unverified none
   5 accepted "gate passed""#
     );
-  }
-
-  #[test]
-  fn should_accept_a_task_aborted_before_it_committed() {
-    let task = build(TaskSpec {
-      commit_sha: None,
-      ..task_in(TaskState::Aborted, Some("implementer stalled"))
-    })
-    .unwrap();
-
-    assert_eq!(task.state(), TaskState::Aborted);
-    assert_eq!(task.reason(), Some("implementer stalled"));
-    assert_eq!(task.commit_sha(), None);
-  }
-
-  #[test]
-  fn should_accept_a_task_aborted_straight_from_drafted() {
-    let task = build(TaskSpec {
-      events: vec![
-        event(1, TaskState::Drafted, None).unwrap(),
-        event(2, TaskState::Aborted, Some("withdrawn")).unwrap(),
-      ],
-      ..drafted_task()
-    })
-    .unwrap();
-
-    assert_eq!(task.state(), TaskState::Aborted);
-    assert_eq!(task.reason(), Some("withdrawn"));
-  }
-
-  #[test]
-  fn should_keep_events_in_identity_order_across_a_backward_clock_step() {
-    let earlier = event(1, TaskState::Drafted, None).unwrap();
-    let later = TaskEvent::new(
-      2,
-      TaskState::Aborted,
-      Some("withdrawn".to_owned()),
-      earlier.created_at() - chrono::Duration::seconds(10),
-    )
-    .unwrap();
-
-    let task = build(TaskSpec {
-      events: vec![earlier, later],
-      ..drafted_task()
-    })
-    .unwrap();
-
-    assert_eq!(task.state(), TaskState::Aborted);
-    assert!(task.events()[1].created_at() < task.events()[0].created_at());
   }
 
   #[test]

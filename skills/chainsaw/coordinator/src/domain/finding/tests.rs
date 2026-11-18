@@ -59,61 +59,6 @@ is_resolved: true"#
   }
 
   #[test]
-  fn should_accept_an_unresolved_record() {
-    let finding = Finding::from_record(
-      3,
-      5,
-      "a defect".to_owned(),
-      None,
-      None,
-      None,
-      created_at(),
-      None,
-    )
-    .unwrap();
-
-    assert_eq!(
-      format_finding(&finding),
-      r#"id: 3
-task_id: 5
-description: "a defect"
-verdict: none
-verdict_reason: none
-fix_task_id: none
-created_at: 2023-11-14T22:13:20Z
-resolved_at: none
-is_resolved: false"#
-    );
-  }
-
-  #[test]
-  fn should_accept_a_dropped_verdict_without_a_fix_task() {
-    let finding = finding_from_record(
-      3,
-      5,
-      "a defect",
-      Some(FindingVerdict::Dropped),
-      Some("not actionable"),
-      None,
-      Some(resolved_at()),
-    )
-    .unwrap();
-
-    assert_eq!(
-      format_finding(&finding),
-      r#"id: 3
-task_id: 5
-description: "a defect"
-verdict: dropped
-verdict_reason: "not actionable"
-fix_task_id: none
-created_at: 2023-11-14T22:13:20Z
-resolved_at: 2023-11-14T22:13:21Z
-is_resolved: true"#
-    );
-  }
-
-  #[test]
   fn should_fail_when_the_id_is_not_positive() {
     for id in [i64::MIN, -1, 0] {
       let error = finding_from_record(

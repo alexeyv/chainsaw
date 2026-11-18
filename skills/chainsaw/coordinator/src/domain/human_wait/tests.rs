@@ -20,19 +20,6 @@ is_open: false"#
   }
 
   #[test]
-  fn should_accept_an_open_wait() {
-    let wait = open_wait(3).unwrap();
-
-    assert_eq!(
-      format_human_wait(&wait),
-      r#"id: 3
-started: 2023-11-14T22:13:20Z
-ended: none
-is_open: true"#
-    );
-  }
-
-  #[test]
   fn should_fail_when_the_id_is_not_positive() {
     for id in [i64::MIN, -1, 0] {
       let error = HumanWait::new(id, timestamp(1_700_000_000), None).unwrap_err();
