@@ -79,4 +79,18 @@ mod create {
     assert_eq!(row_count(&db, "task_events")?, 0);
     Ok(())
   }
+
+  #[test]
+  fn should_let_the_caller_roll_back_an_invalid_event() -> Result<()> {
+    let mut db = database();
+    task_row(&db, 7)?;
+    let transaction = db.transaction()?;
+
+    let error = create(&transaction, 7, TaskState::Aborted, Some(" ")).unwrap_err();
+    transaction.rollback()?;
+
+    assert_eq!(error.to_string(), "reason cannot be blank");
+    assert_eq!(row_count(&db, "task_events")?, 0);
+    Ok(())
+  }
 }

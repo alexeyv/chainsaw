@@ -147,12 +147,14 @@ events:
   }
 
   #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
+  fn should_let_the_caller_roll_back_the_task_and_event_when_validation_fails() -> Result<()> {
     let mut db = database();
 
     let transaction = db.transaction()?;
-    draft(&transaction, "a task")?;
+    let error = draft(&transaction, " ").unwrap_err();
     transaction.rollback()?;
+
+    assert_eq!(error.to_string(), "text cannot be blank");
 
     assert_eq!(row_count(&db, "tasks")?, 0);
     assert_eq!(row_count(&db, "task_events")?, 0);
