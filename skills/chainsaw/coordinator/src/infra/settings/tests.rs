@@ -399,6 +399,18 @@ args = "--model sonnet --effort medium"
       "chainsaw.json is no longer used; transfer its settings to chainsaw.toml and delete"
     );
   }
+
+  #[test]
+  fn should_fail_naming_the_later_set_when_two_name_the_same_key() {
+    let error = ScratchDir::new()
+      .load(&["implementer.args=a", "implementer.args=b"])
+      .unwrap_err();
+
+    assert_eq!(
+      message(&error),
+      "invalid --set implementer.args=b: implementer.args was already set by an earlier --set"
+    );
+  }
 }
 
 mod sets_layer {
@@ -440,16 +452,6 @@ mod sets_layer {
     assert_eq!(
       message(&error),
       "invalid --set implementer.model=x: unknown field `model`, expected `agent` or `args`\nin `implementer`"
-    );
-  }
-
-  #[test]
-  fn should_fail_naming_the_later_set_when_two_name_the_same_key() {
-    let error = sets_layer(&sets(&["implementer.args=a", "implementer.args=b"])).unwrap_err();
-
-    assert_eq!(
-      message(&error),
-      "invalid --set implementer.args=b: implementer.args was already set by an earlier --set"
     );
   }
 }
