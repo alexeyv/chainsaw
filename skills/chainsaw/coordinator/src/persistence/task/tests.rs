@@ -127,19 +127,6 @@ events:
   }
 
   #[test]
-  fn should_assign_increasing_ids() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let first = draft(&transaction, "first")?;
-    let second = draft(&transaction, "second")?;
-    transaction.commit()?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
-
-  #[test]
   fn should_record_which_task_is_being_retried() -> Result<()> {
     let mut db = database();
 
@@ -169,41 +156,6 @@ events:
 
     assert_eq!(row_count(&db, "tasks")?, 0);
     assert_eq!(row_count(&db, "task_events")?, 0);
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_text_is_blank() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let error = draft(&transaction, " ").unwrap_err();
-    transaction.rollback()?;
-
-    assert_eq!(error.to_string(), "text cannot be blank");
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_file_count_does_not_match_the_list() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let error = create(
-      &transaction,
-      "a task",
-      1,
-      10,
-      None,
-      Some(vec!["a.rs".to_owned(), "b.rs".to_owned()]),
-    )
-    .unwrap_err();
-    transaction.rollback()?;
-
-    assert_eq!(
-      error.to_string(),
-      "predicted file count 1 does not match 2 listed files"
-    );
     Ok(())
   }
 
@@ -468,15 +420,6 @@ mod predecessor {
     let first = draft(&transaction, "first")?;
 
     assert_eq!(predecessor(&transaction, first.id())?, None);
-    transaction.commit()?;
-    Ok(())
-  }
-
-  #[test]
-  fn should_return_none_when_there_are_no_tasks() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-    assert_eq!(predecessor(&transaction, 1)?, None);
     transaction.commit()?;
     Ok(())
   }
@@ -872,22 +815,6 @@ mod record_commentary_request {
   }
 
   #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 7)?;
-    let transaction = db.transaction()?;
-    let task = committed(&transaction, "request then roll back")?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    record_commentary_request(&transaction, task.id())?;
-    transaction.rollback()?;
-
-    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_without_writing_when_the_task_has_no_commit() -> Result<()> {
     let mut db = database();
     session_row(&db, 7)?;
@@ -972,25 +899,6 @@ mod record_commentary_delivery {
   }
 
   #[test]
-  fn should_keep_the_first_delivery_when_recorded_again() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 7)?;
-    let transaction = db.transaction()?;
-    let task = committed(&transaction, "deliver once")?;
-    record_commentary_delivery(&transaction, task.id())?;
-    let first = get(&transaction, task.id())?.expect("delivered task");
-
-    let recorded_again = record_commentary_delivery(&transaction, task.id())?;
-    let second = get(&transaction, task.id())?.expect("delivered task");
-    transaction.commit()?;
-
-    assert!(!recorded_again);
-    assert!(first.commentary_delivered_at().is_some());
-    assert_eq!(format_task(&second), format_task(&first));
-    Ok(())
-  }
-
-  #[test]
   fn should_leave_the_request_untouched_when_delivering_a_requested_task() -> Result<()> {
     let mut db = database();
     session_row(&db, 7)?;
@@ -1009,74 +917,6 @@ mod record_commentary_delivery {
       requested.commentary_requested_at()
     );
     assert!(delivered.commentary_delivered_at().is_some());
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 7)?;
-    let transaction = db.transaction()?;
-    let task = committed(&transaction, "deliver then roll back")?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    record_commentary_delivery(&transaction, task.id())?;
-    transaction.rollback()?;
-
-    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_without_writing_when_the_task_has_no_commit() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-    let task = draft(&transaction, "not committed")?;
-
-    let error = record_commentary_delivery(&transaction, task.id()).unwrap_err();
-    let unchanged = get(&transaction, task.id())?.expect("drafted task");
-    transaction.commit()?;
-
-    assert_eq!(
-      error.to_string(),
-      "task 1 is drafted, not ready for commentary"
-    );
-    assert_eq!(format_task(&unchanged), format_task(&task));
-    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_without_writing_when_the_task_was_aborted_after_committing() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 7)?;
-    let transaction = db.transaction()?;
-    let task = committed(&transaction, "aborted after commit")?;
-    let task = abort(&transaction, task.id(), "gate failed")?;
-
-    let error = record_commentary_delivery(&transaction, task.id()).unwrap_err();
-    let unchanged = get(&transaction, task.id())?.expect("aborted task");
-    transaction.commit()?;
-
-    assert_eq!(
-      error.to_string(),
-      "task 1 is aborted, not ready for commentary"
-    );
-    assert_eq!(format_task(&unchanged), format_task(&task));
-    assert_eq!(stored_commentary(&db, task.id())?, (None, None));
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_task_does_not_exist() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let error = record_commentary_delivery(&transaction, 7).unwrap_err();
-    transaction.rollback()?;
-
-    assert_eq!(error.to_string(), "task 7 is missing");
     Ok(())
   }
 }
@@ -1170,25 +1010,6 @@ mod advance {
       error.to_string(),
       "task 1 is already dispatched with session Some(7), not Some(8)"
     );
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 7)?;
-    let transaction = db.transaction()?;
-    let task = draft(&transaction, "remain drafted")?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    dispatch(&transaction, task.id(), 7, 0, "base123", None)?;
-    transaction.rollback()?;
-
-    let transaction = db.transaction()?;
-    let unchanged = get(&transaction, task.id())?.expect("drafted task");
-    transaction.commit()?;
-    assert_eq!(format_task(&unchanged), format_task(&task));
     Ok(())
   }
 

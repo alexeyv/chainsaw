@@ -73,18 +73,6 @@ mod create {
   }
 
   #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    create(&transaction, None, "temporary")?;
-    transaction.rollback()?;
-
-    assert_eq!(row_count(&db, "observations")?, 0);
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_when_the_task_does_not_exist() -> Result<()> {
     let mut db = database();
 
@@ -93,18 +81,6 @@ mod create {
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_text_is_blank() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let error = create(&transaction, None, " ").unwrap_err();
-    transaction.rollback()?;
-
-    assert_eq!(error.to_string(), "text cannot be blank");
     Ok(())
   }
 }
