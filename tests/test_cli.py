@@ -34,7 +34,8 @@ class SupervisorSmokeTest(unittest.TestCase):
             (root / "herdr").symlink_to(TESTS / "fake_herdr.py")
 
             env = dict(
-                os.environ,
+                # Git hooks can export GIT_DIR and GIT_INDEX_FILE for the caller's repo.
+                {key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
                 HOME=str(home),
                 PATH=str(root) + os.pathsep + os.environ["PATH"],
                 HERDR_WORKSPACE_ID="workspace",
