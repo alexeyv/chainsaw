@@ -1,70 +1,27 @@
 # Testing
 
-The coordinator is tested in two layers: unit tests next to the code, and
-integration tests through the CLI. Use real objects. Failures must be obvious
-from the assertion.
+Test each behavior at the cheapest layer that can demonstrate it. Use real
+objects and make failures obvious from the assertion.
 
-## Unit tests
+## Rust tests
 
-Prove what each function we bother to test is supposed to do, then how it
-deviates. Unit-test what is straightforward at this layer; cover the rest
-through integration. Repetition between cases is fine. Do not unit test
-trivial getters, functions, or constructors.
+- Keep tests next to the code that owns the behavior. Use one subject module
+  per tested function, in source order.
+- Name the mainline case `should_work`. Name deviations
+  `should_…_when_…` or `should_fail_…_when_…`.
+- Cover meaningful state transitions, boundary conditions, and failure paths.
+  Skip trivial getters and constructors. When several layers call the same
+  logic, cover its edge cases once.
+- Keep fixtures as small as the case needs. Factor out shared builders and
+  custom assertions when they make the behavior easier to read.
+- Use ordinary equality for simple values. For complex objects or row sets,
+  compare human-readable representations. Test inverse operations together
+  at the layer that owns the round trip.
 
-### Subject and names
+## Python smoke test
 
-- One subject module per tested function, in the same order as the functions
-  in the source file.
-- The first case is always `should_work`: the mainline happy path, written to
-  demonstrate intended behavior.
-- Further cases are deviations: `should_…_when_…`, `should_fail_…_when_…`.
-- Names start with `should`, stay on one line, and may be long.
-
-### What to construct
-
-- Use actual objects.
-- For the session runtime, the contract tests put a fake on PATH under the
-  real CLI's name: `tests/fake_herdr.py` as `herdr`, `tests/fake_orca.py` as
-  `orca`, chosen by the case's `runtime` attribute. What the agent behind
-  either does (transcripts, prompts, replies, queueing) lives once in
-  `tests/fake_agent.py`. Extend them when a scenario needs more behavior.
-  `test_cli_contract.py` drives Herdr; `test_cli_contract_orca.py` runs the
-  same classes under Orca, restating the few cases that spell out the runtime
-  conversation, and adds what only Orca does.
-
-### Fixtures
-
-- Build objects with small, domain-named functions that read as a micro DSL
-  when composed. Ordinary functions the language already has.
-- Put those builders, custom assertions, and similar helpers in one test
-  helpers file.
-- Keep each fixture as simple as the case needs.
-- Unit tests use those helpers. If the object you need is not there yet, add
-  another fixture with a discoverable name.
-
-### How much
-
-- Near-100% line coverage where it is not awkward.
-- Non-trivial cyclomatic complexity also gets branch coverage and loop
-  coverage where possible.
-
-## Integration tests
-
-Prove what the user — an LLM at this CLI — sees and can do.
-
-- Drive the coordinator through its CLI.
-- Assert through the CLI. Read SQLite for outcomes the CLI does not show.
-- Start from an empty database. Reach any later state by stringing CLI
-  commands together.
-- Cover domain boundaries, presentation corner cases, and end-to-end results.
-- Include at least one full lifecycle: a task is created and taken through to
-  accepted, with an assertion after every CLI call.
-- Write them as ordinary Rust tests, organized so a human can hand-write them.
-
-## Assertions (both layers)
-
-- Simple values: ordinary equality.
-- Non-trivial objects, collections, or row sets: format both sides as
-  human-readable strings and compare the strings.
-- Where a function has an inverse, test the cycle: start from a state, apply
-  both directions, end equivalent. Do this at the layer that owns the property.
+Keep one end-to-end task lifecycle through the shipped CLI. Start with an
+empty run, launch an implementer, and dispatch its task. Wait for the daemon
+to record its Git commit and verify acceptance from a later process. A small
+Herdr fixture on PATH stands in for the terminal and agent. Specific runtime
+protocols and transcript formats belong in their Rust adapter tests.
