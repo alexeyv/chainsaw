@@ -229,16 +229,15 @@ args = "--model sonnet --effort medium"
     dir.write_global("[implementer]\nargs = \"--model sonnet --effort medium\"\n");
     dir.write_settings("[implementer]\nagent = \"codex\"\n");
 
-    let settings = dir.load(&[]).unwrap();
+    let settings = dir.load(&["commentator.agent=codex"]).unwrap();
 
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Codex
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--dangerously-bypass-approvals-and-sandbox"]
-    );
+    for role in [SessionKind::Implementer, SessionKind::Commentator] {
+      assert_eq!(settings.launch_agent(role), AgentKind::Codex);
+      assert_eq!(
+        settings.launch_args(role),
+        ["--dangerously-bypass-approvals-and-sandbox"]
+      );
+    }
   }
 
   #[test]
@@ -318,21 +317,14 @@ args = "--model sonnet --effort medium"
   }
 
   #[test]
-  fn should_launch_cursor_with_its_own_defaults_when_a_role_names_it() {
-    let settings = load_text("[implementer]\nagent = \"cursor\"\n").unwrap();
+  fn should_launch_cursor_with_its_own_defaults_for_both_roles() {
+    let settings =
+      load_text("[implementer]\nagent = \"cursor\"\n[commentator]\nagent = \"cursor\"\n").unwrap();
 
-    assert_eq!(
-      settings.launch_agent(SessionKind::Implementer),
-      AgentKind::Cursor
-    );
-    assert_eq!(
-      settings.launch_args(SessionKind::Implementer),
-      ["--trust", "--force"]
-    );
-    assert_eq!(
-      settings.launch_agent(SessionKind::Commentator),
-      AgentKind::Claude
-    );
+    for role in [SessionKind::Implementer, SessionKind::Commentator] {
+      assert_eq!(settings.launch_agent(role), AgentKind::Cursor);
+      assert_eq!(settings.launch_args(role), ["--trust", "--force"]);
+    }
   }
 
   #[test]
