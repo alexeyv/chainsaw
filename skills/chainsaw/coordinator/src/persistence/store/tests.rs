@@ -265,9 +265,48 @@ fn initializes_one_database_concurrently() -> Result<()> {
     .into_iter()
     .map(|handle| handle.join())
     .collect::<Vec<_>>();
-  let _ = fs::remove_file(&path);
+  remove_database(&path);
   for result in results {
     result.expect("schema initialization worker panicked")?;
   }
   Ok(())
+}
+
+fn remove_database(path: &std::path::Path) {
+  let _ = fs::remove_file(path);
+  let _ = fs::remove_file(format!("{}-wal", path.display()));
+  let _ = fs::remove_file(format!("{}-shm", path.display()));
+}
+
+mod open {
+  use super::*;
+
+  #[test]
+  fn should_work() -> Result<()> {
+    let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
+    let dir =
+      std::env::temp_dir().join(format!("chainsaw-open-wal-{}-{suffix}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+
+    let writer = Store::open(&dir)?;
+    let mode: String = writer
+      .db
+      .query_row("pragma journal_mode", [], |row| row.get(0))?;
+    assert_eq!(mode.to_ascii_lowercase(), "wal");
+
+    // A second connection opening an already-initialized WAL database must not
+    // contend on an active writer's lock.
+    let transaction = writer.write_transaction()?;
+    let db = Connection::open(&writer.path)?;
+    db.busy_timeout(Duration::from_millis(0))?;
+    initialize_schema(&db)?;
+    let count: i64 = db.query_row("select count(*) from run", [], |row| row.get(0))?;
+    assert_eq!(count, 1);
+
+    transaction.commit()?;
+    drop(db);
+    drop(writer);
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+  }
 }

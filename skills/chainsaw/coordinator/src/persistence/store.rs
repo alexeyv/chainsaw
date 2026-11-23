@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
 
 const SCHEMA_VERSION: i64 = 2;
 
@@ -67,6 +68,7 @@ pragma user_version=2;
 "#;
 
 pub const DATABASE_FILE_NAME: &str = "chainsaw-supervisor.db";
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Store {
   pub path: PathBuf,
@@ -78,7 +80,7 @@ impl Store {
   pub fn open(state_dir: &Path) -> Result<Self> {
     let path = state_dir.join(DATABASE_FILE_NAME);
     let db = Connection::open(&path)?;
-    db.busy_timeout(Duration::from_secs(30))?;
+    db.busy_timeout(BUSY_TIMEOUT)?;
     initialize_schema(&db)?;
     Ok(Self { path, db })
   }
@@ -110,29 +112,67 @@ impl Store {
 }
 
 pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
-  let transaction = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-  let version = transaction.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
-  match version {
-    0 => {
-      let table_count = transaction.query_row(
-        "select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'",
-        [],
-        |row| row.get::<_, i64>(0),
-      )?;
-      if table_count != 0 {
-        bail!("database schema is unversioned; remove it before starting chainsaw");
+  enable_wal(db)?;
+  let version = db.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+  if version != SCHEMA_VERSION {
+    let transaction = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let version = transaction.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))?;
+    match version {
+      0 => {
+        let table_count = transaction.query_row(
+          "select count(*) from sqlite_schema where type='table' and name not like 'sqlite_%'",
+          [],
+          |row| row.get::<_, i64>(0),
+        )?;
+        if table_count != 0 {
+          bail!("database schema is unversioned; remove it before starting chainsaw");
+        }
+        transaction.execute_batch(SCHEMA)?;
       }
-      transaction.execute_batch(SCHEMA)?;
+      1 => transaction.execute_batch(MIGRATE_FROM_1)?,
+      SCHEMA_VERSION => {}
+      version => bail!(
+        "database schema version {version} is unsupported; expected {SCHEMA_VERSION}: remove the database and start a new run"
+      ),
     }
-    1 => transaction.execute_batch(MIGRATE_FROM_1)?,
-    SCHEMA_VERSION => {}
-    version => bail!(
-      "database schema version {version} is unsupported; expected {SCHEMA_VERSION}: remove the database and start a new run"
-    ),
+    transaction.commit()?;
   }
-  transaction.commit()?;
   db.execute_batch("pragma foreign_keys=on;")?;
   Ok(())
+}
+
+/// Switches a file-backed database to WAL mode once. SQLite can return
+/// `SQLITE_BUSY` immediately when two connections race to switch journal mode
+/// on a brand-new database, so retry briefly until the mode sticks.
+fn enable_wal(db: &Connection) -> Result<()> {
+  let deadline = Instant::now() + BUSY_TIMEOUT;
+  loop {
+    let mode: String = match db.query_row("pragma journal_mode", [], |row| row.get(0)) {
+      Ok(mode) => mode,
+      Err(error) if is_busy(&error) && Instant::now() < deadline => {
+        thread::sleep(Duration::from_millis(10));
+        continue;
+      }
+      Err(error) => return Err(error.into()),
+    };
+    if mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory") {
+      return Ok(());
+    }
+    match db.execute_batch("pragma journal_mode=wal;") {
+      Ok(()) => return Ok(()),
+      Err(error) if is_busy(&error) && Instant::now() < deadline => {
+        thread::sleep(Duration::from_millis(10));
+      }
+      Err(error) => return Err(error.into()),
+    }
+  }
+}
+
+fn is_busy(error: &rusqlite::Error) -> bool {
+  matches!(
+    error.sqlite_error_code(),
+    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+  )
 }
 
 #[cfg(test)]
