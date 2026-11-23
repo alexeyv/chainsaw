@@ -31,6 +31,11 @@ impl Repo {
   pub fn head(&self) -> Result<String> {
     let output = self.run(&["rev-parse", "--verify", "--quiet", "HEAD"])?;
     if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let detail = stderr.trim();
+      if !detail.is_empty() {
+        bail!("git rev-parse failed: {detail}");
+      }
       bail!("HEAD names no commit; an empty repository needs a first commit");
     }
     Ok(text(&output))
@@ -149,7 +154,17 @@ impl Repo {
   }
 
   fn stdout(&self, args: &[&str]) -> Result<String> {
-    Ok(text(&self.run(args)?))
+    let output = self.run(args)?;
+    if !output.status.success() {
+      let stderr = String::from_utf8_lossy(&output.stderr);
+      let detail = stderr.trim();
+      let subcommand = args.first().copied().unwrap_or("");
+      if detail.is_empty() {
+        bail!("git {subcommand} failed with {}", output.status);
+      }
+      bail!("git {subcommand} failed: {detail}");
+    }
+    Ok(text(&output))
   }
 }
 

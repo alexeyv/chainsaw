@@ -16,10 +16,16 @@ struct Fixture {
 
 impl Fixture {
   fn new() -> Self {
+    let fixture = Self::not_a_repo();
+    git(&fixture.dir, &["init", "-q", "-b", "main"]);
+    fixture
+  }
+
+  /// A temporary directory that is not a git repository, removed on drop.
+  fn not_a_repo() -> Self {
     let suffix = NEXT_REPO.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("chainsaw-git-{}-{suffix}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    git(&dir, &["init", "-q", "-b", "main"]);
     Self { dir }
   }
 
@@ -151,6 +157,28 @@ mod head_advanced_cleanly_from {
       "HEAD names no commit; an empty repository needs a first commit"
     );
   }
+
+  #[test]
+  fn should_fail_when_the_directory_is_not_a_repository() {
+    let fixture = Fixture::not_a_repo();
+    let repo = fixture.repo();
+
+    let head_error = repo.head().unwrap_err().to_string();
+    let status_error = repo.status().unwrap_err().to_string();
+    let clean_error = repo.is_clean().unwrap_err().to_string();
+
+    assert!(
+      head_error.starts_with("git rev-parse failed: ")
+        && head_error.contains("not a git repository"),
+      "unexpected head error: {head_error}"
+    );
+    assert!(
+      status_error.starts_with("git status failed: ")
+        && status_error.contains("not a git repository"),
+      "unexpected status error: {status_error}"
+    );
+    assert_eq!(clean_error, status_error);
+  }
 }
 
 mod commit {
@@ -172,11 +200,25 @@ mod commit {
     assert_eq!(
       repo.commit(&sha[..7])?,
       Some(Commit {
-        sha,
+        sha: sha.clone(),
         message: message.to_owned()
       })
     );
     assert_eq!(repo.commit("0123456789abcdef")?, None);
+    assert!(
+      repo
+        .shortstat("0123456789abcdef")
+        .unwrap_err()
+        .to_string()
+        .starts_with("git show failed: ")
+    );
+    assert!(
+      repo
+        .files_changed(&sha, "0123456789abcdef")
+        .unwrap_err()
+        .to_string()
+        .starts_with("git diff failed: ")
+    );
     Ok(())
   }
 }
