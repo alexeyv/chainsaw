@@ -192,9 +192,9 @@ impl TranscriptFormat for Claude {
 impl Claude {
   /// Where Claude Code keeps transcripts of sessions started in `run_dir`.
   fn transcripts_dir(canonical_run_dir: &Path) -> Result<PathBuf> {
-    let home = env::var_os("HOME").context("HOME is not set")?;
+    let home = env::home_dir().context("cannot determine home directory")?;
     Ok(
-      PathBuf::from(home)
+      home
         .join(".claude")
         .join("projects")
         .join(transcripts_dir_name(canonical_run_dir)),

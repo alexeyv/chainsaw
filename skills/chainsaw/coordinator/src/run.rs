@@ -176,9 +176,9 @@ impl Run {
 /// The state directory of the run checked out at `canonical_run_dir`:
 /// `~/.chainsaw/runs/<run directory, munged>/`.
 fn state_dir_for(canonical_run_dir: &Path) -> Result<PathBuf> {
-  let home = env::var_os("HOME").context("HOME is not set")?;
+  let home = env::home_dir().context("cannot determine home directory")?;
   Ok(
-    PathBuf::from(home)
+    home
       .join(".chainsaw")
       .join("runs")
       .join(state_dir_name(canonical_run_dir)),

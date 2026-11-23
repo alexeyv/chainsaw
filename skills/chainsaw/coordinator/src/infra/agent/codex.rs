@@ -177,7 +177,9 @@ impl Codex {
   fn sessions_dir() -> Result<PathBuf> {
     let home = match env::var_os("CODEX_HOME") {
       Some(codex_home) => PathBuf::from(codex_home),
-      None => PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".codex"),
+      None => env::home_dir()
+        .context("cannot determine home directory")?
+        .join(".codex"),
     };
     Ok(home.join("sessions"))
   }
