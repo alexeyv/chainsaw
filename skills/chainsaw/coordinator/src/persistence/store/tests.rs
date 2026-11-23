@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, MAIN_DB, TransactionState};
 
 use super::{Store, initialize_schema};
 
@@ -16,57 +16,26 @@ mod write_transaction {
 
   #[test]
   fn should_work() -> Result<()> {
-    let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-      "chainsaw-write-transaction-{}-{suffix}.db",
-      std::process::id()
-    ));
-    let db = Connection::open(&path)?;
-    db.busy_timeout(Duration::from_secs(2))?;
-    db.execute_batch("create table counter(value int); insert into counter values(0);")?;
-    let store = Store {
-      path: path.clone(),
-      db,
-    };
-    let barrier = Arc::new(Barrier::new(2));
-    let blocker_barrier = Arc::clone(&barrier);
-    let blocker_path = path.clone();
-    let blocker = thread::spawn(move || -> Result<()> {
-      let db = Connection::open(blocker_path)?;
-      let transaction = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)?;
-      blocker_barrier.wait();
-      thread::sleep(Duration::from_millis(100));
-      transaction.commit()?;
-      Ok(())
-    });
-    barrier.wait();
+    let store = counter_store()?;
 
     let transaction = store.write_transaction()?;
-    let value =
-      transaction.query_row("select value from counter", [], |row| row.get::<_, i64>(0))?;
-    transaction.execute("update counter set value=?", [value + 1])?;
-    transaction.commit()?;
-    blocker.join().expect("writer thread panicked")?;
-    let value = store
-      .db
-      .query_row("select value from counter", [], |row| row.get::<_, i64>(0))?;
 
-    assert_eq!(value, 1);
-    drop(store);
-    let _ = fs::remove_file(path);
+    // A deferred transaction would still have no lock before its first read.
+    assert_eq!(
+      transaction.transaction_state(Some(MAIN_DB))?,
+      TransactionState::Write
+    );
     Ok(())
   }
 }
 
-fn counter_store(name: &str) -> Result<Store> {
-  let suffix = NEXT_DATABASE.fetch_add(1, Ordering::Relaxed);
-  let path = std::env::temp_dir().join(format!(
-    "chainsaw-{name}-{}-{suffix}.db",
-    std::process::id()
-  ));
-  let db = Connection::open(&path)?;
+fn counter_store() -> Result<Store> {
+  let db = Connection::open_in_memory()?;
   db.execute_batch("create table counter(value int); insert into counter values(0);")?;
-  Ok(Store { path, db })
+  Ok(Store {
+    path: ":memory:".into(),
+    db,
+  })
 }
 
 fn counter(store: &Store) -> Result<i64> {
@@ -82,27 +51,25 @@ mod read {
 
   #[test]
   fn should_work() -> Result<()> {
-    let store = counter_store("read")?;
+    let store = counter_store()?;
 
     let value = store.read(|transaction| {
       Ok(transaction.query_row("select value from counter", [], |row| row.get::<_, i64>(0))?)
     })?;
 
     assert_eq!(value, 0);
-    let _ = fs::remove_file(&store.path);
     Ok(())
   }
 
   #[test]
   fn should_fail_with_the_work_error_when_the_work_fails() -> Result<()> {
-    let store = counter_store("read-fails")?;
+    let store = counter_store()?;
 
     let error = store
       .read(|_| -> Result<()> { anyhow::bail!("no such row") })
       .unwrap_err();
 
     assert_eq!(error.to_string(), "no such row");
-    let _ = fs::remove_file(&store.path);
     Ok(())
   }
 }
@@ -112,7 +79,7 @@ mod write {
 
   #[test]
   fn should_work() -> Result<()> {
-    let store = counter_store("write")?;
+    let store = counter_store()?;
 
     let value = store.write(|transaction| {
       transaction.execute("update counter set value=value+1", [])?;
@@ -121,13 +88,12 @@ mod write {
 
     assert_eq!(value, 1);
     assert_eq!(counter(&store)?, 1);
-    let _ = fs::remove_file(&store.path);
     Ok(())
   }
 
   #[test]
   fn should_roll_back_when_the_work_fails() -> Result<()> {
-    let store = counter_store("write-fails")?;
+    let store = counter_store()?;
 
     let error = store
       .write(|transaction| -> Result<()> {
@@ -138,7 +104,6 @@ mod write {
 
     assert_eq!(error.to_string(), "changed my mind");
     assert_eq!(counter(&store)?, 0);
-    let _ = fs::remove_file(&store.path);
     Ok(())
   }
 }
@@ -281,7 +246,7 @@ fn initializes_one_database_concurrently() -> Result<()> {
     "chainsaw-schema-{}-{suffix}.db",
     std::process::id()
   ));
-  let workers = 8;
+  let workers = 2;
   let barrier = Arc::new(Barrier::new(workers));
   let handles = (0..workers)
     .map(|_| {

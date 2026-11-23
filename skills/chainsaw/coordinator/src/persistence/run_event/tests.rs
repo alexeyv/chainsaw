@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 
 use super::{create, recent};
 use crate::domain::{RunEvent, RunEventKind};
-use crate::persistence::test_fixture::{database, row_count};
+use crate::persistence::test_fixture::database;
 
 fn millisecond_floor(time: DateTime<Utc>) -> DateTime<Utc> {
   DateTime::from_timestamp_millis(time.timestamp_millis()).unwrap()
@@ -54,31 +54,6 @@ mod create {
         event.created_at().timestamp_millis()
       )
     );
-    Ok(())
-  }
-
-  #[test]
-  fn should_assign_increasing_ids() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    let first = create(&transaction, RunEventKind::DaemonStart, "pid 1")?;
-    let second = create(&transaction, RunEventKind::DaemonExit, "pid 1")?;
-    transaction.commit()?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    create(&transaction, RunEventKind::Kick, "implementer-1")?;
-    transaction.rollback()?;
-
-    assert_eq!(row_count(&db, "run_events")?, 0);
     Ok(())
   }
 

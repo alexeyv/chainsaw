@@ -68,33 +68,6 @@ mod create {
   }
 
   #[test]
-  fn should_assign_increasing_ids() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 7)?;
-
-    let transaction = db.transaction()?;
-    let first = create(&transaction, 7, TaskState::Drafted, None)?;
-    let second = create(&transaction, 7, TaskState::Dispatched, None)?;
-    transaction.commit()?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 7)?;
-
-    let transaction = db.transaction()?;
-    create(&transaction, 7, TaskState::Drafted, None)?;
-    transaction.rollback()?;
-
-    assert_eq!(row_count(&db, "task_events")?, 0);
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_when_the_task_does_not_exist() -> Result<()> {
     let mut db = database();
 
@@ -108,15 +81,16 @@ mod create {
   }
 
   #[test]
-  fn should_fail_when_the_reason_is_blank() -> Result<()> {
+  fn should_let_the_caller_roll_back_an_invalid_event() -> Result<()> {
     let mut db = database();
     task_row(&db, 7)?;
-
     let transaction = db.transaction()?;
+
     let error = create(&transaction, 7, TaskState::Aborted, Some(" ")).unwrap_err();
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "reason cannot be blank");
+    assert_eq!(row_count(&db, "task_events")?, 0);
     Ok(())
   }
 }

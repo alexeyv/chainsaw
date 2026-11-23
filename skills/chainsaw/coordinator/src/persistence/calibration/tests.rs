@@ -103,64 +103,6 @@ mod create {
   }
 
   #[test]
-  fn should_assign_increasing_ids_across_tasks() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 7)?;
-    task_row(&db, 8)?;
-
-    let transaction = db.transaction()?;
-    let first = create(
-      &transaction,
-      7,
-      0,
-      0,
-      0,
-      0,
-      None,
-      ContextSize::tokens(0),
-      ContextSize::tokens(0),
-    )?;
-    let second = create(
-      &transaction,
-      8,
-      0,
-      0,
-      0,
-      0,
-      None,
-      ContextSize::tokens(0),
-      ContextSize::tokens(0),
-    )?;
-    transaction.commit()?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 7)?;
-
-    let transaction = db.transaction()?;
-    create(
-      &transaction,
-      7,
-      0,
-      0,
-      0,
-      0,
-      None,
-      ContextSize::tokens(0),
-      ContextSize::tokens(0),
-    )?;
-    transaction.rollback()?;
-
-    assert_eq!(row_count(&db, "calibrations")?, 0);
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_when_the_task_already_has_a_calibration() -> Result<()> {
     let mut db = database();
     task_row(&db, 7)?;

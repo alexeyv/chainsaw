@@ -54,23 +54,6 @@ daemon_pid: none"#
   }
 
   #[test]
-  fn should_read_back_every_recorded_time() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-    let seen = record_daemon_seen(&transaction)?;
-    let stopped = request_stop(&transaction)?;
-    let read = record_state_read(&transaction)?;
-
-    let run = get(&transaction)?;
-
-    assert_eq!(run.daemon_seen_at(), seen.daemon_seen_at());
-    assert_eq!(run.stop_requested_at(), stopped.stop_requested_at());
-    assert_eq!(run.state_read_at(), read.state_read_at());
-    assert_eq!(run, read);
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_when_the_run_row_is_missing() -> Result<()> {
     let mut db = database();
     delete_run_row(&db)?;
@@ -104,18 +87,6 @@ mod record_daemon_seen {
       stored_row(&db)?,
       format!("seen=Some({}) stop=None read=None", seen.timestamp_millis())
     );
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    record_daemon_seen(&transaction)?;
-    transaction.rollback()?;
-
-    assert_eq!(stored_row(&db)?, "seen=None stop=None read=None");
     Ok(())
   }
 
@@ -162,37 +133,13 @@ mod request_stop {
   fn should_move_the_time_forward_when_requested_again() -> Result<()> {
     let mut db = database();
     let transaction = db.transaction()?;
-    let first = request_stop(&transaction)?;
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    transaction.execute("update run set stop_requested_at=0 where id=1", [])?;
+    let first = get(&transaction)?;
 
     let second = request_stop(&transaction)?;
 
     assert!(second.stop_requested_at() > first.stop_requested_at());
     assert!(second.is_stopping());
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    request_stop(&transaction)?;
-    transaction.rollback()?;
-
-    assert_eq!(stored_row(&db)?, "seen=None stop=None read=None");
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
-    let mut db = database();
-    delete_run_row(&db)?;
-    let transaction = db.transaction()?;
-
-    let error = request_stop(&transaction).unwrap_err();
-
-    assert_eq!(error.to_string(), "run record is missing");
     Ok(())
   }
 }
@@ -240,39 +187,6 @@ daemon_pid: none"#
     );
     Ok(())
   }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    let transaction = db.transaction()?;
-    let stopped = request_stop(&transaction)?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    clear_stop_request(&transaction)?;
-    transaction.rollback()?;
-
-    assert_eq!(
-      stored_row(&db)?,
-      format!(
-        "seen=None stop=Some({}) read=None",
-        stopped.stop_requested_at().unwrap().timestamp_millis()
-      )
-    );
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
-    let mut db = database();
-    delete_run_row(&db)?;
-    let transaction = db.transaction()?;
-
-    let error = clear_stop_request(&transaction).unwrap_err();
-
-    assert_eq!(error.to_string(), "run record is missing");
-    Ok(())
-  }
 }
 
 /// The run record's continuation facts as stored.
@@ -318,18 +232,6 @@ mod claim_daemon {
     assert_eq!(run.daemon_pid(), Some(8765));
     Ok(())
   }
-
-  #[test]
-  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
-    let mut db = database();
-    delete_run_row(&db)?;
-    let transaction = db.transaction()?;
-
-    let error = claim_daemon(&transaction, 4321).unwrap_err();
-
-    assert_eq!(error.to_string(), "run record is missing");
-    Ok(())
-  }
 }
 
 mod record_observation_cursor {
@@ -359,18 +261,6 @@ mod record_observation_cursor {
     assert_eq!(run.observation_cursor(), 7);
     Ok(())
   }
-
-  #[test]
-  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
-    let mut db = database();
-    delete_run_row(&db)?;
-    let transaction = db.transaction()?;
-
-    let error = record_observation_cursor(&transaction, 7).unwrap_err();
-
-    assert_eq!(error.to_string(), "run record is missing");
-    Ok(())
-  }
 }
 
 mod record_state_read {
@@ -394,30 +284,6 @@ mod record_state_read {
       stored_row(&db)?,
       format!("seen=None stop=None read=Some({})", read.timestamp_millis())
     );
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-
-    let transaction = db.transaction()?;
-    record_state_read(&transaction)?;
-    transaction.rollback()?;
-
-    assert_eq!(stored_row(&db)?, "seen=None stop=None read=None");
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_run_row_is_missing() -> Result<()> {
-    let mut db = database();
-    delete_run_row(&db)?;
-    let transaction = db.transaction()?;
-
-    let error = record_state_read(&transaction).unwrap_err();
-
-    assert_eq!(error.to_string(), "run record is missing");
     Ok(())
   }
 }

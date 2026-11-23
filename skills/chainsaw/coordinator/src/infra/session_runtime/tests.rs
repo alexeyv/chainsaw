@@ -1,6 +1,56 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::json;
 
 use super::*;
+
+/// Each symlink invokes the checked-in shell script with its own directory
+/// for the call log. All tests can run concurrently.
+pub(super) struct FakeCli {
+  pub(super) dir: PathBuf,
+  pub(super) program: PathBuf,
+}
+
+impl FakeCli {
+  pub(super) fn new(name: &str) -> Self {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir =
+      std::env::temp_dir().join(format!("chainsaw-{name}-{}-{sequence}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let program = dir.join(name);
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("src/infra/session_runtime")
+      .join(name)
+      .join("fake.sh");
+    std::os::unix::fs::symlink(script, &program).unwrap();
+    Self { dir, program }
+  }
+
+  pub(super) fn calls(&self) -> Vec<Vec<String>> {
+    let mut calls = Vec::new();
+    let mut current = Vec::new();
+    for line in fs::read_to_string(self.dir.join("calls"))
+      .unwrap_or_default()
+      .lines()
+    {
+      if line == "END-OF-CALL" {
+        calls.push(std::mem::take(&mut current));
+      } else {
+        current.push(line.to_owned());
+      }
+    }
+    calls
+  }
+}
+
+impl Drop for FakeCli {
+  fn drop(&mut self) {
+    let _ = fs::remove_dir_all(&self.dir);
+  }
+}
 
 mod run {
   use super::*;

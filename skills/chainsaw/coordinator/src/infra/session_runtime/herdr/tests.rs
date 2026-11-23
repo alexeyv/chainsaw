@@ -1,110 +1,9 @@
-use std::fs;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use super::*;
+use crate::infra::session_runtime::tests::FakeCli;
+use std::path::Path;
 
-static NEXT_SHIM: AtomicU64 = AtomicU64::new(0);
-static SHIM: OnceLock<PathBuf> = OnceLock::new();
-
-/// macOS scans a freshly written executable on its first run, which costs far more
-/// than the run itself. Write the shim once per test process and hard-link it into
-/// each fixture; the links share the scanned inode, and `$0` still names the link,
-/// so every fixture records into its own directory.
-fn shim() -> &'static Path {
-  SHIM.get_or_init(|| {
-    let dir = env::temp_dir().join(format!("chainsaw-herdr-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let program = dir.join("herdr");
-    fs::write(&program, FAKE_HERDR).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-    // Absorb the one-time scan here rather than inside whichever test runs first.
-    // On Linux, a test starting a process while the fake herdr is written can
-    // leave it "busy" for a moment; try again for up to a second.
-    let mut tries = 0;
-    while let Err(error) = Command::new(&program).arg("warm").output() {
-      tries += 1;
-      assert!(
-        error.kind() == io::ErrorKind::ExecutableFileBusy && tries < 100,
-        "{error}"
-      );
-      thread::sleep(Duration::from_millis(10));
-    }
-    program
-  })
-}
-
-/// A `herdr` standing in at the real process boundary: it records the argv it was
-/// handed and answers with the JSON shapes and exit codes the real CLI produces.
-const FAKE_HERDR: &str = r#"#!/bin/sh
-calls="$(dirname "$0")/calls"
-for argument in "$@"; do printf '%s\n' "$argument" >> "$calls"; done
-printf '%s\n' 'END-OF-CALL' >> "$calls"
-case "$1 $2" in
-'tab create')
-  printf '{"result":{"root_pane":{"pane_id":"pane-7"},"tab":{"tab_id":"tab-7"}}}\n' ;;
-'pane split')
-  printf '{"result":{"pane":{"pane_id":"pane-9"}}}\n' ;;
-'agent start')
-  case "$3" in
-  late-id|no-id) printf '{"result":{"agent":{"status":"starting"}}}\n' ;;
-  *) printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"idle"}}}\n' ;;
-  esac ;;
-'agent get')
-  if [ "$3" = missing ]; then printf 'no such agent\n' >&2; exit 1; fi
-  if [ "$3" = malformed ]; then printf 'not json\n'; exit 0; fi
-  if [ "$3" = no-id ]; then printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0; fi
-  if [ "$3" = late-id ]; then
-    # The name appears once for `tab create --label`, once for `agent start`, and
-    # once per `agent get`; report the id on the third get.
-    if [ "$(grep -c '^late-id$' "$calls")" -lt 5 ]; then
-      printf '{"result":{"agent":{"status":"starting"}}}\n'; exit 0
-    fi
-    printf '{"result":{"agent":{"agent_session":{"value":"abc"},"status":"idle"}}}\n'; exit 0
-  fi
-  printf '{"result":{"agent":{"agent_session":{"value":"sess-1"},"status":"working"}}}\n' ;;
-'agent prompt')
-  printf '{"result":{"delivered":true}}\n' ;;
-'agent send-keys')
-  printf '{"result":{"delivered":true}}\n' ;;
-'agent wait')
-  printf '{"result":{"status":"idle"}}\n' ;;
-'pane close')
-  if [ "$3" = pane-stuck ]; then printf 'no such pane\n' >&2; exit 1; fi
-  printf '{"result":{"closed":true}}\n' ;;
-*)
-  printf 'unsupported: %s\n' "$*" >&2; exit 2 ;;
-esac
-"#;
-
-struct FakeHerdr {
-  dir: PathBuf,
-  program: PathBuf,
-  calls: PathBuf,
-}
-
-impl FakeHerdr {
-  fn new() -> Self {
-    let sequence = NEXT_SHIM.fetch_add(1, Ordering::Relaxed);
-    let dir = shim().parent().unwrap().join(format!("fixture-{sequence}"));
-    fs::create_dir_all(&dir).unwrap();
-    let program = dir.join("herdr");
-    fs::hard_link(shim(), &program).unwrap();
-    let calls = dir.join("calls");
-    Self {
-      dir,
-      program,
-      calls,
-    }
-  }
-
-  fn runtime(&self, workspace: Option<&str>, tab_id: &str) -> HerdrSessionRuntime {
+impl FakeCli {
+  fn herdr_runtime(&self, workspace: Option<&str>, tab_id: &str) -> HerdrSessionRuntime {
     HerdrSessionRuntime {
       cli: Cli::new("herdr", &self.program),
       workspace: workspace.map(str::to_owned),
@@ -113,27 +12,6 @@ impl FakeHerdr {
       session_id_poll_attempts: 4,
     }
   }
-
-  /// Every invocation's argv, in order.
-  fn calls(&self) -> Vec<Vec<String>> {
-    let text = fs::read_to_string(&self.calls).unwrap_or_default();
-    let mut calls = Vec::new();
-    let mut current = Vec::new();
-    for line in text.lines() {
-      if line == "END-OF-CALL" {
-        calls.push(std::mem::take(&mut current));
-      } else {
-        current.push(line.to_owned());
-      }
-    }
-    calls
-  }
-}
-
-impl Drop for FakeHerdr {
-  fn drop(&mut self) {
-    let _ = fs::remove_dir_all(&self.dir);
-  }
 }
 
 mod start {
@@ -141,8 +19,8 @@ mod start {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
     let args = ["--model", "sonnet", "--effort", "medium"].map(str::to_owned);
 
     let started = runtime
@@ -184,8 +62,8 @@ mod start {
 
   #[test]
   fn should_start_codex_under_its_own_kind() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
     let args = ["--dangerously-bypass-approvals-and-sandbox", "."].map(str::to_owned);
 
     let started = runtime
@@ -212,8 +90,8 @@ mod start {
 
   #[test]
   fn should_start_cursor_under_its_own_kind() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
     let args = [
       "--trust",
       "--force",
@@ -245,8 +123,8 @@ mod start {
 
   #[test]
   fn should_split_the_current_pane_and_keep_the_ambient_tab_for_a_commentator() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
 
     let started = runtime
       .start(StartSession {
@@ -277,8 +155,8 @@ mod start {
 
   #[test]
   fn should_poll_agent_get_when_agent_start_reports_no_session_id() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
 
     let started = runtime
       .start(StartSession {
@@ -305,8 +183,8 @@ mod start {
 
   #[test]
   fn should_fail_when_agent_get_never_reports_a_session_id() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("workspace-1"), "ambient-tab");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("workspace-1"), "ambient-tab");
 
     let error = runtime
       .start(StartSession {
@@ -329,8 +207,8 @@ mod start {
 
   #[test]
   fn should_fail_when_the_supervisor_is_not_inside_a_herdr_pane() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(None, "");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(None, "");
 
     let error = runtime
       .start(StartSession {
@@ -355,10 +233,10 @@ mod status {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     let status = herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .status("worker")
       .unwrap();
 
@@ -368,10 +246,10 @@ mod status {
 
   #[test]
   fn should_report_nothing_when_herdr_does_not_know_the_agent() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     let status = herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .status("missing")
       .unwrap();
 
@@ -380,10 +258,10 @@ mod status {
 
   #[test]
   fn should_report_nothing_when_herdr_answers_with_invalid_json() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     let status = herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .status("malformed")
       .unwrap();
 
@@ -425,10 +303,10 @@ mod prompt {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .prompt("worker", "do the thing")
       .unwrap();
 
@@ -444,10 +322,10 @@ mod interrupt {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .interrupt("worker")
       .unwrap();
 
@@ -460,10 +338,10 @@ mod wait {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
+    let herdr = FakeCli::new("herdr");
 
     herdr
-      .runtime(Some("workspace-1"), "")
+      .herdr_runtime(Some("workspace-1"), "")
       .wait("worker", Duration::from_secs(30))
       .unwrap();
 
@@ -479,8 +357,8 @@ mod abandon {
 
   #[test]
   fn should_work() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("ws-1"), "tab-1");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("ws-1"), "tab-1");
 
     runtime.abandon("worker", "pane-7").unwrap();
 
@@ -489,8 +367,8 @@ mod abandon {
 
   #[test]
   fn should_fail_when_herdr_cannot_close_the_pane() {
-    let herdr = FakeHerdr::new();
-    let runtime = herdr.runtime(Some("ws-1"), "tab-1");
+    let herdr = FakeCli::new("herdr");
+    let runtime = herdr.herdr_runtime(Some("ws-1"), "tab-1");
 
     let error = runtime.abandon("worker", "pane-stuck").unwrap_err();
 

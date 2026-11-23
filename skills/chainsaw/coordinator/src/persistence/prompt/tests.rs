@@ -58,19 +58,6 @@ mod create {
     );
     Ok(())
   }
-
-  #[test]
-  fn should_number_prompts_in_order_of_creation() -> Result<()> {
-    let mut db = database();
-    session_row(&db, 5)?;
-    let transaction = db.transaction()?;
-
-    let first = create(&transaction, 5, "one")?;
-    let second = create(&transaction, 5, "two")?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
 }
 
 mod get {

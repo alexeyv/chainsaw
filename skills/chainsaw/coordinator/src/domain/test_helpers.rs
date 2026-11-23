@@ -399,22 +399,6 @@ pub fn calibration_measuring(
   )
 }
 
-/// A calibration for a task whose session's context could not be read.
-pub fn calibration_without_context(id: i64, task_id: i64) -> Result<Calibration> {
-  Calibration::new(
-    id,
-    task_id,
-    2,
-    20,
-    4,
-    35,
-    Some(12.5),
-    created_at(),
-    ContextSize::UNKNOWN,
-    ContextSize::UNKNOWN,
-  )
-}
-
 pub fn format_calibration(calibration: &Calibration) -> String {
   format!(
     "id: {}\ntask_id: {}\npredicted_files: {}\npredicted_lines: {}\nactual_files: {}\nactual_lines: {}\nwall_seconds: {}\ncreated_at: {}\ncontext_size_start: {}\ncontext_size_end: {}",

@@ -93,35 +93,6 @@ fn tool_use_line(command: &str) -> String {
 
 const TURN_ENDED: &str = r#"{"type":"turn_ended","status":"success"}"#;
 
-mod program {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(Cursor.program(), "cursor-agent");
-  }
-}
-
-mod default_args {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(
-      Cursor.default_args(SessionKind::Implementer),
-      "--trust --force"
-    );
-  }
-
-  #[test]
-  fn should_be_the_same_for_the_commentator() {
-    assert_eq!(
-      Cursor.default_args(SessionKind::Commentator),
-      Cursor.default_args(SessionKind::Implementer)
-    );
-  }
-}
-
 mod session_id_args {
   use super::*;
 

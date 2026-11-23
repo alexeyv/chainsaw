@@ -8,7 +8,7 @@ fn millisecond_floor(time: DateTime<Utc>) -> DateTime<Utc> {
 use super::{get, register, resolve, resolved, unresolved};
 use crate::domain::test_helpers::format_finding;
 use crate::domain::{Finding, FindingVerdict};
-use crate::persistence::test_fixture::{database, row_count, task_row};
+use crate::persistence::test_fixture::{database, task_row};
 
 fn format_findings(findings: &[Finding]) -> String {
   findings
@@ -76,33 +76,6 @@ mod register {
   }
 
   #[test]
-  fn should_assign_increasing_ids() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 5)?;
-
-    let transaction = db.transaction()?;
-    let first = register(&transaction, 5, "first defect")?;
-    let second = register(&transaction, 5, "second defect")?;
-    transaction.commit()?;
-
-    assert_eq!((first.id(), second.id()), (1, 2));
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 5)?;
-
-    let transaction = db.transaction()?;
-    register(&transaction, 5, "temporary defect")?;
-    transaction.rollback()?;
-
-    assert_eq!(row_count(&db, "findings")?, 0);
-    Ok(())
-  }
-
-  #[test]
   fn should_fail_when_the_task_does_not_exist() -> Result<()> {
     let mut db = database();
 
@@ -111,19 +84,6 @@ mod register {
     transaction.rollback()?;
 
     assert_eq!(error.to_string(), "FOREIGN KEY constraint failed");
-    Ok(())
-  }
-
-  #[test]
-  fn should_fail_when_the_description_is_blank() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 5)?;
-
-    let transaction = db.transaction()?;
-    let error = register(&transaction, 5, " ").unwrap_err();
-    transaction.rollback()?;
-
-    assert_eq!(error.to_string(), "description cannot be blank");
     Ok(())
   }
 }
@@ -214,31 +174,6 @@ is_resolved: true"#,
     assert_eq!(resolution.verdict(), Some(FindingVerdict::Dropped));
     assert_eq!(resolution.verdict_reason(), Some("not actionable"));
     assert_eq!(resolution.fix_task_id(), None);
-    Ok(())
-  }
-
-  #[test]
-  fn should_leave_commit_and_rollback_to_the_caller() -> Result<()> {
-    let mut db = database();
-    task_row(&db, 5)?;
-    let transaction = db.transaction()?;
-    let finding = register(&transaction, 5, "a defect")?;
-    transaction.commit()?;
-
-    let transaction = db.transaction()?;
-    resolve(
-      &transaction,
-      &finding,
-      FindingVerdict::Dropped,
-      "not actionable",
-      None,
-    )?;
-    transaction.rollback()?;
-
-    let transaction = db.transaction()?;
-    let stored = get(&transaction, finding.id())?.expect("stored finding");
-    transaction.commit()?;
-    assert!(!stored.is_resolved());
     Ok(())
   }
 

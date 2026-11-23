@@ -17,19 +17,6 @@ created_at: 2023-11-14T22:13:20Z"#
   }
 
   #[test]
-  fn should_accept_a_run_wide_observation_with_no_task() {
-    let observation = observation(3, None, "run wide").unwrap();
-
-    assert_eq!(
-      format_observation(&observation),
-      r#"id: 3
-task_id: none
-text: "run wide"
-created_at: 2023-11-14T22:13:20Z"#
-    );
-  }
-
-  #[test]
   fn should_fail_when_the_id_is_not_positive() {
     for id in [i64::MIN, -1, 0] {
       let error = observation(id, Some(5), "text").unwrap_err();

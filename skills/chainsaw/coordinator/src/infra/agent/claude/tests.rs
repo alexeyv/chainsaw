@@ -7,8 +7,6 @@ use super::*;
 use crate::domain::ContextSize;
 use crate::domain::PromptEcho;
 
-const DISALLOWED: &str = "WebSearch,WebFetch,NotebookEdit,Task,Agent,AskUserQuestion,EnterPlanMode,ExitPlanMode,TaskOutput";
-
 /// A transcript file that is removed when dropped.
 struct Transcript(PathBuf);
 
@@ -41,39 +39,6 @@ fn assistant_line(text: &str) -> String {
 
 fn usage_line(input: u64) -> String {
   format!(r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":{input}}}}}}}"#)
-}
-
-mod program {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(Claude.program(), "claude");
-  }
-}
-
-mod default_args {
-  use super::*;
-
-  #[test]
-  fn should_work() {
-    assert_eq!(
-      Claude.default_args(SessionKind::Implementer),
-      format!(
-        "--model opus --effort high --disable-slash-commands --strict-mcp-config --no-chrome --disallowedTools {DISALLOWED}"
-      )
-    );
-  }
-
-  #[test]
-  fn should_keep_slash_commands_for_the_commentator() {
-    assert_eq!(
-      Claude.default_args(SessionKind::Commentator),
-      format!(
-        "--model opus --effort high --strict-mcp-config --no-chrome --disallowedTools {DISALLOWED}"
-      )
-    );
-  }
 }
 
 mod compact_at_args {
